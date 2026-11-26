@@ -21,6 +21,7 @@ bytes = { workspace = true }
 reqwest = { workspace = true, features = ["multipart"] }
 tracing = { workspace = true }
 rand = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 # start_paused = true in #[tokio::test] requires the test-util feature.

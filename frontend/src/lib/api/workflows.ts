@@ -4,6 +4,7 @@ import type {
   RecoveryExportListResponse,
 } from "../types";
 import type { VoiceCapabilitiesResponse } from "../protocol/VoiceCapabilitiesResponse";
+import type { SynthesiseSpeechRequest } from "../protocol/SynthesiseSpeechRequest";
 import type { CreateScheduleRequest } from "../protocol/CreateScheduleRequest";
 import type { Schedule } from "../protocol/Schedule";
 import { ApiError } from "./error";
@@ -60,6 +61,11 @@ export async function createSchedule(
 export async function fetchVoiceCapabilities(): Promise<VoiceCapabilitiesResponse> {
   const response = await request("/api/voice/capabilities", "GET");
   return response.json() as Promise<VoiceCapabilitiesResponse>;
+}
+
+export async function checkSpeechModel(): Promise<void> {
+  const payload: SynthesiseSpeechRequest = { text: "Speech model check." };
+  await request("/api/voice/speech", "POST", payload);
 }
 
 export async function exportRecoveryBundle(): Promise<Record<string, unknown>> {

@@ -6,6 +6,10 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- A provider whose credential would travel in plain `http://` to an address off this machine is recorded once in the audit trail (`provider_credential_exposure`) and still sent to; its `plaintext_credentials` setting (`warn`, `refuse` or `allow`, set in `config.toml` or through the settings API) refuses such requests instead or sends them without the record. Model discovery follows the same setting, and the record keeps only the base URL's scheme, host and port. Loopback addresses are never affected.
+- Agents can create and edit agent definitions through conversation, making them available in Settings and the new-session picker; each change records the previous and new definition in configuration history.
+- Delegation chains stop at a configurable depth, including cycles (default: four child levels). Settings → Automation edits `sessions.max_delegation_depth`; a refused delegation records its depth reason and returns it to the delegating model.
+
 - `file_write` can append content without rewriting or replacing the existing file.
 - A module a scheduled run, a workflow run or a routed turn delivers to a surface records what delivered it and when, and the surface shows the attribution above the module.
 - Settings has a read-only Channels tab showing channel status, linked chats and unredeemed link codes verbatim with their expiry in local time.
@@ -18,6 +22,7 @@ All notable changes to Swage are documented in this file.
 - Settings edits the web search provider and applies saved changes to new turns.
 - The compaction threshold is configurable: `[context] compaction_threshold = { messages = N }` or `{ tokens = N }`, resolved through the configuration cascade (default: 100 messages). A session that keeps hitting walls — the same tool call failing again and again, or failed tool calls and failed turns piling up across its recent turns, provider timeouts and rate limits excluded — continues on a successor built from a blind diagnosis: separate readers each locate what went wrong in part of the history, a synthesis names the problems, and the successor starts from those notes with only the newest message kept verbatim. Every turn runs on such a successor while the walls remain among the recent turns: a turn whose recent walls are the ones the previous diagnosis answered starts from that diagnosis again, with every message since its split kept verbatim, new walls get a fresh diagnosis, and a turn with no wall left in view gets its full history back. The readers and the synthesis run on the session's model unless `[context] diagnosis_reader_model` or `diagnosis_synthesis_model` names a model entry or alias. The turn-context inspector shows the pass as a compaction with requested strategy `succession-degradation`, its diagnosis recording the walls answered and each model call's model, usage and report. It retains compaction decisions from the first assembly and the successor in pass order, even when their names match. Transient provider failures, including HTTP 5xx responses and malformed streams, do not trigger wall succession; provider refusals of the agent’s request still count as walls. If any diagnosis reader or the synthesis fails or returns an empty report, the turn falls back to the threshold path and compacts only when its context exceeds the threshold, retaining the failed diagnosis and call in its context record. Settings saves reject invalid compaction thresholds and diagnosis model names, including retained references to a removed model, before writing the configuration.
 - Fresh scheduled sessions can run without a topic in the general scope, from Settings, schedule tools, or the API.
+- The instruction a conversation summary is written under is an experimentation location, `prompts.succession_summary`. A session's selection is recorded in the audit trail when it first needs a summary; a session that never needs one records none. A forced variant the location does not register fails the summary pass, with the cause in the turn's context record.
 - The web UI's front door is the recent-sessions list with a **New session** control beneath it: choose a topic or none and the agent to run under, and the composer opens in that scope — the first message creates the conversation, so an abandoned start leaves nothing behind. The topic picker and the top-bar topic switcher are gone; a session's topic (or **General**) is named in the top bar and links to the topic's settings page, which now carries the topic's description, workspace relinking and deletion alongside its workspaces, default surfaces, tags and sessions. Every topic is listed in the settings sections.
 - The shared surface library has its own page (`/library`), reachable from the top bar, the front door and the surfaces pane, where entries are filtered, added to the open session, and removed. Saving or removing an entry broadcasts `library_updated` on the work-surface channel, so open catalogues refresh without a reload.
 - An open surface has an address (`/conversations/{id}/surfaces/{surface_id}`): surfaces can be linked to and restored with the browser's back button. Notes on a module can be edited in place.
@@ -26,8 +31,99 @@ All notable changes to Swage are documented in this file.
 - Sessions with no user or assistant message for a configurable number of days (`[sessions] archive_after_days`, default 7, set under Settings → Automation) are archived out of the recent list. Only a session with a turn executing is exempt; a new turn on an archived session returns it, and archiving cancels nothing.
 - Surfaces belong to the session that created them and stay with its record. A surface can be saved to a shared library with a name, a description of what it does and when to use it, and tags; any session in any topic or the general scope can add a library entry as a surface of its own, receiving the saved content only within the entry's origin topic and the bare shape elsewhere. A topic can designate library entries as defaults that open in each of its new sessions, and carries tags that narrow the catalogue for its sessions. Agents browse the catalogue (descriptions and tags, never content) and add entries through the new `surface_library` tool, and save surfaces through `surface_write`.
 
+
+- A conversation can start without a topic. It runs as a general assistant in the general scope — general memory, a cumulative general knowledge base, its own attachments, ordinary granted tools — and inherits no files, memory or context from any topic; its configuration is Global → Agent, and its orientation says that no topic is selected and no working directory is attached rather than implying an earlier topic is current. The web UI's topic picker offers **Start without a topic**, `POST /api/conversations` creates such a session, and every session-shaped response carries `topic_id` only when the session has one. The general scope's files live under `~/.swage/general/`; it is never listed as a topic and cannot be opened or deleted. The former default topic is gone.
+- Attaching a workspace from a topic's Settings now offers the same file-change and trust choices as the topic picker, and the first attachment becomes the topic's working folder; the attachment list marks which one that is.
+- On Linux, `gateway restart` on a gateway that is the main process of a systemd service now restarts that service and waits for the health endpoint, keeping the service's supervision instead of leaving a detached daemon and a failed unit behind. Per-call overrides such as `--port` are refused for a supervised gateway.
+- A workflow can raise a decision it cannot make itself, naming the question and at least two verdicts it accepts, and park until an agent answers it through a granted tool; an answer outside the accepted set is refused with feedback and the decision keeps waiting, with the raise, the answer, and every refusal made while the decision remains open kept on the run record.
+- The shakedown skill — the detection-only QA campaign that follows a discharged build ledger — now ships with the gateway alongside commission, maestro, and assembly, carrying its driver and judgement waves as workflows started by name.
+- Agents can read which workflow runs in their topic are still going and what each is waiting on through the new `workflow_run_status` tool: every run that has not ended with its undelivered events — a pipeline's pending hold among them — or one named run in any state. The schedule gate's state digest now carries the same open runs and pending events, so a schedule that steers pipelines wakes on accumulated decisions rather than on the clock.
+- A workflow run that ends by any path now leaves a terminal account: how it ended, and a partition of every worker it dispatched into done, failed, cut short, and unsettled, each with the directory its work was left in. A run that never returned also surfaces its completed workers' output as partial results with the reason it produced none, on the run detail, on the run's own view at `/workflow-runs/{id}`, and through the new `workflow_run_account` tool a lead agent can read; the run view loads one coherent record for its account and journal, and the worker directories such an account names are kept, surviving the gateway's shutdown and the next one's startup sweep.
+- Workflow run details now show when each worker started and first produced evidence.
+- Workflow token budgets enforce independent ceilings and closing reserves for each configured provider route; every call, including a declared fallback, is admitted against its provider route's ledger or the run-wide fallback ledger, while recovery preserves the admission already granted to interrupted calls.
+- Workflow scripts can hold a worker open across successive turns — `session()` fixes its agent, model, effort, placement, and requested grants at creation, `send()` gives it another turn on the context it has already built, `staleness()` reports the recorded idle gap against the provider route's own threshold, and `close()` releases it; a run ending by any path closes the workers it still holds, and changing model or effort mid-session is refused so an escalation is always a fresh dispatch. A delegating agent can likewise name a child and come back to it later, landing the new task on that child's own session with everything it was told and answered before.
+- Every workflow agent call is now recorded with the prompt and resolved options each attempt of it was dispatched under, the provider rounds every attempt ran with start, end, and outcome, and a usage record that reads as unavailable with a reason where the provider reported none. Unknown usage marks budget readings incomplete and closes the token dispatch gate instead of being treated as zero spend. A worker the run's own end cut short is recorded as cut short rather than as its own failure, and a call the run's end interrupted keeps that attempt's rounds beside those of the attempt replay dispatched after it. Run detail preserves structured prompt whitespace and wraps long tokens.
+- Images now reach every selected provider protocol that advertises vision, and an image reference that provider cannot resolve is refused before the turn reaches it.
+- Named context assemblies now keep the baseline a session starts with: an element the built-in assembly would have carried is restored when a script leaves it out, unless the script declares the omission and its reason, which the turn's context inspector shows.
+- Workflow fan-in calls can opt into an identified result envelope, preserving each leg's label, phase, successful output, or failure account through parallel and pipeline collapse; malformed identity options fail before dispatch rather than being reported as worker failures.
+- Schema-constrained workers now accept JSON values embedded in prose or Markdown fences and use the final value that fulfils their schema.
+- Workflow run details now report each isolated worker worktree's base and tip commits plus whether it changed or was removed.
+- Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
+- Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
+- Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.
+- Surface template creation records its complete ordered module configuration in the local audit trail.
+- Users and agents can leave durable notes on a surface's modules, appearing on an open surface as they are written and readable by the agent alongside the module they hang on.
+- Work surfaces receive server-wide surface signals over their own listen-only WebSocket, so an open surface stays current whether or not a conversation is selected.
+- Workflow runs now journal their terminal budget balance.
+- Workflows may declare an argument schema in portable metadata; saved runs validate it before starting and workflow listings expose the declared or unconstrained contract.
+- The conversation now rides every work surface: surfaces carry the same live conversation beside them, with earlier conversations picked up and new ones started from the channel itself, so moving between surfaces neither leaves the conversation behind nor resets it.
+- Workspace attachment, trust, and detach controls are now reachable from the selected topic's Settings workspaces section.
+- Shipped development workflows are now syntax-checked at the gate, and the assembly build-and-verify workflow is runnable.
+- Agents can now list the workflows available to their session before starting one.
+- Agents can save and revise named workflow scripts for their topic, versioned alongside operator-authored ones; a workflow authored in a conversation never carries a delivery grant, so it cannot send anything off the machine, and a workflow that already delivers can only be revised by an operator.
+- Asynchronous turn callers can select a configured model for one request, with the effective selection retained in that turn's audit snapshot.
+- Context assembly alternatives can now be configured under `context.alternatives` for controlled selection experiments.
+- The research sweep ships inside a research skill that carries its workflow; its researcher, organiser, and synthesist roles are dispatches inside that workflow rather than agent definitions, so a fresh installation lists only the shipped default agent and no compiled-in workflow catalogue. The workflow listing names each carried workflow's skill in place of the former built-in flag.
+- Knowledge captures made by workflow workers now carry their journalled call's identity, so a sweep interrupted mid-gather resumes without duplicating any source's observation.
+- Research sweeps now author evidence-backed orientation cards during the organising pass and report claims the synthesist withheld for lack of supporting evidence.
+- Research sweeps now derive gathered sources and failures from the knowledge store through a read-only journalled script query.
+- Asynchronous turn callers can provide optional focus instructions for context-compaction summaries, with the instructions retained in the compaction audit record.
+- Operators can inspect recorded configuration changes, assembly decisions, and variant selections in a read-only history pane.
+- Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
+- Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
+- Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
+- Schedules and workflows can deliver output to a surface in their own topic.
+- `LocalStorage` remains the log target, retaining output in the local delivery record.
+- Schedules now record why they made no delivery when overlap policy skips them, gates suppress them, or a run fails before dispatch.
+- New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
+- Agents can now run newly authored workflow source directly without saving or registering it first.
+- Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.
+- Workflow and delegation authors can place individual workers in a chosen working directory or a runtime-provisioned isolated git worktree.
+- Dispatch results and the audit trail now name the directory where each child worker ran.
+- Workflow agent calls now honour per-call reasoning effort and host-enforced timeout options.
+- Workflow scripts can now dispatch ephemeral workers by prompt and model options without naming an agent definition.
+- Skills can carry immediately runnable workflow scripts, with same-named authored workflows taking precedence.
+- Fresh installations discover and activate the shipped development-process skills, with same-named operator skills taking precedence.
+- Models now receive per-model native-harness scaffolds with family fallback, with each scaffold's divergence register recorded.
+- Dispatches can name context elements, variable bindings, and an assembly for the child.
+- Dispatched workers can be given named skills for one workflow or delegation call.
+- Named reusable Markdown context elements now resolve through the global, topic, and agent configuration hierarchy, with live session values rendered into each briefing at composition time.
+- Workflow runs can wait on external events, answered through operator or granted agent posts.
+- Session leads can save named values for their session and use them to fill parameterised context elements at composition time.
+- Fresh installations now include front-loaded orchestration, research sweep, and segment orchestration workflows as immutable built-ins.
+- Settings now lists the effective agent definitions for the selected topic, with read-only source and configuration details for each winner.
+- Settings now lists the selected topic's available slash commands and resolved skills, with read-only detail for each item.
+- New conversations can now choose from the effective agent definitions available to their topic, including the shipped default, whether starting from an existing conversation or an empty topic.
+- Sessions now receive operator guidance from standard `AGENTS.md` files: a global file in the Swage config root and one at the root of each trusted, readable attached workspace, layered after the baseline instructions (global before workspace) and visible in the turn context inspector. Untrusted workspaces contribute nothing.
+- Unattended turns stop after repeated identical failing tool calls and keep the cause. Configure `[tools] max_identical_failures` (default 3, bounded to 1–100).
+- The web UI serves a favicon.
+
+- Long-running orchestration runs can now coordinate dependent tasks with bounded parallelism, worker restatement, iterative verification, and explicit acceptance before results are adopted.
+- Runs now carry decisions and outstanding events between short lead sessions, re-evaluate stale decisions against changed state, and produce a handover when the work budget is exhausted.
+- Workflow runs now retain completion, failure, and escalation updates until a lead wake delivers them, including across gateway restarts, with wake decisions and pending-update counts exposed in run details.
+- Workflow runs can now park during long timer waits, free gateway resources while parked, and resume automatically when due or after a gateway restart.
+- Workflow scripts can now record budget snapshots so budget-based decisions remain consistent when runs replay.
+- Workflow budgets can reserve tokens for closing work, and budget snapshots now show separate working and closing allowances together with whether wind-down has begun.
+- Delegated runs now retain context and effective-permission audit records for later inspection.
+- Workflow scripts can now continue a worker in the same session by reusing the handle returned by an earlier worker call.
+- Turn records now include redacted provider response metadata, including status, request identifiers, stop reasons, usage, and content-block sizes, without retaining response content.
+- Sessions now receive working guidance tailored to the configured model family, with common guidance retained for unrecognised models.
+- The Operator view of everything running stays current without a reload: it re-reads on the gateway's session and workflow-run signals, shows each running session's and run's agent and spawning session, reads a session waiting on the person's approval as "waiting on you", and lists a request waiting on the person as it arrives. Its Stop and Cancel controls wind work down, delegated children included, and a refused Stop or Cancel keeps its reason on screen.
+- `POST /api/conversations/{id}/cancel` stops a conversation's running turn whichever client holds its socket; the web UI's Stop uses it, and a tab that does not hold the socket follows the turn's end through the gateway's session signal.
+
 ### Changed
 
+- The workflow-authoring and project-docs skills are rewritten for any installation. The workflow-authoring skill names no model in its examples (a worker with no `model` runs on the configured default), gives each function's error names, and no longer assumes two model families or the development-process skills are in reach.
+- The shipped default agent's description says what it gives a session: no instructions of its own, with the model and tools the installation's settings provide.
+- The descriptions of the tools an agent works with are rewritten to say what each tool does, what its result carries and what it refuses: the file tools, `shell`, `python_execute`, `url_fetch`, `web_search`, `docs_read`, the memory tools, the browser tools, `agent_definition`, `delegate` and the workflow tools. The compaction strategies' extraction and eviction prompts and the agent runtime's summary prompt are rewritten whole, and each puts the conversation it reads inside named tags. Tools of features not yet released keep their descriptions.
+- Workflows and context assemblies each run in their own V8 isolate, with separate ceilings for its heap and fixed-length buffers and a limit on uninterrupted execution. A workflow that reaches a limit fails and records an `engine_terminated` audit event. An assembly that reaches a limit falls back to the default assembly and records the reason in its context report. Workflow records identify the V8 version. The standard build verifies the pinned V8 archive before linking.
+- The text the gateway itself gives a model is rewritten to say what is wanted and only what holds in every session: the common and family working norms, the orientation, the framing of memory, the memory curator's instructions, the instructions for conversation summaries and stall diagnoses, the note on a shortened tool result, and the lead-in to an active skill. A conversation summary now opens with the rules the user set that are still in force, written as instructions, and a continuing session is told those rules still apply.
+- The supplied and hosted guides explain creating and editing agent definitions in conversation, including the required tool grant, limits and configuration history, alongside the operator API.
+- Anthropic turns without an explicit output limit use the model's documented limit instead of a fixed 4,096 tokens. A limit the request sets is kept, and a model Anthropic does not document falls back to the catalogue's limit.
+- Session orientation lists every readable attached workspace with its path, access and trust. A worker placed inside one sees its placement root, the trust it inherits and its own write access.
+- Each turn tells the agent the current time to the second, separately from the session's start time.
+- Provider settings keep chosen names and unsaved edits, show save status and whether the default model is ready, list model choices in a stable order, and offer existing governed credentials beside a pasted key, explaining when to use each provider kind.
+- Provider settings label each credential by where it is stored. A pasted key rotates only a credential Swage manages, while file and environment credentials say where to update them, and a provider-scoped key appears only for its own provider.
 - The README names Debian/Ubuntu build prerequisites, supported Node versions, and the binary path setup, with frontend install and build commands.
 
 - Provider setup documentation uses governed credentials through Settings → Providers, distinguishes GPT Responses from Chat Completions, and explains model-bound routing and the disabled Codex integration.
@@ -35,6 +131,7 @@ All notable changes to Swage are documented in this file.
 - Browser clicks, typing, selections and scrolling no longer ask for approval by default.
 - Image references accept only `https:` and `data:` schemes by default; the accepted set is configurable through `[attachments]` and Settings, with explained refusals recorded in the audit trail.
 
+- Every scope follows one configuration reload policy. The global layer is the running configuration — loaded when the gateway starts, with its command-line overrides, and replaced by Settings saves — so a hand edit to the global `config.toml` applies at the next start in every session. A topic's or agent's `config.toml` and `instructions/` are read at each turn and overlaid on it, so an edit there applies to the next turn under that scope. Sessions whose topic or agent had a file of its own no longer re-read the global file live, and no longer lose command-line overrides when they do.
 - Swage is licensed under the GNU Affero General Public License, version 3 or any later version (`AGPL-3.0-or-later`), with the full text in `LICENSE` and the licence recorded in every crate and npm package manifest. Pull requests are welcome, contributed under the same licence.
 - A continuation schedule firing during a running turn queues its brief for the next turn, and channel messages for a busy session wait in the same durable queue. The web UI shows queued inputs once, labels them queued, and displays recorded inputs and the drained reply live.
 - A message, channel message or continuation brief reaching an idle session that still has queued messages, as a Stop leaves them, joins the queue and runs after them in the same turn.
@@ -43,6 +140,7 @@ All notable changes to Swage are documented in this file.
 - The operator history names each changed configuration field with its prior and new value — nested settings by their path, such as Context › Assembly — and keeps the whole prior and new objects collapsed one click away, so variant selections and assembly decisions sit close below.
 - Per-turn sandboxing is on by default, so bubblewrap is a required install prerequisite; a topic opts out with `[sandbox] enabled = false`, and its local gateway turns then record a degraded execution boundary unless the install declares its own boundary.
 - In attended sessions, `shell`, `file_edit`, `file_write`, `python_execute`, `browser_click`, `browser_type`, `browser_select` and `browser_scroll` ask for approval before each call by default; a `require_approval` list in configuration replaces that default. Unattended sessions still run on their grants alone.
+- Per-turn sandboxing is on by default, so bubblewrap is a required install prerequisite; a topic opts out with `[sandbox] enabled = false`, and its local gateway turns then record a degraded execution boundary.
 - In attended sessions, `shell`, `file_edit`, `file_write` and `python_execute` ask for approval before each call by default; a `require_approval` list in configuration replaces that default. Unattended sessions still run on their grants alone.
 - The built-in Codex app server (`protocol = "codex"`) is temporarily disabled: configuration naming it does not load, and Settings does not offer it as a provider kind, until Swage can ask the operator to approve the commands and file changes it makes. Codex models stay reachable through any OpenAI-protocol provider.
 - Unused keys in `[tools.search]` are refused at configuration load.
@@ -54,11 +152,84 @@ All notable changes to Swage are documented in this file.
 - The container is now called a topic and the shared work view a surface everywhere — storage, API routes, tools, events, config directories (`~/.swage/topics/`), UI, and documentation. No aliases are retained, so stores and config directories from before this change are not read; private alpha starts from a fresh rebuild.
 - Swage refuses to open a database whose schema differs from its own, including an older store it previously upgraded in place, and names the data root to rebuild; data migration is not supported during the private alpha.
 
+
+- The shipped development-process pipelines now hold their workers across turns: build-verify and estate-unit keep one builder from restatement through build, fix rounds and a warm landing, docs-update keeps its writer likewise, and each keeps its cross-family verifier for every re-verification, so a fix round returns to the worker that holds what it built and a re-verification to the reader that derived the claims; a held worker's effort is fixed at creation, so fix rounds run at the build pin and escalation is a park and a re-brief. Every dispatch in every shipped workflow — the assembly pipelines, the commission and shakedown waves, the research sweep and the teardown audit — now writes a `[dispatch]` line to the run journal saying whether it continued a held worker or re-briefed a fresh one and why, with the staleness reading where the choice turned on it. The workflow-authoring skill documents the held-worker surface and the continue-or-re-brief rule.
+- The `workspace.path` key is removed; workspace attachments and managed scratch roots define tool scope, and local execution is no longer listed as an attached device.
+- Presence APIs and protocol types now consistently identify attached devices; the former machine-named routes and fields are removed in this private alpha.
+- Context compaction now uses provider-native prompt token counts when available, while retaining conservative local screening and estimate fallback when counting is unavailable.
+- Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
+- JavaScript context assemblies now expose `render()` only on template-backed briefing elements; calling it on literal elements fails the script and records the fallback to the default assembly.
+- Gateway lifecycle defaults now use the descriptive `set-defaults` and `clear-defaults` commands; the terminal client is `chat`, and shell scripts are produced by `generate-completion`.
+- Anthropic requests now use the native beta endpoint.
+- Client-facing settings, asynchronous turns, context assembly reports, materials, attachments, and recovery listings now use the shared Rust wire contract and its generated TypeScript and JSON Schema projections.
+- Delivery-log entries now identify the schedule run and turn that produced them when that attribution is available.
+- Unknown keys under `[generation.presets.*]` and `[models.entries.*.capabilities]` now fail configuration loading instead of being ignored. Most other sections already rejected unknown keys through validation and still do; per-model pricing entries remain lenient.
+- Tool approval prompting now defaults to disabled and remains available through explicit operator configuration.
+- Succession records every diagnosis and summary model call, including its stage, usage, cost and failure, in the compaction report.
+
+- Structured-output turns now provide the configured JSON Schema to the model on initial requests and validation retries, keeping responses aligned with the declared shape.
+- Session orientation now explains what activity is recorded and that managed secret values are redacted from the local record.
+- Interrupted timer waits now resume with their remaining duration instead of restarting from the full delay.
+
 ### Removed
 
 - The terminal client (`swage chat`) and its `swage-tui` crate; the web UI and desktop shell are the conversation interfaces.
+- The conversation socket's `cancel` frame; clients stop a turn through `POST /api/conversations/{id}/cancel`.
 
 ### Fixed
+
+- `tool_result_read` masks registered secret values in the stored result it returns, as the conversation's history does, instead of reading them back whole.
+- An error that ends no turn — a message that could not be queued, a skill or approval request the gateway could not carry out — no longer marks the running request failed, and a gateway shutdown shows an unanswered request as interrupted, as the record says.
+- The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.
+- The orientation gives a registered secret's reference as `secret://<backend>/<id>`, the form the gateway resolves, where it gave `secret://<id>`, which was refused.
+- The workflow tools no longer tell the agent to activate the workflow-authoring skill, which only the person can do: they name the skill as the catalogue lists it and the hosted `workflow-engine` document.
+- `memory_write`'s description no longer repeats the curator's rules, which were untrue of a fact given in Settings.
+- The orientation's workspace lines no longer call each folder "trusted": only a trusted folder is ever listed, so the word told a session nothing.
+- The memory curator's own session is no longer told that it cannot write memory: a session offered `memory_write` is told it keeps memory.
+- Failed settings saves leave configuration, managed credentials and the active runtime unchanged. History distinguishes absent values from strings and identifies its audit-event and saved-context sources.
+- `file_edit` refuses an ambiguous passage whose occurrences overlap, rather than replacing one of them.
+- Shortened tool results tell later turns that the earlier result was delivered whole and identify a retrieval route when one is available.
+- Results recovered with tool_result_read remain available in later conversation history, and tool-call displays distinguish previews from full replays.
+- Tool-call arguments can be inspected as readable values, including the text changed by file_edit.
+- Fenced code in assistant replies stays readable and preserves its original text when conversations are reopened, without literal highlighting markup or repeated escaping.
+- Plain-text assistant replies keep an 80-character prose measure while streaming and after completion.
+- Session previews show readable HTML text instead of raw tags.
+- Conversation and surface markdown tables share consistent styling with visible cell boundaries.
+- Failed webhooks and automated turns without a reply now report delivery or runtime failures instead of validation errors. Schedule delivery messages name the failed target without repeating the reason; retry behaviour is unchanged.
+- A chat turn interrupted while it waits for a delegated agent, or while recording that agent's result, resumes after a gateway restart instead of losing its reply or stopping the gateway from starting. The resumed reply stays in its originating chat and survives further restarts when batched with a scheduled brief, and later tool results no longer clear the pending delegation. A reconstructed child result still passes the gateway's message-send hooks; if one refuses it, the parent resumes with a notice of the child's fate that carries neither the refused output nor the hook's reason, which stays in the gateway log.
+- Memory notice links open their page even when a curator instruction finishes while the page is loading.
+- Links to app pages in conversation messages navigate within the app instead of reloading it.
+- Topic workspace lists no longer show an empty-folder message while an attached folder is still loading.
+- Retry in topic settings reloads an unavailable surface library.
+- Tool-result displays keep all of a JSON file's content when it contains an `output` key.
+- Conversation failure notices name the model and provider of the turn that failed, including a turn queued behind a running response, keep identifiers' case, put diagnostics behind a disclosure, and offer Retry and a link to provider settings.
+- Opening provider settings directly keeps the app's navigation, and unsaved provider edits stay protected after switching settings tabs.
+- A newly stored provider key is labelled correctly, and can be rotated, without reloading Settings.
+- Speech synthesis is advertised only after a successful speech request, and a failed request makes it unavailable with a reason. Voice Settings offers a speech-model check and a retry after correcting the model or provider.
+- New topic sessions select the topic’s configured default model, including API requests without a model; topic settings show the effective default and fresh composers preselect it.
+- A topic whose configuration cannot be read still appears in the topic list, and its composer offers no model, instead of the whole list failing and the web UI failing to load.
+- Topic settings distinguish loading from an empty workspace list and offer a retry after any topic-settings load failure.
+- Long topic names use a compact heading so workspace controls stay in view.
+- Tool results display readable output, including JSON embedded in quoted text, with raw envelopes behind a disclosure.
+- Tool-call headers show file-edit paths and workflow names, with readable object and array fallbacks.
+- Degradation-triggered succession carries established results, completed tool outcomes and current work alongside its diagnosis, including when the diagnosis is reused on later turns.
+- Runtime fallback compaction keeps tool calls with their results across summarisation and both truncation tiers, preventing orphaned results in later model requests.
+- Anthropic messages completions accept thinking blocks alongside text, so conversation summaries and degradation diagnosis calls can decode the proxy’s responses.
+
+- The published settings schemas require a delegation depth of at least one, matching settings validation.
+- Delegated sessions keep their chain depth and creation-time limit on later turns and named continuations; changed limits apply to fresh chains.
+- External agent messages refuse delegation beyond the sender’s chain limit before creating a child, and record the depth reason.
+- Automation reports invalid delegation depths without saving or replacing the entered value.
+- Externally started delegates honour their actual depth and the initiating agent's delegation limit.
+- Delegated children resolve default effort through their selected provider and retain that value for continuations.
+- A failed task-prompt selection audit insert allows the delegated child to run with the definition's default prompt.
+- Named child continuations retain their creation-time model, effort and prompt selection, even after forced pins change. Child selection records belong to actual child turns.
+
+- Memory page reads and notice links keep the latest selection when responses arrive out of order, including reads overtaken by a curator edit.
+- Successful memory curation keeps its reply and updated page when the following listing refresh fails; the refresh error names its scope.
+- A general memory page open in Settings updates when an instruction sent to a topic changes it.
+- Memory listings remain visible when another scope fails to load, with failures shown beside the affected scope.
+- Opening a memory page selects that page's scope for curator instructions, including pages opened from notices.
 
 - Topic tags, library tags and the library catalogue's tag filter follow one rule: tags are trimmed, lower-cased and kept once, so a tag saved in any spelling matches a filter in any other. Annotation tags keep their case.
 
@@ -209,88 +380,6 @@ All notable changes to Swage are documented in this file.
 - Answering a workflow's decision and cancelling the run it waits on now settle against each other: exactly one of them takes effect, the loser reports the state the winner left and starts nothing, an accepted answer and the parked run's readiness to act on it are recorded together so a crash between them cannot strand the verdict, and a cancelled run launches no engine afterwards.
 - A stale cancellation that loses to a resumed workflow run now withdraws only its own worktree-retention claim, so the winning run's recoverable work remains available.
 
-### Added
-
-- A conversation can start without a topic. It runs as a general assistant in the general scope — general memory, a cumulative general knowledge base, its own attachments, ordinary granted tools — and inherits no files, memory or context from any topic; its configuration is Global → Agent, and its orientation says that no topic is selected and no working directory is attached rather than implying an earlier topic is current. The web UI's topic picker offers **Start without a topic**, `POST /api/conversations` creates such a session, and every session-shaped response carries `topic_id` only when the session has one. The general scope's files live under `~/.swage/general/`; it is never listed as a topic and cannot be opened or deleted. The former default topic is gone.
-- Attaching a workspace from a topic's Settings now offers the same file-change and trust choices as the topic picker, and the first attachment becomes the topic's working folder; the attachment list marks which one that is.
-- On Linux, `gateway restart` on a gateway that is the main process of a systemd service now restarts that service and waits for the health endpoint, keeping the service's supervision instead of leaving a detached daemon and a failed unit behind. Per-call overrides such as `--port` are refused for a supervised gateway.
-- A workflow can raise a decision it cannot make itself, naming the question and at least two verdicts it accepts, and park until an agent answers it through a granted tool; an answer outside the accepted set is refused with feedback and the decision keeps waiting, with the raise, the answer, and every refusal made while the decision remains open kept on the run record.
-- The shakedown skill — the detection-only QA campaign that follows a discharged build ledger — now ships with the gateway alongside commission, maestro, and assembly, carrying its driver and judgement waves as workflows started by name.
-- Agents can read which workflow runs in their topic are still going and what each is waiting on through the new `workflow_run_status` tool: every run that has not ended with its undelivered events — a pipeline's pending hold among them — or one named run in any state. The schedule gate's state digest now carries the same open runs and pending events, so a schedule that steers pipelines wakes on accumulated decisions rather than on the clock.
-- A workflow run that ends by any path now leaves a terminal account: how it ended, and a partition of every worker it dispatched into done, failed, cut short, and unsettled, each with the directory its work was left in. A run that never returned also surfaces its completed workers' output as partial results with the reason it produced none, on the run detail, on the run's own view at `/workflow-runs/{id}`, and through the new `workflow_run_account` tool a lead agent can read; the run view loads one coherent record for its account and journal, and the worker directories such an account names are kept, surviving the gateway's shutdown and the next one's startup sweep.
-- Workflow run details now show when each worker started and first produced evidence.
-- Workflow token budgets enforce independent ceilings and closing reserves for each configured provider route; every call, including a declared fallback, is admitted against its provider route's ledger or the run-wide fallback ledger, while recovery preserves the admission already granted to interrupted calls.
-- Workflow scripts can hold a worker open across successive turns — `session()` fixes its agent, model, effort, placement, and requested grants at creation, `send()` gives it another turn on the context it has already built, `staleness()` reports the recorded idle gap against the provider route's own threshold, and `close()` releases it; a run ending by any path closes the workers it still holds, and changing model or effort mid-session is refused so an escalation is always a fresh dispatch. A delegating agent can likewise name a child and come back to it later, landing the new task on that child's own session with everything it was told and answered before.
-- Every workflow agent call is now recorded with the prompt and resolved options each attempt of it was dispatched under, the provider rounds every attempt ran with start, end, and outcome, and a usage record that reads as unavailable with a reason where the provider reported none. Unknown usage marks budget readings incomplete and closes the token dispatch gate instead of being treated as zero spend. A worker the run's own end cut short is recorded as cut short rather than as its own failure, and a call the run's end interrupted keeps that attempt's rounds beside those of the attempt replay dispatched after it. Run detail preserves structured prompt whitespace and wraps long tokens.
-- Images now reach every selected provider protocol that advertises vision, and an image reference that provider cannot resolve is refused before the turn reaches it.
-- Named context assemblies now keep the baseline a session starts with: an element the built-in assembly would have carried is restored when a script leaves it out, unless the script declares the omission and its reason, which the turn's context inspector shows.
-- Workflow fan-in calls can opt into an identified result envelope, preserving each leg's label, phase, successful output, or failure account through parallel and pipeline collapse; malformed identity options fail before dispatch rather than being reported as worker failures.
-- Schema-constrained workers now accept JSON values embedded in prose or Markdown fences and use the final value that fulfils their schema.
-- Workflow run details now report each isolated worker worktree's base and tip commits plus whether it changed or was removed.
-- Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
-- Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
-- Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.
-- Surface template creation records its complete ordered module configuration in the local audit trail.
-- Users and agents can leave durable notes on a surface's modules, appearing on an open surface as they are written and readable by the agent alongside the module they hang on.
-- Work surfaces receive server-wide surface signals over their own listen-only WebSocket, so an open surface stays current whether or not a conversation is selected.
-- Workflow runs now journal their terminal budget balance.
-- Workflows may declare an argument schema in portable metadata; saved runs validate it before starting and workflow listings expose the declared or unconstrained contract.
-- The conversation now rides every work surface: surfaces carry the same live conversation beside them, with earlier conversations picked up and new ones started from the channel itself, so moving between surfaces neither leaves the conversation behind nor resets it.
-- Workspace attachment, trust, and detach controls are now reachable from the selected topic's Settings workspaces section.
-- Shipped development workflows are now syntax-checked at the gate, and the assembly build-and-verify workflow is runnable.
-- Agents can now list the workflows available to their session before starting one.
-- Agents can save and revise named workflow scripts for their topic, versioned alongside operator-authored ones; a workflow authored in a conversation never carries a delivery grant, so it cannot send anything off the machine, and a workflow that already delivers can only be revised by an operator.
-- Asynchronous turn callers can select a configured model for one request, with the effective selection retained in that turn's audit snapshot.
-- Context assembly alternatives can now be configured under `context.alternatives` for controlled selection experiments.
-- The research sweep ships inside a research skill that carries its workflow; its researcher, organiser, and synthesist roles are dispatches inside that workflow rather than agent definitions, so a fresh installation lists only the shipped default agent and no compiled-in workflow catalogue. The workflow listing names each carried workflow's skill in place of the former built-in flag.
-- Knowledge captures made by workflow workers now carry their journalled call's identity, so a sweep interrupted mid-gather resumes without duplicating any source's observation.
-- Research sweeps now author evidence-backed orientation cards during the organising pass and report claims the synthesist withheld for lack of supporting evidence.
-- Research sweeps now derive gathered sources and failures from the knowledge store through a read-only journalled script query.
-- Asynchronous turn callers can provide optional focus instructions for context-compaction summaries, with the instructions retained in the compaction audit record.
-- Operators can inspect recorded configuration changes, assembly decisions, and variant selections in a read-only history pane.
-- Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
-- Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
-- Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
-- Schedules and workflows can deliver output to a surface in their own topic.
-- `LocalStorage` remains the log target, retaining output in the local delivery record.
-- Schedules now record why they made no delivery when overlap policy skips them, gates suppress them, or a run fails before dispatch.
-- New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
-- Agents can now run newly authored workflow source directly without saving or registering it first.
-- Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.
-- Workflow and delegation authors can place individual workers in a chosen working directory or a runtime-provisioned isolated git worktree.
-- Dispatch results and the audit trail now name the directory where each child worker ran.
-- Workflow agent calls now honour per-call reasoning effort and host-enforced timeout options.
-- Workflow scripts can now dispatch ephemeral workers by prompt and model options without naming an agent definition.
-- Skills can carry immediately runnable workflow scripts, with same-named authored workflows taking precedence.
-- Fresh installations discover and activate the shipped development-process skills, with same-named operator skills taking precedence.
-- Models now receive per-model native-harness scaffolds with family fallback, with each scaffold's divergence register recorded.
-- Dispatches can name context elements, variable bindings, and an assembly for the child.
-- Dispatched workers can be given named skills for one workflow or delegation call.
-- Named reusable Markdown context elements now resolve through the global, topic, and agent configuration hierarchy, with live session values rendered into each briefing at composition time.
-- Workflow runs can wait on external events, answered through operator or granted agent posts.
-- Session leads can save named values for their session and use them to fill parameterised context elements at composition time.
-- Fresh installations now include front-loaded orchestration, research sweep, and segment orchestration workflows as immutable built-ins.
-- Settings now lists the effective agent definitions for the selected topic, with read-only source and configuration details for each winner.
-- Settings now lists the selected topic's available slash commands and resolved skills, with read-only detail for each item.
-- New conversations can now choose from the effective agent definitions available to their topic, including the shipped default, whether starting from an existing conversation or an empty topic.
-- Sessions now receive operator guidance from standard `AGENTS.md` files: a global file in the Swage config root and one at the root of each trusted, readable attached workspace, layered after the baseline instructions (global before workspace) and visible in the turn context inspector. Untrusted workspaces contribute nothing.
-
-### Changed
-
-- The shipped development-process pipelines now hold their workers across turns: build-verify and estate-unit keep one builder from restatement through build, fix rounds and a warm landing, docs-update keeps its writer likewise, and each keeps its cross-family verifier for every re-verification, so a fix round returns to the worker that holds what it built and a re-verification to the reader that derived the claims; a held worker's effort is fixed at creation, so fix rounds run at the build pin and escalation is a park and a re-brief. Every dispatch in every shipped workflow — the assembly pipelines, the commission and shakedown waves, the research sweep and the teardown audit — now writes a `[dispatch]` line to the run journal saying whether it continued a held worker or re-briefed a fresh one and why, with the staleness reading where the choice turned on it. The workflow-authoring skill documents the held-worker surface and the continue-or-re-brief rule.
-- The `workspace.path` key is removed; workspace attachments and managed scratch roots define tool scope, and local execution is no longer listed as an attached device.
-- Presence APIs and protocol types now consistently identify attached devices; the former machine-named routes and fields are removed in this private alpha.
-- Context compaction now uses provider-native prompt token counts when available, while retaining conservative local screening and estimate fallback when counting is unavailable.
-- Async turn submissions now reject unrecognised request fields instead of silently ignoring them.
-- JavaScript context assemblies now expose `render()` only on template-backed briefing elements; calling it on literal elements fails the script and records the fallback to the default assembly.
-- Gateway lifecycle defaults now use the descriptive `set-defaults` and `clear-defaults` commands; the terminal client is `chat`, and shell scripts are produced by `generate-completion`.
-- Anthropic requests now use the native beta endpoint.
-- Client-facing settings, asynchronous turns, context assembly reports, materials, attachments, and recovery listings now use the shared Rust wire contract and its generated TypeScript and JSON Schema projections.
-- Delivery-log entries now identify the schedule run and turn that produced them when that attribution is available.
-- Unknown keys under `[generation.presets.*]` and `[models.entries.*.capabilities]` now fail configuration loading instead of being ignored. Most other sections already rejected unknown keys through validation and still do; per-model pricing entries remain lenient.
-- Tool approval prompting now defaults to disabled and remains available through explicit operator configuration.
-
-### Fixed
 
 - Workflow calls that name an unknown model now fail at that call instead of silently using the default model.
 - Workflow call author errors now fail before a worker or child workflow starts, and propagate out of parallel and pipeline rather than being reported as a failed worker slot.
@@ -367,29 +456,38 @@ All notable changes to Swage are documented in this file.
 - Switching topics no longer carries an unavailable agent into a new conversation.
 - A temporary agent-inventory failure at startup no longer hides the available gateway.
 - Streamed tool calls now remain attached to their assistant turn after completion and appear before the response both immediately and after reloading conversation history.
-
-## 0.2.0 — 2026-08-13
-
-### Added
-
-- Long-running orchestration runs can now coordinate dependent tasks with bounded parallelism, worker restatement, iterative verification, and explicit acceptance before results are adopted.
-- Runs now carry decisions and outstanding events between short lead sessions, re-evaluate stale decisions against changed state, and produce a handover when the work budget is exhausted.
-- Workflow runs now retain completion, failure, and escalation updates until a lead wake delivers them, including across gateway restarts, with wake decisions and pending-update counts exposed in run details.
-- Workflow runs can now park during long timer waits, free gateway resources while parked, and resume automatically when due or after a gateway restart.
-- Workflow scripts can now record budget snapshots so budget-based decisions remain consistent when runs replay.
-- Workflow budgets can reserve tokens for closing work, and budget snapshots now show separate working and closing allowances together with whether wind-down has begun.
-- Delegated runs now retain context and effective-permission audit records for later inspection.
-- Workflow scripts can now continue a worker in the same session by reusing the handle returned by an earlier worker call.
-- Turn records now include redacted provider response metadata, including status, request identifiers, stop reasons, usage, and content-block sizes, without retaining response content.
-- Sessions now receive working guidance tailored to the configured model family, with common guidance retained for unrecognised models.
-
-### Changed
-
-- Structured-output turns now provide the configured JSON Schema to the model on initial requests and validation retries, keeping responses aligned with the declared shape.
-- Session orientation now explains what activity is recorded and that managed secret values are redacted from the local record.
-- Interrupted timer waits now resume with their remaining duration instead of restarting from the full delay.
-
-### Fixed
+- Conversation connections recover after a gateway restart, explain when another tab owns the conversation and how to retry, clear that warning once reconnected, distinguish that refusal from transport loss, keep a running turn when another tab refuses a reconnect, and ignore late events from sockets replaced during navigation.
+- Missing or invalid conversations stop connection retries with an explanation and Retry, while gateway transport failures continue to reconnect.
+- Messages sent while a conversation connection opens report a delivery failure if another tab refuses ownership, ending the local waiting turn.
+- Deep-linked conversations stay connected when their scope’s session list fails to load.
+- Switching session scope clears the sidebar immediately and ignores older list responses.
+- General sessions show “General” in the header; named topics keep their topic label.
+- Selecting another session prevents an outstanding creation response from changing the conversation or URL.
+- Conversation navigation and creation failures show their own recoverable errors, including the gateway’s error code and message, while the current conversation remains available.
+- The session-start topic selector and the recent-session topic filter can search large topic catalogues.
+- Tool records and completion events distinguish operation failure, refusal, cancellation with unconfirmed completion, and validation after execution. Signal-terminated shell commands report failure; approval feedback keeps whether execution began. Model-visible errors state when the operation ran before its result was rejected, or may have run, and keep the source detail and advice.
+- Approval expiry under the interrupt policy records an unexecuted, expired tool call and names the timeout in live notices and replay; it is not reported as a person stopping the turn.
+- Stop keeps calls and their turn cancelled in live views, conversation readback and subsequent context.
+- Approval decisions keep their waiter after a failed settlement, honour accepted answers when timers are ready, and apply the configured expiry policy through both client routes.
+- Failed turns keep their cause in polling, history and queued schedule records. Provider overload remains distinct from rate limiting.
+- Empty browser scroll references and workflow name or source arguments are rejected before they are used.
+- A diagnosis that reaches its output limit is recorded as incomplete, and the session uses threshold succession without carrying the truncated synthesis.
+- A turn's context describes only the tools that turn is offered: memory guidance, the orientation's preferred tools and the surface tool descriptions no longer name tools or operations the session cannot use.
+- Installation refuses binding flags without `--lan`, prints IPv6 addresses correctly, directs ephemeral-port users to status, keeps unspecified host, port and configuration defaults, and restarts only a gateway confirmed healthy and running.
+- Settings → Channels issues link codes for the selected integration and topic, or unscoped in General, names that destination before issuance, and records issuance in the local audit trail without exposing the code.
+- Channel link codes show instructions for their own integration; Telegram codes include the complete `/link` command.
+- Inputs queued while a session is busy keep their arrival order, including inbox arrivals whose destination resolved later.
+- Run pages show readable local times with exact timestamps available on hover, and completed provider rounds show their elapsed seconds.
+- Worker cards show status, model, effort, placement and provider-round count before a collapsed, expandable briefing.
+- Run pages require a recorded timer entry before showing a timer wake, label decision holds explicitly, and keep multiline script errors under Error details.
+- Gateways bound to a LAN address stop gracefully with `swage gateway stop`; refused shutdown requests report their reason instead of calling the gateway unresponsive.
+- Settings keeps its heading, section navigation and save feedback visible while its fields scroll.
+- Settings save feedback is quiet and transient, and says that saved changes, including Sandbox, apply to new turns.
+- Automation settings name every input for assistive technology, with visible labels for context, approval and permission fields and seconds stated for both timeouts.
+- Settings refuses context assembly names absent from every known global, topic and agent hierarchy, naming the unknown assembly before saving.
+- Long sessions no longer fail ordinary file and shell calls with "missing required field" after the model copies earlier tool calls from its history.
+- Interrupted sandbox IPC reads retain partial frames, so the next call can complete the frame without corrupting the connection.
+- Sandboxed shell commands honour `shell_timeout_secs` even after closing their output streams, report that limit when they time out, and leave later calls receiving their own replies.
 
 - The conversation composer now reflects newly saved provider and model settings without requiring a surface reload.
 - Fresh-session schedules can now use the calling conversation's topic without requiring its UUID.

@@ -346,11 +346,15 @@
             "format": "date-time",
             "type": "string"
           },
+          "integration": {
+            "type": "string"
+          },
           "link_code": {
             "type": "string"
           }
         },
         "required": [
+          "integration",
           "link_code",
           "expires_at"
         ],
@@ -550,19 +554,6 @@
             "type": "object"
           },
           {
-            "description": "Cancel the currently active turn.",
-            "properties": {
-              "type": {
-                "const": "cancel",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type"
-            ],
-            "type": "object"
-          },
-          {
             "description": "Subscribe to one or more observability channels by name.\n\nValid channel names: `\"context\"`, `\"tools\"`. Unknown names are silently\nignored so forward-compatible clients do not break on older servers.",
             "properties": {
               "channels": {
@@ -675,6 +666,13 @@
               "null"
             ]
           },
+          "calls": {
+            "description": "Every model call this succession pass made, in order: readers,\nsynthesis, then summary. A reused diagnosis adds no reader or\nsynthesis calls. Ordinary succession records its summary here too.",
+            "items": {
+              "$ref": "#/components/schemas/SuccessionCall"
+            },
+            "type": "array"
+          },
           "diagnosis": {
             "anyOf": [
               {
@@ -684,7 +682,7 @@
                 "type": "null"
               }
             ],
-            "description": "How a successor built for a stalled session got its summary: the\nwalls it answers and the model calls that diagnosed them."
+            "description": "The walls a successor built for a stalled session answers and the\ndiagnosis it carries."
           },
           "element": {
             "type": "string"
@@ -746,7 +744,8 @@
           "actual_strategy",
           "messages_removed",
           "tokens_before",
-          "tokens_after"
+          "tokens_after",
+          "calls"
         ],
         "type": "object"
       },
@@ -1118,6 +1117,16 @@
           "last_activity": {
             "format": "date-time",
             "type": "string"
+          },
+          "latest_turn_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnState"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "message_preview": {
             "type": [
@@ -1731,66 +1740,9 @@
           }
         ]
       },
-      "DiagnosisCall": {
-        "description": "One model call a diagnosis made.",
-        "properties": {
-          "cost": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "failure_reason": {
-            "description": "Why the call failed, when it did.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "input_tokens": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "model": {
-            "description": "The provider-facing model id the call was sent to.",
-            "type": "string"
-          },
-          "output_tokens": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "report": {
-            "description": "What a reader reported. A synthesis's output is the record's\n`synthesis`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "stage": {
-            "$ref": "#/components/schemas/DiagnosisStage"
-          }
-        },
-        "required": [
-          "stage",
-          "model",
-          "input_tokens",
-          "output_tokens"
-        ],
-        "type": "object"
-      },
       "DiagnosisRecord": {
         "description": "The diagnosis behind a degradation-triggered successor, recorded so the\nassembly report alone reconstructs the pass.",
         "properties": {
-          "calls": {
-            "description": "The model calls this turn made for the diagnosis, readers first and\nthe synthesis last; empty when an earlier turn's diagnosis was reused.",
-            "items": {
-              "$ref": "#/components/schemas/DiagnosisCall"
-            },
-            "type": "array"
-          },
           "reused_from_turn": {
             "description": "The turn whose recorded diagnosis this successor carries again,\nwhen the walls had not changed since.",
             "format": "uuid",
@@ -1820,25 +1772,9 @@
         },
         "required": [
           "signal",
-          "walls",
-          "calls"
+          "walls"
         ],
         "type": "object"
-      },
-      "DiagnosisStage": {
-        "description": "Which part of a diagnosis a model call was.",
-        "oneOf": [
-          {
-            "const": "reader",
-            "description": "A blind reader locating where one slice of the history went wrong.",
-            "type": "string"
-          },
-          {
-            "const": "synthesis",
-            "description": "The synthesis naming the problems from the readers' reports.",
-            "type": "string"
-          }
-        ]
       },
       "DiscoveredModel": {
         "properties": {
@@ -2147,6 +2083,16 @@
           {
             "const": "provider_runtime_unavailable",
             "description": "The provider runtime could not be started or reached.",
+            "type": "string"
+          },
+          {
+            "const": "delivery_failed",
+            "description": "The gateway could not deliver output to its destination.",
+            "type": "string"
+          },
+          {
+            "const": "runtime_error",
+            "description": "Automated execution did not produce its required result.",
             "type": "string"
           },
           {
@@ -2507,6 +2453,27 @@
         },
         "required": [
           "entries"
+        ],
+        "type": "object"
+      },
+      "ManagedSecretEncryptionDiagnostics": {
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "key_source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "detail"
         ],
         "type": "object"
       },
@@ -2930,6 +2897,15 @@
             ],
             "description": "The model's effort control, when the catalogue declares one; absent,\nthe provider adapter's declaration for the models it serves applies."
           },
+          "output_limit": {
+            "description": "The most output tokens one response may carry, when the catalogue\ndeclares it; absent, the provider adapter's account for the models it\nserves applies, and a model neither declares takes the adapter's\nfloor. A caller's own `max_tokens` is sent as it is either way.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "reasoning_replay": {
             "default": false,
             "type": "boolean"
@@ -3209,6 +3185,15 @@
         ],
         "type": "object"
       },
+      "PlaintextCredentialPolicy": {
+        "description": "What a provider does with a request that would carry its credential over\nplain `http://` to an address that is not loopback: refuse every request,\nsend after one recorded warning, or send silently.",
+        "enum": [
+          "refuse",
+          "warn",
+          "allow"
+        ],
+        "type": "string"
+      },
       "PostWorkflowRunEventRequest": {
         "properties": {
           "kind": {
@@ -3417,8 +3402,27 @@
               "null"
             ]
           },
+          "display_name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "has_credential": {
             "type": "boolean"
+          },
+          "plaintext_credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaintextCredentialPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The provider's plaintext-credential policy; `warn` when unset."
           },
           "protocol": {
             "$ref": "#/components/schemas/ProviderProtocol"
@@ -3606,6 +3610,10 @@
               "null"
             ]
           },
+          "awaiting_approval": {
+            "description": "The running turn is held on a request only the person can answer.",
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -3625,6 +3633,16 @@
             "description": "When the latest user or assistant message landed — the list's order.",
             "format": "date-time",
             "type": "string"
+          },
+          "latest_turn_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnState"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "message_preview": {
             "type": [
@@ -3656,7 +3674,8 @@
           "created_at",
           "last_activity",
           "has_interrupted_turn",
-          "has_running_turn"
+          "has_running_turn",
+          "awaiting_approval"
         ],
         "type": "object"
       },
@@ -3977,6 +3996,25 @@
               "string",
               "null"
             ]
+          },
+          "display_name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plaintext_credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaintextCredentialPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The provider's plaintext-credential policy; left out, the running\nvalue stands (`warn` for a new provider)."
           },
           "protocol": {
             "$ref": "#/components/schemas/ProviderProtocol"
@@ -4610,6 +4648,95 @@
         ],
         "type": "object"
       },
+      "SecretListResponse": {
+        "properties": {
+          "managed_backend": {
+            "$ref": "#/components/schemas/ManagedSecretEncryptionDiagnostics"
+          },
+          "secrets": {
+            "items": {
+              "$ref": "#/components/schemas/SecretResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "secrets",
+          "managed_backend"
+        ],
+        "type": "object"
+      },
+      "SecretResponse": {
+        "properties": {
+          "backend_kind": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "material_kind": {
+            "type": "string"
+          },
+          "metadata": true,
+          "name": {
+            "type": "string"
+          },
+          "owner_kind": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          },
+          "revealed_value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revoked_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope_kind": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "material_kind",
+          "owner_kind",
+          "backend_kind",
+          "scope_kind",
+          "reference",
+          "metadata",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
       "SendMessageRequest": {
         "properties": {
           "correlation_id": {
@@ -4720,6 +4847,16 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "execution": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ToolExecution"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "parent_call_id": {
                 "description": "call_id of the enclosing tool if this is a sub-tool invocation.\n\nOmitted from the serialised JSON when None.",
                 "type": [
@@ -4822,6 +4959,42 @@
             "required": [
               "type",
               "entry_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A workflow run started, parked on a durable wait, or ended. Views of\nrunning work refetch; the event is the signal, not the content.",
+            "properties": {
+              "run_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "workflow_run_updated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A session row may have changed or entered or left a list. Refetch\nsession lists to read the current rows from the gateway.",
+            "properties": {
+              "session_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "session_updated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
             ],
             "type": "object"
           },
@@ -5112,6 +5285,9 @@
                 },
                 "type": "array"
               },
+              "failure_message": {
+                "type": "string"
+              },
               "turn_id": {
                 "format": "uuid",
                 "type": "string"
@@ -5123,6 +5299,7 @@
             },
             "required": [
               "type",
+              "failure_message",
               "turn_id",
               "attempts",
               "errors"
@@ -5699,10 +5876,17 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "max_delegation_depth": {
+            "description": "Maximum number of child levels in a delegation chain.",
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": [
-          "archive_after_days"
+          "archive_after_days",
+          "max_delegation_depth"
         ],
         "type": "object"
       },
@@ -6058,6 +6242,76 @@
         ],
         "type": "object"
       },
+      "SuccessionCall": {
+        "description": "One model call a succession pass made.",
+        "properties": {
+          "cost": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "failure_reason": {
+            "description": "Why the call failed, when it did.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "model": {
+            "description": "The provider-facing model id the call was sent to.",
+            "type": "string"
+          },
+          "output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "report": {
+            "description": "What a reader reported. A synthesis's output is in\n`CompactionRecord.diagnosis.synthesis`; summaries are carried in the\nsuccessor's conversation context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "$ref": "#/components/schemas/SuccessionStage"
+          }
+        },
+        "required": [
+          "stage",
+          "model",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "type": "object"
+      },
+      "SuccessionStage": {
+        "description": "Which part of succession a model call was.",
+        "oneOf": [
+          {
+            "const": "reader",
+            "description": "A blind reader locating where one slice of the history went wrong.",
+            "type": "string"
+          },
+          {
+            "const": "synthesis",
+            "description": "The synthesis naming the problems from the readers' reports.",
+            "type": "string"
+          },
+          {
+            "const": "summary",
+            "description": "The summary of established conversation state.",
+            "type": "string"
+          }
+        ]
+      },
       "SurfaceAnnotationView": {
         "description": "A note left on one of a surface's modules. `body` and `tags` are the author's\nown words: other parties' work product, to be read as data.",
         "properties": {
@@ -6334,6 +6588,23 @@
               "null"
             ]
           },
+          "execution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolExecution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model_replay_truncated": {
+            "description": "Whether later turns receive only a preview of this result. Absent when\nthere is no completed, recognised model replay to account for.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "parent_call_id": {
             "type": [
               "string",
@@ -6376,6 +6647,53 @@
           "truncated"
         ],
         "type": "object"
+      },
+      "ToolCompletion": {
+        "enum": [
+          "not_run",
+          "confirmed",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "ToolExecution": {
+        "properties": {
+          "completion": {
+            "$ref": "#/components/schemas/ToolCompletion"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ToolOutcome"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/ToolExecutionStage"
+          }
+        },
+        "required": [
+          "outcome",
+          "stage",
+          "completion"
+        ],
+        "type": "object"
+      },
+      "ToolExecutionStage": {
+        "enum": [
+          "not_started",
+          "started",
+          "finished",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "ToolOutcome": {
+        "description": "What the dispatcher established about a call, independently of its payload.",
+        "enum": [
+          "succeeded",
+          "failed",
+          "refused",
+          "rejected",
+          "cancelled"
+        ],
+        "type": "string"
       },
       "ToolPermissionConfig": {
         "additionalProperties": false,
@@ -6492,6 +6810,14 @@
           "description": {
             "type": "string"
           },
+          "effective_default_model": {
+            "default": null,
+            "description": "Default model selected by the topic's configuration cascade.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "format": "uuid",
             "type": "string"
@@ -6580,12 +6906,24 @@
         "type": "object"
       },
       "TurnIsolationView": {
-        "description": "The execution boundary a turn ran inside: sandboxed on the host, degraded\nfor a stated reason, or the boundary the install declares for every turn\n(a container image, for one) — which is neither of the other two.",
+        "description": "A turn's execution isolation: sandboxed on the host, unsandboxed because\nthe configuration switched the sandbox off, or degraded for a stated\nreason.",
         "oneOf": [
           {
             "properties": {
               "kind": {
                 "const": "isolated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "sandbox_disabled",
                 "type": "string"
               }
             },
@@ -6607,22 +6945,6 @@
             "required": [
               "kind",
               "reason"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "boundary": {
-                "type": "string"
-              },
-              "kind": {
-                "const": "declared",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "boundary"
             ],
             "type": "object"
           }
@@ -6661,6 +6983,12 @@
               }
             ],
             "description": "The execution boundary the turn ran inside, once its dispatcher\nsettled. Null until then."
+          },
+          "failure_message": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "input_tokens": {
             "format": "int64",
@@ -6707,6 +7035,7 @@
           "incomplete",
           "failed",
           "interrupted",
+          "cancelled",
           "awaiting_approval",
           "delegating"
         ],
@@ -6872,7 +7201,7 @@
             "type": "boolean"
           },
           "unavailable_reason": {
-            "description": "Why transcription or synthesis is unavailable, naming what to\nconfigure; absent when both are available.",
+            "description": "Why transcription or synthesis is unavailable. Absent when both are available.",
             "type": [
               "string",
               "null"
@@ -9964,7 +10293,7 @@
   },
   "info": {
     "title": "Swage client surface",
-    "version": "0.2.0"
+    "version": "0.0.1"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -10169,6 +10498,31 @@
         "summary": "Branch a conversation at an earlier message into a sibling thread."
       }
     },
+    "/api/conversations/{id}/cancel": {
+      "post": {
+        "operationId": "cancel_conversation_turn",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Success, no body."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Stop the conversation's running turn, whichever client holds its connection."
+      }
+    },
     "/api/docs": {
       "get": {
         "operationId": "list_documents",
@@ -10368,6 +10722,58 @@
           }
         },
         "summary": "Read unredeemed channel link codes."
+      },
+      "post": {
+        "operationId": "create_channel_link_code",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChannelLinkCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelLinkCodeResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Issue a single-use channel link code."
+      }
+    },
+    "/api/secrets": {
+      "get": {
+        "operationId": "list_secrets",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List governed secrets without revealing values."
       }
     },
     "/api/sessions": {

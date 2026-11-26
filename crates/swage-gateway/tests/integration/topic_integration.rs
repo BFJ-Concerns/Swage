@@ -51,7 +51,7 @@ fn make_test_router() -> (Router, Arc<SqliteStorage>) {
     // Use a stub provider — these tests exercise the HTTP API layer and
     // storage, not LLM streaming.
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
@@ -143,7 +143,7 @@ async fn say_in_session(storage: &SqliteStorage, session_id: Uuid, role: Role, t
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_lists_share_message_and_interruption_facts_without_changing_their_order() {
+async fn session_lists_share_message_and_interruption_facts_with_surface_specific_order() {
     let (router, storage) = make_test_router();
     let (_, topic) = http_json(
         &router,
@@ -175,11 +175,11 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
     let t2: Uuid = topical_b["id"].as_str().unwrap().parse().unwrap();
 
     say_in_session(&storage, a, Role::User, "general user").await;
-    say_in_session(&storage, a, Role::Tool, "tool noise").await;
     say_in_session(&storage, b, Role::Assistant, "general assistant").await;
+    say_in_session(&storage, a, Role::Tool, "tool noise").await;
     say_in_session(&storage, t, Role::Assistant, "topic answer").await;
-    say_in_session(&storage, t, Role::System, "system noise").await;
     say_in_session(&storage, t2, Role::User, "newer topic message").await;
+    say_in_session(&storage, t, Role::System, "system noise").await;
     let thread = storage.list_by_session(t).await.unwrap()[0].id;
     storage
         .create_turn(NewTurn {
@@ -192,8 +192,8 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
         .await
         .unwrap();
 
-    // The recent projection has a different order. These routes retain the
-    // older updated_at order and continue to show archived sessions.
+    // Give the operator overview a different recency order from the
+    // conversation lists, which follow the latest visible message.
     let now = chrono::Utc::now();
     storage
         .with_conn(move |conn| {
@@ -235,10 +235,10 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
     let general = general["conversations"].as_array().unwrap();
     assert_eq!(
         general.iter().map(|item| &item["id"]).collect::<Vec<_>>(),
-        vec![&general_a["id"], &general_b["id"]]
+        vec![&general_b["id"], &general_a["id"]]
     );
-    assert_eq!(general[0]["message_preview"], "general user");
-    assert_eq!(general[1]["message_preview"], "general assistant");
+    assert_eq!(general[0]["message_preview"], "general assistant");
+    assert_eq!(general[1]["message_preview"], "general user");
     assert_eq!(general[0]["has_interrupted_turn"], false);
     assert_eq!(general[1]["has_interrupted_turn"], false);
 
@@ -255,11 +255,12 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
         2,
         "archived topic session remains visible"
     );
-    assert_eq!(topic_list[0]["id"], topical["id"]);
-    assert_eq!(topic_list[1]["id"], topical_b["id"]);
-    assert_eq!(topic_list[0]["message_preview"], "topic answer");
-    assert_eq!(topic_list[0]["has_interrupted_turn"], true);
-    assert_eq!(topic_list[1]["has_interrupted_turn"], false);
+    assert_eq!(topic_list[0]["id"], topical_b["id"]);
+    assert_eq!(topic_list[1]["id"], topical["id"]);
+    assert_eq!(topic_list[0]["message_preview"], "newer topic message");
+    assert_eq!(topic_list[1]["message_preview"], "topic answer");
+    assert_eq!(topic_list[0]["has_interrupted_turn"], false);
+    assert_eq!(topic_list[1]["has_interrupted_turn"], true);
 
     let (_, overview) = http_json(&router, "GET", "/api/operator/overview", None).await;
     let sessions = overview["sessions"].as_array().unwrap();
@@ -1735,4 +1736,182 @@ async fn native_file_write_local_allows_writable_dangling_symlink() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_file_write_remote_allows_writable_dangling_symlink() {
     native_dangling_symlink_write(true, false, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_topic_sessions_select_the_configured_model_after_config_reload() {
+    let root = tempfile::tempdir().unwrap();
+    let global = r#"
+[providers]
+default = "local"
+[providers.entries.local]
+protocol = "openai"
+base_url = "http://127.0.0.1:9/v1"
+[models]
+default = "global"
+[models.entries.global]
+provider_id = "local"
+model_id = "global-wire"
+[models.entries.topic-a]
+provider_id = "local"
+model_id = "a-wire"
+[models.entries.topic-b]
+provider_id = "local"
+model_id = "b-wire"
+"#;
+    std::fs::write(root.path().join("config.toml"), global).unwrap();
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let mut topics = Vec::new();
+    for name in ["topic-a", "topic-b"] {
+        let topic = TopicStore::create(
+            storage.as_ref(),
+            swage_storage::NewTopic {
+                name: name.into(),
+                slug: swage_storage::TopicSlug::new(name).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        let directory = topic.location().data_dir(root.path());
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("config.toml"),
+            format!("[models]\ndefault = \"{name}\"\n"),
+        )
+        .unwrap();
+        topics.push(topic);
+    }
+    // Reconstruct runtime state from the same persisted configuration and store.
+    for _restart in 0..2 {
+        let config = swage_config::load_resolved_config_from(
+            root.path(),
+            &swage_core::ScopeLocation::General,
+            "gateway",
+        )
+        .unwrap();
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(StubProvider),
+            config,
+            swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let router = build_router(state);
+        for topic in &topics {
+            let (status, created) = http_json(
+                &router,
+                "POST",
+                &format!("/api/topics/{}/sessions", topic.id),
+                Some(json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            assert_eq!(created["selected_model_id"], topic.name);
+            let session_id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                swage_storage::SessionStore::get_session(storage.as_ref(), session_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .selected_model_id
+                    .as_deref(),
+                Some(topic.name.as_str())
+            );
+            let (_, detail) =
+                http_json(&router, "GET", &format!("/api/topics/{}", topic.id), None).await;
+            assert_eq!(detail["effective_default_model"], topic.name);
+            let (_, listed) = http_json(&router, "GET", "/api/topics", None).await;
+            assert_eq!(
+                listed["topics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["id"] == topic.id.to_string())
+                    .unwrap()["effective_default_model"],
+                topic.name
+            );
+            let (status, explicit) = http_json(
+                &router,
+                "POST",
+                &format!("/api/topics/{}/sessions", topic.id),
+                Some(json!({"selected_model_id": "global"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(explicit["selected_model_id"], "global");
+        }
+    }
+}
+
+fn model_default_test_router(root: &std::path::Path, storage: Arc<SqliteStorage>) -> Router {
+    std::fs::write(
+        root.join("config.toml"),
+        r#"
+[providers]
+default = "local"
+[providers.entries.local]
+protocol = "openai"
+base_url = "http://127.0.0.1:9/v1"
+[models]
+default = "file-model"
+[models.entries.file-model]
+provider_id = "local"
+model_id = "file-wire"
+[models.entries.agent-model]
+provider_id = "local"
+model_id = "agent-wire"
+"#,
+    )
+    .unwrap();
+    let config = swage_config::load_resolved_config_from(
+        root,
+        &swage_core::ScopeLocation::General,
+        "gateway",
+    )
+    .unwrap();
+    build_router(AppState::new_with_config_root(
+        storage.clone(),
+        storage,
+        Arc::new(StubProvider),
+        config,
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.to_path_buf(),
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_topic_config_preserves_the_topic_list() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let router = model_default_test_router(root.path(), storage);
+    let (_, bad) = http_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({"name": "Broken"})),
+    )
+    .await;
+    let (_, good) = http_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({"name": "Healthy"})),
+    )
+    .await;
+    let dir = swage_core::ScopeLocation::topic("broken").data_dir(root.path());
+    std::fs::write(dir.join("config.toml"), "[models\ndefault =").unwrap();
+    let (status, listed) = http_json(&router, "GET", "/api/topics", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let topics = listed["topics"].as_array().unwrap();
+    assert_eq!(topics.len(), 2);
+    let broken = topics.iter().find(|t| t["id"] == bad["id"]).unwrap();
+    assert_eq!(broken["name"], "Broken");
+    assert!(broken["effective_default_model"].is_null());
+    assert_eq!(
+        topics.iter().find(|t| t["id"] == good["id"]).unwrap()["effective_default_model"],
+        "file-model"
+    );
 }

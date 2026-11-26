@@ -115,6 +115,64 @@ async function render(detail: WorkflowRunDetailResponse): Promise<void> {
 }
 
 describe("WorkflowRunDetail", () => {
+  it("renders liveness and provider times locally while retaining exact stamps", async () => {
+    const started = "2026-10-01T19:28:49.393288230Z";
+    const ended = "2026-10-01T19:28:50.893288230Z";
+    await render(runWith({
+      ...baseCall,
+      liveness: { started_at: started, first_evidence_at: ended },
+      provider_rounds: [{ ...baseCall.provider_rounds![0], started_at: started, completed_at: ended }],
+    } as WorkflowAgentCallDetail));
+    for (const [selector, stamp] of [
+      [".liveness dd:nth-of-type(1) time", started],
+      [".liveness dd:nth-of-type(2) time", ended],
+      [".rounds tbody tr:first-child td:nth-child(3) time", started],
+      [".rounds tbody tr:first-child td:nth-child(4) time", ended],
+    ]) {
+      const time = document.querySelector<HTMLTimeElement>(selector)!;
+      expect(time, selector).not.toBeNull();
+      expect(time.getAttribute("datetime"), selector).toBe(stamp);
+      expect(time.title, selector).toBe(stamp);
+      expect(time.textContent).toBe(new Date(stamp).toLocaleString());
+      expect(time.textContent).not.toBe(stamp);
+    }
+    expect(document.querySelector(".rounds tbody")?.textContent).toContain(
+      `${(1.5).toLocaleString(undefined, { maximumFractionDigits: 1 })} s`,
+    );
+  });
+
+  it("leads with worker metadata and expands a collapsed long briefing", async () => {
+    const prompt = "Read the recorded state carefully. ".repeat(100) + "Final instruction.";
+    await render(runWith({ ...baseCall, dispatch: { ...baseCall.dispatch!,
+      prompt, requested_model: "asked-model", requested_effort: "high",
+      placement: { path: "/workspace/worker", can_write: true },
+    } }));
+    const card = document.querySelector(".call")!;
+    const briefing = card.querySelector("details")!;
+    expect(briefing).not.toBeNull();
+    expect(briefing.open).toBe(false);
+    const summary = briefing.querySelector("summary")!;
+    expect(summary.textContent).toContain("Expand");
+    expect(summary.textContent!.length).toBeLessThan(220);
+    expect(summary.textContent).not.toContain("Final instruction.");
+    for (const text of ["Finished", "asked-model", "high", "test-model", "low", "/workspace/worker", "Provider rounds"]) {
+      const metadata = [...card.querySelectorAll("dt, dd")].find((node) => node.textContent?.includes(text));
+      expect(metadata, text).toBeDefined();
+      expect(metadata!.compareDocumentPosition(briefing) & Node.DOCUMENT_POSITION_FOLLOWING, text).not.toBe(0);
+    }
+    for (const history of [card.querySelector(".attempts"), [...card.querySelectorAll("dt")].find((node) => node.textContent === "Granted")]) {
+      expect(history).toBeTruthy();
+      expect(briefing.compareDocumentPosition(history!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    }
+    const roundLabel = [...card.querySelectorAll("dt")].find((node) => node.textContent === "Provider rounds")!;
+    expect(roundLabel.nextElementSibling?.textContent).toBe("1");
+    summary.click();
+    expect(briefing.open).toBe(true);
+    expect(briefing.querySelector(".prompt")?.textContent).toBe(prompt);
+    summary.click();
+    expect(briefing.open).toBe(false);
+  });
+
   it("shows what the worker was dispatched with and what it resolved", async () => {
     await render(runWith(baseCall));
 
@@ -400,7 +458,7 @@ describe("WorkflowRunDetail", () => {
     // The interrupted round ended when nothing could answer it any more, so
     // the Ended cell carries that time rather than a dash.
     const interruptedEnd = rows[1].querySelectorAll("td")[3].textContent;
-    expect(interruptedEnd).toContain("2026-09-02T10:04:07Z");
+    expect(interruptedEnd).toContain(new Date("2026-09-02T10:04:07Z").toLocaleString());
     expect(interruptedEnd).not.toContain("—");
     expect(document.querySelector(".attempts")!.textContent).toContain("2");
     // The call ran to its end on the last attempt, and that is what "ran
@@ -422,8 +480,8 @@ describe("complete worker detail", () => {
     expect(attempts[1].textContent).toContain("later-model, low");
     expect(attempts[0].querySelector("a")?.getAttribute("href")).toBe("/conversations/earlier-session");
     expect(attempts[1].querySelector("a")?.getAttribute("href")).toBe("/conversations/later-session");
-    expect(document.querySelector(".liveness")?.textContent).toContain("2026-09-02T11:00:00Z");
-    expect(document.querySelector(".liveness")?.textContent).toContain("2026-09-02T11:00:04Z");
+    expect(document.querySelector(".liveness")?.textContent).toContain(new Date("2026-09-02T11:00:00Z").toLocaleString());
+    expect(document.querySelector(".liveness")?.textContent).toContain(new Date("2026-09-02T11:00:04Z").toLocaleString());
     expect(document.body.textContent).toContain("narrowed nothing");
     expect(document.body.textContent).toContain("/Worktree/ExactCase");
     expect(document.querySelector('a[href="/conversations/worker-session"]')).not.toBeNull();

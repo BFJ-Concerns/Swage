@@ -1,8 +1,8 @@
 // Surfaces store — the session's work surfaces, the one currently open, and
 // the shared library's catalogue.
 //
-// The store owns its own live route: it opens the work-surface signal channel
-// on creation, so an open surface hears about changes whether or not the person
+// The store subscribes to the page’s signal channel on creation, so an open
+// surface hears about changes whether or not the person
 // reading it has a conversation selected. The surface_updated signal is only a
 // signal (surface id + module id); the store refetches the surface, so content
 // always comes from the authoritative read path, never from event payloads.
@@ -19,7 +19,7 @@ import type { SurfaceSummary } from "../protocol/SurfaceSummary";
 import type { LibraryEntrySummary } from "../protocol/LibraryEntrySummary";
 import type { ServerEvent } from "../types";
 import * as surfacesApi from "../api/surfaces";
-import { createWorkSurfaceChannel } from "../api/work-surface";
+import { openSharedWorkSurfaceChannel } from "../api/work-surface";
 import type { WorkSurfaceChannel } from "../api/work-surface";
 
 export interface SurfacesStore {
@@ -81,8 +81,7 @@ export interface SurfacesStore {
   removeAnnotation(surfaceId: string, annotationId: string): Promise<void>;
   renameSurface(surfaceId: string, title: string): Promise<void>;
   resolveAnnotation(surfaceId: string, annotationId: string): Promise<void>;
-  // Release the live channel. The app-lifetime store never needs this;
-  // tests and short-lived surfaces do.
+  // Release this store’s subscription to the live channel.
   stopListening(): void;
 }
 
@@ -121,8 +120,7 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
     libraryStore.set(response.entries);
   }
 
-  // The live route, opened here rather than wired in by the shell: an open
-  // surface's liveness is the store's own contract, not the caller's to remember.
+  // Keep surfaces live whenever the store is in use.
   function handleSignal(event: ServerEvent): void {
     if (event.type === "lagged") {
       // The server dropped signals; one may have been the only signal for
@@ -152,7 +150,7 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
     }
   }
 
-  const channel = (options?.channelFactory ?? createWorkSurfaceChannel)();
+  const channel = (options?.channelFactory ?? openSharedWorkSurfaceChannel)();
   channel.onSignal(handleSignal);
   channel.onReconnect(() => {
     const active = activeSurfaceState.current;

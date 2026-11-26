@@ -266,3 +266,29 @@
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* Cell boundaries and typography shared by rendered Markdown tables. */
+.riso-tables table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+  font-size: 0.875em;
+  border: 1px solid var(--ink);
+}
+
+.riso-tables th,
+.riso-tables td {
+  border: 1px solid var(--rule-soft);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.riso-tables th {
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: var(--font-label-sm);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}

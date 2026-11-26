@@ -145,6 +145,8 @@ impl SubscriptionState {
             // always delivered.
             ServerEvent::SurfaceUpdated { .. }
             | ServerEvent::LibraryUpdated { .. }
+            | ServerEvent::SessionUpdated { .. }
+            | ServerEvent::WorkflowRunUpdated { .. }
             | ServerEvent::Lagged { .. } => true,
 
             // Retry progress is observability noise — only deliver to subscribers.
@@ -471,6 +473,7 @@ mod tests {
     fn tool_end_gated_without_tools_subscription() {
         let state = unsubscribed();
         let event = ServerEvent::ToolEnd {
+            execution: None,
             call_id: "c1".to_string(),
             tool: "shell".to_string(),
             result: serde_json::json!("ok"),
@@ -487,6 +490,7 @@ mod tests {
     fn tool_end_delivered_with_tools_subscription() {
         let state = subscribed_to(&["tools"]);
         let event = ServerEvent::ToolEnd {
+            execution: None,
             call_id: "c1".to_string(),
             tool: "shell".to_string(),
             result: serde_json::json!("ok"),
@@ -592,6 +596,7 @@ mod tests {
     fn output_schema_failed_always_delivered_unsubscribed() {
         let state = unsubscribed();
         let event = ServerEvent::OutputSchemaFailed {
+            failure_message: "validation failed".into(),
             turn_id: Uuid::new_v4(),
             attempts: 3,
             errors: vec![],
@@ -606,6 +611,7 @@ mod tests {
     fn output_schema_failed_always_delivered_subscribed() {
         let state = subscribed_to(&["context"]);
         let event = ServerEvent::OutputSchemaFailed {
+            failure_message: "validation failed".into(),
             turn_id: Uuid::new_v4(),
             attempts: 3,
             errors: vec![],

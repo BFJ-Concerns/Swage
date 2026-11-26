@@ -122,7 +122,9 @@ impl RetryProvider {
     /// The result is floored at `retry_after` extracted from a `RateLimited`
     /// error, ensuring the provider's hint is always respected.
     fn compute_backoff(&self, attempt: u32, error: &ProviderError) -> Duration {
-        let retry_after = if let ProviderError::RateLimited { retry_after, .. } = error {
+        let retry_after = if let ProviderError::RateLimited { retry_after, .. }
+        | ProviderError::Overloaded { retry_after, .. } = error
+        {
             *retry_after
         } else {
             None
@@ -137,6 +139,17 @@ impl RetryProvider {
 /// Streaming adapters expose rendered errors here, so only the leading status
 /// token is authoritative. Provider body text must never supply a status or
 /// override the envelope.
+/// The output limit the inner provider fills in for the model a request
+/// names, when the request sets none of its own. A refused attempt of such a
+/// request after which this has changed taught the provider the model's
+/// limit — an undocumented model's refusal states it — so the request it
+/// would send now differs from the refused one, and is sent at once as a new
+/// attempt, outside the transient-retry budget and without backoff. That
+/// happens once per call: a second change is treated as an ordinary failure.
+fn provider_output_limit(inner: &dyn LlmProvider, model: Option<&str>) -> Option<u32> {
+    inner.output_limit(model.unwrap_or_else(|| inner.model_id()))
+}
+
 fn is_permanent_stream_error(message: &str) -> bool {
     if message.starts_with("authentication failed for provider ") {
         return true;
@@ -178,6 +191,10 @@ impl LlmProvider for RetryProvider {
         self.inner.effort_capability(model)
     }
 
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        self.inner.output_limit(model)
+    }
+
     async fn count_tokens(
         &self,
         request: &CompletionRequest,
@@ -196,9 +213,19 @@ impl LlmProvider for RetryProvider {
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         let mut attempt = 0u32;
+        let mut resent_at_learned_limit = false;
         loop {
+            let limit_before = provider_output_limit(self.inner.as_ref(), request.model.as_deref());
             match self.inner.complete(request.clone()).await {
                 Ok(response) => return Ok(response),
+                Err(_)
+                    if !resent_at_learned_limit
+                        && request.max_tokens.is_none()
+                        && provider_output_limit(self.inner.as_ref(), request.model.as_deref())
+                            != limit_before =>
+                {
+                    resent_at_learned_limit = true;
+                }
                 Err(err) if err.is_retriable() && attempt < self.config.max_retries => {
                     let delay = self.compute_backoff(attempt, &err);
                     tokio::time::sleep(delay).await;
@@ -216,9 +243,19 @@ impl LlmProvider for RetryProvider {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         let mut attempt = 0u32;
+        let mut resent_at_learned_limit = false;
         loop {
+            let limit_before = provider_output_limit(self.inner.as_ref(), request.model.as_deref());
             match self.inner.complete_with_tools(request.clone()).await {
                 Ok(response) => return Ok(response),
+                Err(_)
+                    if !resent_at_learned_limit
+                        && request.max_tokens.is_none()
+                        && provider_output_limit(self.inner.as_ref(), request.model.as_deref())
+                            != limit_before =>
+                {
+                    resent_at_learned_limit = true;
+                }
                 Err(err) if err.is_retriable() && attempt < self.config.max_retries => {
                     let delay = self.compute_backoff(attempt, &err);
                     tokio::time::sleep(delay).await;
@@ -246,11 +283,13 @@ impl LlmProvider for RetryProvider {
         spawn_stream_forwarder(move |tx| async move {
             let mut attempt = 0u32;
             let mut active_retry: Option<u32> = None;
+            let mut resent_at_learned_limit = false;
 
             loop {
                 if tx.is_closed() {
                     return;
                 }
+                let limit_before = provider_output_limit(inner.as_ref(), request.model.as_deref());
                 let snapshot = inner.provider_request_snapshot(&request, true);
                 let mut attempt_record = ProviderAttemptRecord {
                     provider: snapshot["provider"]
@@ -266,7 +305,7 @@ impl LlmProvider for RetryProvider {
                     request: Some(snapshot),
                     id: format!("{:032x}", rand::random::<u128>()),
                     round: 0,
-                    attempt: attempt + 1,
+                    attempt: attempt + u32::from(resent_at_learned_limit) + 1,
                     started_at_ms: now_ms(),
                     ended_at_ms: None,
                     outcome: ProviderAttemptOutcome::Outstanding,
@@ -375,6 +414,16 @@ impl LlmProvider for RetryProvider {
                     }
                     return;
                 };
+
+                if !is_anomaly
+                    && !resent_at_learned_limit
+                    && request.max_tokens.is_none()
+                    && provider_output_limit(inner.as_ref(), request.model.as_deref())
+                        != limit_before
+                {
+                    resent_at_learned_limit = true;
+                    continue;
+                }
 
                 if attempt >= config.max_retries
                     || (!is_anomaly && is_permanent_stream_error(&message))
@@ -620,7 +669,8 @@ mod tests {
     }
 
     fn http_provider(adapter: &str, base_url: &str) -> Box<dyn LlmProvider> {
-        let config = crate::ProviderConfig::new("test-key", "unserved-model", base_url);
+        let config = crate::ProviderConfig::new("test-key", "unserved-model", base_url)
+            .with_provider_id(format!("{adapter}-test-route"));
         match adapter {
             "openai" => Box::new(crate::openai::OpenAiProvider::from_config(config)),
             "responses" => Box::new(crate::responses::ResponsesProvider::from_config(config)),
@@ -771,7 +821,20 @@ mod tests {
                         .count(),
                     3
                 );
-                assert!(matches!(chunks.last(), Some(StreamChunk::Error { .. })));
+                let Some(StreamChunk::Error { message }) = chunks.last() else {
+                    panic!("{adapter}: HTTP {status} must produce a terminal error");
+                };
+                match status {
+                    429 => assert_eq!(
+                        message,
+                        &format!("rate limited by provider {adapter}-test-route")
+                    ),
+                    529 => assert_eq!(
+                        message,
+                        &format!("provider {adapter}-test-route overloaded: {body}")
+                    ),
+                    _ => {}
+                }
             }
         }
     }
@@ -1074,6 +1137,37 @@ mod tests {
     // -----------------------------------------------------------------------
     // retry_after — RateLimited hint must be honoured
     // -----------------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn overload_exhaustion_preserves_category_and_retry_after() {
+        let hint = Duration::from_secs(5);
+        let retry = RetryProvider::new(
+            FailN::new(
+                10,
+                crate::http::map_http_error(
+                    "test-provider",
+                    529,
+                    "capacity exhausted".into(),
+                    Some(5),
+                ),
+            ),
+            RetryConfig {
+                max_retries: 2,
+                initial_backoff: Duration::ZERO,
+                max_backoff: Duration::ZERO,
+            },
+        );
+        let started = tokio::time::Instant::now();
+        let error = retry.complete(completion_req()).await.unwrap_err();
+        assert!(
+            matches!(error, ProviderError::Overloaded { retry_after: Some(value), .. } if value == hint),
+            "exhaustion must keep overload distinct: {error}"
+        );
+        assert!(
+            started.elapsed() >= hint * 2,
+            "overload must retain its retry-after floor"
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn complete_waits_at_least_retry_after_on_rate_limit() {
@@ -1522,6 +1616,10 @@ mod tests {
             })
         }
 
+        fn output_limit(&self, _: &str) -> Option<u32> {
+            Some(4321)
+        }
+
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
             Ok(Some(42))
         }
@@ -1570,6 +1668,12 @@ mod tests {
     fn effort_capability_delegates_to_the_wrapped_provider() {
         let provider = RetryProvider::with_defaults(CountingProbe);
         assert!(provider.effort_capability("any").is_some());
+    }
+
+    #[test]
+    fn output_limit_delegates_to_the_wrapped_provider() {
+        let provider = RetryProvider::with_defaults(CountingProbe);
+        assert_eq!(provider.output_limit("any"), Some(4321));
     }
 
     #[test]

@@ -18,11 +18,12 @@ use tower::ServiceExt;
 use swage_gateway::server::build_router;
 use swage_gateway::service::ConversationService;
 use swage_gateway::state::AppState;
+use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::SqliteStorage;
 use swage_storage::store::{AuditStore, SurfaceStore};
 
 fn router_over(storage: Arc<SqliteStorage>) -> Router {
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
@@ -516,7 +517,7 @@ async fn a_failed_save_audit_leaves_no_library_entry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_seeded_surface_announces_the_same_refetch_signal_as_a_manual_add() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
@@ -539,6 +540,8 @@ async fn a_seeded_surface_announces_the_same_refetch_signal_as_a_manual_add() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let mut signals = broadcast.subscribe();
+    let mut surface_updates = std::iter::from_fn(|| signals.try_recv().ok())
+        .filter(|event| matches!(event, ServerEvent::SurfaceUpdated { .. }));
 
     let session = make_session(&router, Some(&topic_id)).await;
     let (_, opened) = http_json(
@@ -549,8 +552,8 @@ async fn a_seeded_surface_announces_the_same_refetch_signal_as_a_manual_add() {
     )
     .await;
     let seeded_id = opened["surfaces"][0]["id"].as_str().unwrap();
-    let signal = signals
-        .try_recv()
+    let signal = surface_updates
+        .next()
         .expect("default seeding broadcasts a refetch");
     assert_eq!(
         serde_json::to_value(signal).unwrap(),
@@ -566,8 +569,8 @@ async fn a_seeded_surface_announces_the_same_refetch_signal_as_a_manual_add() {
         Some(json!({ "title": "Manual" })),
     )
     .await;
-    let signal = signals
-        .try_recv()
+    let signal = surface_updates
+        .next()
         .expect("manual creation broadcasts a refetch");
     assert_eq!(
         serde_json::to_value(signal).unwrap(),
@@ -758,7 +761,7 @@ async fn the_library_tool_narrows_by_topic_tags_widens_on_request_and_adds_by_ch
     use swage_tool::context::MockToolContext;
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),

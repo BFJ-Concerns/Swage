@@ -11,4 +11,5 @@ workspace = true
 [dependencies]
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+swage-config = { path = "../crates/swage-config" }
 swage-workflow = { path = "../crates/swage-workflow" }

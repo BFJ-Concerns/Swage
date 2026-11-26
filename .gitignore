@@ -37,9 +37,11 @@ blob-report/
 
 # Rust
 /target/
+# The verified V8 static library `just fetch-v8` places for the v8 crate.
+/vendor/v8/
 
 # Node
-node_modules/
+node_modules
 dist/
 
 # Python (for embedded runtime build artifacts)

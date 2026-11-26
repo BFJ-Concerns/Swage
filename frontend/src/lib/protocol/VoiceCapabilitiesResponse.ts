@@ -2,7 +2,6 @@
 
 export type VoiceCapabilitiesResponse = { transcription: boolean, synthesis: boolean, default_voice?: string | null, supported_voices?: Array<string>,
 /**
- * Why transcription or synthesis is unavailable, naming what to
- * configure; absent when both are available.
+ * Why transcription or synthesis is unavailable. Absent when both are available.
  */
 unavailable_reason?: string, };

@@ -186,7 +186,7 @@ async fn dispatch_executes_hooks_in_priority_order() {
         20,
     ));
 
-    let event = HookEvent::SessionStart {
+    let event = HookEvent::SessionEnd {
         session_id: "s".into(),
     };
     registry.dispatch(event).await;
@@ -211,7 +211,7 @@ async fn dispatch_preserves_registration_order_for_equal_priority() {
         ));
     }
 
-    let event = HookEvent::SessionStart {
+    let event = HookEvent::SessionEnd {
         session_id: "s".into(),
     };
     registry.dispatch(event).await;
@@ -315,7 +315,7 @@ async fn timeout_with_fail_open_returns_continue() {
     reg.failure_mode = FailureMode::FailOpen;
     registry.register(reg);
 
-    let event = HookEvent::SessionStart {
+    let event = HookEvent::SessionEnd {
         session_id: "s".into(),
     };
     let outcome = registry.dispatch(event).await;
@@ -342,7 +342,7 @@ async fn timeout_with_fail_closed_returns_block() {
     reg.failure_mode = FailureMode::FailClosed;
     registry.register(reg);
 
-    let event = HookEvent::SessionStart {
+    let event = HookEvent::SessionEnd {
         session_id: "s".into(),
     };
     let outcome = registry.dispatch(event).await;
@@ -375,8 +375,8 @@ async fn event_filter_excludes_non_matching_hooks() {
         |event| matches!(event, HookEvent::PreToolUse { .. }),
     ));
 
-    // Dispatch a SessionStart — should not trigger
-    let event = HookEvent::SessionStart {
+    // Dispatch a SessionEnd — should not trigger
+    let event = HookEvent::SessionEnd {
         session_id: "s".into(),
     };
     registry.dispatch(event).await;
@@ -429,9 +429,9 @@ async fn regex_matcher_filters_by_event_name() {
         Regex::new("Tool").unwrap(),
     ));
 
-    // SessionStart should not match
+    // SessionEnd should not match
     registry
-        .dispatch(HookEvent::SessionStart {
+        .dispatch(HookEvent::SessionEnd {
             session_id: "s".into(),
         })
         .await;
@@ -452,7 +452,7 @@ async fn regex_matcher_filters_by_event_name() {
 #[tokio::test]
 async fn empty_registry_returns_continue() {
     let registry = HookRegistry::new();
-    let event = HookEvent::SessionStart {
+    let event = HookEvent::SessionEnd {
         session_id: "s".into(),
     };
     let outcome = registry.dispatch(event).await;
@@ -465,7 +465,7 @@ async fn empty_registry_returns_continue() {
 async fn hook_registry_default_creates_empty_registry() {
     let registry = HookRegistry::default();
     let outcome = registry
-        .dispatch(HookEvent::SessionStart {
+        .dispatch(HookEvent::SessionEnd {
             session_id: "s".into(),
         })
         .await;
@@ -521,7 +521,7 @@ async fn approval_with_continue_hooks_returns_approval() {
         20,
     ));
 
-    let event = HookEvent::SessionStart {
+    let event = HookEvent::SessionEnd {
         session_id: "s".into(),
     };
     let outcome = registry.dispatch(event).await;
@@ -592,7 +592,7 @@ async fn first_approval_wins_among_multiple_approvals() {
         20,
     ));
 
-    let event = HookEvent::SessionStart {
+    let event = HookEvent::SessionEnd {
         session_id: "s".into(),
     };
     let outcome = registry.dispatch(event).await;

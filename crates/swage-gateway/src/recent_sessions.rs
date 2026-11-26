@@ -70,7 +70,16 @@ pub async fn list_recent_sessions(
             last_activity: activity.last_activity,
             message_preview: activity.latest_message.clone(),
             has_interrupted_turn: activity.has_interrupted_turn,
+            latest_turn_state: activity
+                .latest_turn
+                .as_ref()
+                .map(|turn| crate::service::turn_state_to_wire(&turn.state)),
             has_running_turn: running.contains(&activity.session.id),
+            awaiting_approval: running.contains(&activity.session.id)
+                && activity
+                    .active_turn
+                    .as_ref()
+                    .is_some_and(|turn| turn.state == swage_storage::TurnState::AwaitingApproval),
             archived_at: activity.session.archived_at,
         }
     };
@@ -288,7 +297,7 @@ mod tests {
 
     fn make_state() -> (AppState, Arc<SqliteStorage>) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -375,6 +384,97 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_recent_list_projects_a_failed_schedule_turn_and_its_recovery() {
+        use swage_storage::{NewThread, NewTurn, ThreadStore, TurnState, TurnStore};
+        let (state, storage) = make_state();
+        let general = storage.general_scope().await.unwrap();
+        let session = open(
+            &storage,
+            general.id,
+            SessionOrigin::ScheduleRun {
+                schedule_id: Uuid::new_v4(),
+            },
+        )
+        .await;
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session,
+                agent_id: "test-agent".into(),
+            },
+        )
+        .await
+        .unwrap();
+        for outcome in [TurnState::Failed, TurnState::Completed] {
+            storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: "test-agent".into(),
+                    state: outcome.clone(),
+                    user_input: None,
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+            let response = list_recent_sessions(&state, SessionListing::default())
+                .await
+                .unwrap();
+            let projected = serde_json::to_value(&response.entries[0].automated[0]).unwrap();
+            assert_eq!(projected["latest_turn_state"], outcome.to_string());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_running_turn_held_on_an_approval_reads_as_awaiting_the_person() {
+        use swage_storage::{NewThread, NewTurn, ThreadStore, TurnState, TurnStore};
+        let (state, storage) = make_state();
+        let general = storage.general_scope().await.unwrap();
+        let session = open(&storage, general.id, SessionOrigin::Direct).await;
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session,
+                agent_id: "test-agent".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "test-agent".into(),
+                state: TurnState::AwaitingApproval,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session, tokio_util::sync::CancellationToken::new());
+        let row = |response: &RecentSessionsResponse| {
+            serde_json::to_value(&response.entries[0].source).unwrap()["session"].clone()
+        };
+        let response = list_recent_sessions(&state, SessionListing::default())
+            .await
+            .unwrap();
+        assert_eq!(row(&response)["has_running_turn"], true);
+        assert_eq!(row(&response)["awaiting_approval"], true);
+
+        storage
+            .update_turn_state(turn.id, TurnState::Processing)
+            .await
+            .unwrap();
+        let response = list_recent_sessions(&state, SessionListing::default())
+            .await
+            .unwrap();
+        assert_eq!(row(&response)["has_running_turn"], true);
+        assert_eq!(row(&response)["awaiting_approval"], false);
     }
 
     #[tokio::test(flavor = "multi_thread")]

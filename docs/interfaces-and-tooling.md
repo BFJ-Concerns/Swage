@@ -272,6 +272,24 @@ A provider entry has two credential fields, checked in order:
 
 When both are set, `api_key_secret_ref` wins.
 
+A credential travels in plaintext when the provider's `base_url` is
+`http://` and names an address other than this machine's loopback: anyone
+on the path can read it. A local model server on `localhost` or `127.0.0.1`
+is never plaintext in this sense, and needs no setting. For a remote
+`http://` endpoint the provider entry's `plaintext_credentials` decides what
+happens, judged when the provider is built:
+
+- `warn` (the default) — requests are sent, after one warning for the
+  provider in the audit record (event kind `provider_credential_exposure`).
+  A rebuild of the same provider finds the warning and adds none; if the
+  warning cannot be recorded, nothing is sent.
+- `refuse` — nothing is sent: every request fails with the reason, and the
+  refusal is recorded once.
+- `allow` — requests are sent and nothing is recorded.
+
+A provider with no credential is never judged. The voice provider shares
+the default provider's route and follows the same setting.
+
 The built-in Codex app server (`protocol = "codex"`) is temporarily
 disabled: a configuration naming it does not load, until Swage can ask you
 to approve the commands and file changes it makes. Settings offers no Codex
@@ -668,6 +686,14 @@ successfully. A tool call stopped with its turn settles as cancelled. When a
 tool-call result cannot be recorded (the settlement write fails), the turn
 ends as failed — the result is not silently dropped.
 
+Later turns receive long completed results as an opening preview with a hash
+and a reference to the stored result. A note explains that the earlier turn
+received the whole result. When `tool_result_read` is offered, the note tells
+the model to pass the exact `full_result_ref` as `reference` to read it again;
+otherwise it explains that the current record omits the remaining content.
+Short results need no note. These notes describe the reading turn's available
+tools and are never stored with the result.
+
 Stopping a turn ends a shell command running inside the sandbox — in both
 bubblewrap and fallback modes — and its tool-call record settles as
 cancelled.
@@ -709,6 +735,19 @@ file is removed and a fresh start proceeds. If a running gateway has lost
 its metadata (for example after a metadata directory was cleaned), the
 start command probes the configured address, recovers the metadata, and
 reports the gateway as already running rather than starting a duplicate.
+
+Turns the previous gateway left in flight are interrupted at startup. A
+turn that was waiting on a delegated agent resumes from the record: each
+child's fate — its result if it finished before the restart, its failure,
+or a note that it was cut off with its session and thread named — goes to
+the parent agent's mailbox under the delegation that started it, and a
+continuation is queued on the parent's conversation saying the gateway
+restarted while the turn waited and what became of each child. The
+startup drain starts that turn, the child's result enters the thread
+first (labelled as a delegation notice), and the parent carries on or
+returns to a cut-off child's thread. A child whose delegation record
+cannot be found is noted as a degraded turn record in the audit trail;
+the continuation still names it.
 
 ## API error contract
 
@@ -766,22 +805,24 @@ a workspace crate that orchestrates the gate. Most logic is Rust, but `xtask`
 shells out for some checks — for example, the tracked-local-state check runs
 `scripts/check-tracked-local-state.sh`.
 
-The gate runs eight stages in order. The first six abort immediately on
+The gate runs nine stages in order. The first seven abort immediately on
 failure — a formatting problem or a type error is not worth running the
 full test suite against. The last two always run, and their results are
 combined:
 
 1. **Tracked-local-state check** — catches runtime state directories that were
    accidentally committed.
-2. **Format check** — Rust formatting and Justfile formatting.
-3. **Type check** — `cargo check` across the workspace plus the frontend's
+2. **Tracker-tag check** — rejects bracketed tracker tags in tracked text files,
+   excluding paths covered by the repository’s ignore rules.
+3. **Format check** — Rust formatting and Justfile formatting.
+4. **Type check** — `cargo check` across the workspace plus the frontend's
    type checker.
-4. **Frontend design-token check** — rejects literal visual values in
+5. **Frontend design-token check** — rejects literal visual values in
    components where a semantic design token is required.
-5. **Shipped-workflow parse check** — verifies that every shipped workflow
+6. **Shipped-workflow parse check** — verifies that every shipped workflow
    script parses without error.
-6. **Clippy** — with warnings treated as errors.
-7. **Test suite** — Rust tests, frontend tests, and the desktop smoke test.
+7. **Clippy** — with warnings treated as errors.
+8. **Test suite** — Rust tests, frontend tests, and the desktop smoke test.
    Individual failures are collected rather than aborting on the first. The
    Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
    variable, which the Justfile defaults to `nextest`. Under `nextest`
@@ -789,7 +830,7 @@ combined:
    (which retries flaky tests) plus a separate doctest stage; setting
    `SWAGE_TEST_RUNNER=cargo` runs `cargo test --workspace --no-fail-fast`
    instead.
-8. **Projection freshness** — a `git diff` that verifies the committed
+9. **Projection freshness** — a `git diff` that verifies the committed
    TypeScript bindings and JSON Schemas match what the tests just regenerated.
 
 When both the test suite and the projection check fail, the gate reports both
@@ -801,14 +842,33 @@ disposable state under the system temporary directory. Set
 `SWAGE_TEST_SCRATCH_DIR` to another directory when the temporary filesystem
 is too small for that state.
 
+Every recipe that compiles the workspace first runs `just fetch-v8`, which
+downloads the prebuilt V8 static library the embedded JavaScript engine
+links and verifies it against the version and checksum pinned in
+`v8-archive.toml` before placing it where `.cargo/config.toml` points the
+`v8` crate's build script. The pin must match the `v8` package Cargo.lock
+resolves, so a dependency upgrade that moves V8 fails the fetch until the
+pin is updated on purpose. The prebuilt archive is pinned for x86-64 Linux
+with glibc.
+
 Other useful recipes:
 
-- `just check-gate` — the first six static stages above, before any tests.
+- `just fetch-v8` — the V8 archive fetch and check alone.
+- `just check-gate` — the static stages above, before any tests.
 - `just check` — the narrower Rust and frontend type check only.
 - `just test` — the test suite alone, with the same failure-aggregation
   behaviour as the verify gate.
 - `just build-dev-embedded` — a debug build with the current frontend baked
   into the gateway binary.
+
+### Building V8 from source
+
+The experimental source build uses Cargo directly. After installing the
+[rusty_v8 build prerequisites](https://github.com/denoland/rusty_v8#building-from-source),
+run `V8_FROM_SOURCE=1 cargo build --locked --bin swage`. On x86-64 Linux
+with glibc, the locked V8 crate's source build stops because Ninja cannot
+find its ICU data file (`icudtl.dat`). Support for other targets remains
+unverified.
 
 ## Client-side route handling
 
@@ -857,11 +917,11 @@ audio. `GET /api/voice/capabilities` returns:
 
 - **`transcription`** and **`synthesis`** — booleans for whether speech-to-text
   and text-to-speech are available.
-- **`unavailable_reason`** — when either capability is off, the reason and
-  what to address: the default provider may be absent, its credentials
-  unavailable, its protocol incompatible (only OpenAI-protocol providers
-  serve audio), or a `[voice]` model id may be unset. Absent when both
-  capabilities are available.
+- **`unavailable_reason`** — why either capability is unavailable. It can
+  identify a missing default provider, unavailable credentials, an
+  incompatible provider protocol, an unset `[voice]` model id or a speech
+  model that has yet to be checked. After a speech request fails, it reports
+  the provider error. The field is absent when both capabilities are available.
 - **`default_voice`** and **`supported_voices`** — the default synthesis
   voice and the available voice list. The OpenAI provider reports both
   regardless of whether synthesis is configured.
@@ -869,8 +929,11 @@ audio. `GET /api/voice/capabilities` returns:
 The two audio routes — `POST /api/voice/transcriptions` and
 `POST /api/voice/speech` — send requests to the default provider's
 OpenAI-protocol audio endpoints using the model ids configured in `[voice]`.
-A request to an unavailable capability returns a 422 validation error. See
-[Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
+The transcription route returns a 422 validation error when transcription
+is unavailable. The speech route accepts requests before synthesis is
+advertised, so a caller can check the model or retry after a failure.
+A successful speech request makes synthesis available.
+See [Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
 for the configuration keys.
 
 ## Gateway tools
@@ -904,8 +967,16 @@ session topic: a run in another topic reads as absent rather than forbidden.
 
 **Scheduling** — `schedule` and `wake_me_later`.
 
+**Definition authoring** — `agent_definition` creates, edits, lists and deletes
+named agents you can choose for future sessions. `task_definition` manages
+reusable work contracts for delegated children, which do not appear in the
+new-session picker; saving one replaces its whole definition, so omitted fields
+are cleared. See [Creating and editing
+definitions](agents-and-permissions.md#creating-and-editing-definitions) for
+the conversational route and its grant.
+
 **Session and memory** — `session_values`, `agent_memory`, `tool_result_read`,
-`task_definition`, and `memory`. The `memory` tool reads and writes the
+and `memory`. The `memory` tool reads and writes the
 shared memory files of the session's scope — the topic's memory when a
 topic is selected, the general memory otherwise. It is one of the two
 sandbox-eligible tools.

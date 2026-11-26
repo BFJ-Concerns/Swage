@@ -3,7 +3,9 @@
      attached workspaces (including relinking a folder that has moved), its
      default surfaces and tags, and its sessions. -->
 <script lang="ts">
+  import { sessionOutcomeLabel } from "../session-outcome";
   import { onMount } from "svelte";
+  import { watchSessionList } from "../session-list-updates";
   import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
     attachTopicWorkspace,
@@ -54,6 +56,10 @@
   // reading an empty placeholder as "no attachments yet".
   let worktopicsLoaded = $state(false);
   let sessions = $state<ConversationSummary[]>([]);
+  let sessionCount = $state(0);
+  let sessionRetry = $state(0);
+  let sessionError = $state<string | null>(null);
+  let sessionListLoading = $state(false);
   let isLoading = $state(false);
   let error = $state<string | null>(null);
   let workspacePath = $state("");
@@ -68,6 +74,9 @@
   let tagsDraft = $state("");
   let tagsNotice = $state<string | null>(null);
   let surfacesLoaded = $state(false);
+  let isLoadingSurfaces = $state(false);
+  let surfaceError = $state<string | null>(null);
+  const displayedError = $derived(error ?? surfaceError);
   // The description as edited here; saved explicitly.
   let aboutDraft = $state("");
   let aboutNotice = $state<string | null>(null);
@@ -82,6 +91,42 @@
 
   onMount(loadTopicSettings);
 
+  $effect(() => {
+    const topicId = topic?.id;
+    void sessionRetry;
+    if (tab !== "sessions" || !topicId) return;
+    sessions = [];
+    sessionError = null;
+    sessionListLoading = true;
+
+    let current = true;
+    const refresh = async (): Promise<void> => {
+      try {
+        const list = await listTopicSessions(topicId);
+        if (!current) return;
+        sessions = list;
+        sessionCount = list.length;
+        sessionError = null;
+      } catch (err) {
+        if (!current) return;
+        if (sessionListLoading) {
+          sessionError = err instanceof Error ? err.message : "Failed to load sessions.";
+        }
+      } finally {
+        if (current) sessionListLoading = false;
+      }
+    };
+    const initial = refresh();
+    const stop = watchSessionList(async () => {
+      await initial;
+      if (current) await refresh();
+    });
+    return () => {
+      current = false;
+      stop();
+    };
+  });
+
   // The surfaces tab loads its library and defaults when it is shown,
   // whether the page mounted on it or the user moved to it.
   $effect(() => {
@@ -90,6 +135,8 @@
 
   async function loadSurfaceSettings(): Promise<void> {
     if (!topic) return;
+    isLoadingSurfaces = true;
+    surfaceError = null;
     try {
       const [catalogue, defaults] = await Promise.all([
         listLibrary(),
@@ -99,9 +146,10 @@
       defaultSurfaces = defaults.entries;
       tagsDraft = (topic.tags ?? []).join(", ");
       surfacesLoaded = true;
-      error = null;
     } catch (err) {
-      error = err instanceof Error ? err.message : "Failed to load the surface library.";
+      surfaceError = err instanceof Error ? err.message : "Failed to load the surface library.";
+    } finally {
+      isLoadingSurfaces = false;
     }
   }
 
@@ -149,14 +197,15 @@
   async function loadTopicSettings(): Promise<void> {
     if (!topic) return;
     isLoading = true;
+    error = null;
     try {
       const [workspaceList, sessionList] = await Promise.all([
         listTopicWorkspaces(topic.id),
-        listTopicSessions(topic.id),
+        tab === "sessions" ? Promise.resolve(null) : listTopicSessions(topic.id),
       ]);
+      if (sessionList) sessionCount = sessionList.length;
       workspaces = workspaceList;
       worktopicsLoaded = true;
-      sessions = sessionList;
       relinkDrafts = Object.fromEntries(
         workspaceList.map((workspace) => [workspace.id, relinkDrafts[workspace.id] ?? ""]),
       );
@@ -293,8 +342,11 @@
       {/if}
     </div>
 
-    {#if error}
-      <div class="notice error" role="alert">{error}</div>
+    {#if displayedError}
+      <div class="notice error" role="alert">
+        {displayedError}
+        <button type="button" disabled={isLoading || isLoadingSurfaces} onclick={() => void (error ? loadTopicSettings() : loadSurfaceSettings())}>Retry</button>
+      </div>
     {:else if isLoading}
       <div class="notice">Loading topic settings…</div>
     {/if}
@@ -308,12 +360,16 @@
             <span class="shell-value">{topic.slug}</span>
           </div>
           <div class="shell-row">
+            <span class="shell-label">Default model</span>
+            <span class="shell-value">{topic.effective_default_model ?? "No model configured"}</span>
+          </div>
+          <div class="shell-row">
             <span class="shell-label">Workspaces</span>
             <span class="shell-value">{workspaces.length}</span>
           </div>
           <div class="shell-row">
             <span class="shell-label">Sessions</span>
-            <span class="shell-value">{sessions.length}</span>
+            <span class="shell-value">{sessionCount}</span>
           </div>
         </div>
       </section>
@@ -401,7 +457,9 @@
               </div>
             </article>
           {:else}
-            <p class="shell-empty">No workspace folders are attached to this topic.</p>
+            {#if worktopicsLoaded && !isLoading}
+              <p class="shell-empty">No workspace folders are attached to this topic.</p>
+            {/if}
           {/each}
         </div>
       </section>
@@ -459,17 +517,26 @@
       <section class="shell-section">
         <h2 class="shell-section-title">Sessions</h2>
         <div class="record-list">
-          {#each sessions as session (session.id)}
-            <article class="record-row">
-              <strong>{session.message_preview || "Untitled session"}</strong>
-              <span>{session.agent_id} · {new Date(session.last_activity).toLocaleString()}</span>
-              {#if onNavigate}
-                <button type="button" onclick={() => onNavigate?.(`/conversations/${encodeURIComponent(session.id)}`)}>Open</button>
-              {/if}
-            </article>
+          {#if sessionError}
+            <p class="shell-empty" role="alert">{sessionError}</p>
+            <button type="button" onclick={() => { sessionRetry += 1; }}>Retry</button>
+          {:else if sessionListLoading}
+            <p class="shell-empty">Loading sessions…</p>
           {:else}
-            <p class="shell-empty">No sessions have been created in this topic.</p>
-          {/each}
+            {#each sessions as session (session.id)}
+              {@const outcome = sessionOutcomeLabel(session.latest_turn_state)}
+              <article class="record-row">
+                <strong>{session.message_preview || "Untitled session"}</strong>
+                {#if outcome}<span><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
+                <span>{session.agent_id} · {new Date(session.last_activity).toLocaleString()}</span>
+                {#if onNavigate}
+                  <button type="button" onclick={() => onNavigate?.(`/conversations/${encodeURIComponent(session.id)}`)}>Open</button>
+                {/if}
+              </article>
+            {:else}
+              <p class="shell-empty">No sessions have been created in this topic.</p>
+            {/each}
+          {/if}
         </div>
       </section>
     {/if}
@@ -506,12 +573,22 @@
     color: var(--ink-soft);
   }
 
+  .head > div {
+    min-width: 0;
+  }
+
   .title {
     margin: 4px 0 6px;
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: clamp(42px, 8vw, 76px);
-    line-height: 0.9;
+    font-size: 28px;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
     letter-spacing: 0.02em;
     text-transform: uppercase;
   }

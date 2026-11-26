@@ -444,13 +444,30 @@ pub async fn drain_channel_queue(state: AppState) {
 }
 
 pub async fn drain_channel_queue_checked(state: &AppState) -> Result<(), GatewayError> {
+    drain_channel_queue_resolving(state, |state, row| {
+        Box::pin(resolve_channel_destination(state, row))
+    })
+    .await
+}
+
+async fn drain_channel_queue_resolving(
+    state: &AppState,
+    resolve: impl for<'a> Fn(
+        &'a AppState,
+        &'a ChannelInboundMessage,
+    ) -> futures::future::BoxFuture<
+        'a,
+        Result<Option<(Uuid, Uuid)>, GatewayError>,
+    > + Send
+    + Sync,
+) -> Result<(), GatewayError> {
     let rows = state.storage.list_pending_channel_messages().await?;
-    // Allocate each session's queue sequence in inbox arrival order, including
-    // messages from different chats linked to that same session.
+    // Transfer each inbox arrival into the shared queue with its original
+    // arrival time, including chats linked to the same session.
     let mut batches: Vec<(Uuid, Uuid, Vec<ChannelInboundMessage>)> = Vec::new();
     let mut first_error = None;
     for row in rows {
-        match resolve_channel_destination(state, &row).await {
+        match resolve(state, &row).await {
             Ok(Some((session_id, thread_id))) => {
                 if let Some((_, _, batch)) = batches.iter_mut().find(|(id, _, _)| *id == session_id)
                 {
@@ -850,11 +867,11 @@ async fn deliver_to_target(
                 .send()
                 .await
                 .map_err(|error| {
-                    GatewayError::ValidationError(format!("webhook delivery failed: {error}"))
+                    GatewayError::DeliveryFailed(format!("webhook delivery failed: {error}"))
                 })?;
 
             if !response.status().is_success() {
-                return Err(GatewayError::ValidationError(format!(
+                return Err(GatewayError::DeliveryFailed(format!(
                     "webhook delivery failed with status {}",
                     response.status()
                 )));
@@ -928,6 +945,74 @@ mod tests {
         TopicStore,
     };
     use tokio::net::TcpListener;
+
+    async fn assert_webhook_delivery_failure(url: String) -> String {
+        let (mut state, _) = make_state_with_session(vec![]).await;
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let session_id = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap()
+            .id;
+        state.storage = storage.clone();
+        state.topic_store = storage;
+        let error = deliver_to_targets(
+            &state,
+            session_id,
+            DeliveryAttribution {
+                schedule_run: None,
+                turn_id: None,
+            },
+            &[DeliveryTarget::Webhook { url }],
+            "The produced output",
+        )
+        .await
+        .expect_err("webhook delivery must fail");
+        assert_eq!(
+            serde_json::to_value(crate::error::error_code(&error)).unwrap(),
+            "delivery_failed"
+        );
+        assert!(error.to_string().contains("webhook delivery failed"));
+        assert!(!error.to_string().contains("validation error"));
+        assert!(!error.is_retriable());
+        let records = state
+            .storage
+            .list_delivery_records_by_session(session_id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, "failed");
+        assert_eq!(
+            records[0].error.as_deref(),
+            Some(error.to_string().as_str())
+        );
+        let api_error = crate::error::ApiError::from(error);
+        assert_eq!(api_error.status(), axum::http::StatusCode::BAD_GATEWAY);
+        api_error.message().to_owned()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unreachable_webhook_reports_a_delivery_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        assert_webhook_delivery_failure(format!("http://{address}/")).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsuccessful_webhook_status_reports_a_delivery_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let message = assert_webhook_delivery_failure(format!("http://{address}/")).await;
+        server.abort();
+        assert!(message.contains("status 503"), "{message}");
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn developer_routes_accept_busy_session_inputs_in_the_shared_queue() {
@@ -1318,6 +1403,140 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn older_inbox_arrival_precedes_direct_input_queued_during_resolution() {
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            Default::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let linked = crate::onboarding::create_channel_link(
+            &state,
+            crate::onboarding::CreateChannelLinkRequest {
+                integration: "dev_dm".into(),
+                account: "account".into(),
+                conversation: "person".into(),
+                topic_id: None,
+                agent_id: None,
+                home_target: None,
+            },
+        )
+        .await
+        .unwrap();
+        let session = linked.session_id.unwrap();
+        let thread = resolve_thread_for_session(state.storage.as_ref(), session, None)
+            .await
+            .unwrap();
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session, tokio_util::sync::CancellationToken::new());
+        state
+            .storage
+            .ingest_channel_inbound(
+                vec![swage_storage::NewChannelInboundMessage {
+                    integration: "dev_dm".into(),
+                    account: "account".into(),
+                    conversation: "person".into(),
+                    external_id: "older".into(),
+                    sender: "person".into(),
+                    content: "older inbox".into(),
+                }],
+                "dev_dm",
+                "account",
+                "1",
+            )
+            .await
+            .unwrap();
+        let entered = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        let drain = tokio::spawn({
+            let state = state.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                drain_channel_queue_resolving(&state, move |state, row| {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        entered.wait().await;
+                        release.wait().await;
+                        resolve_channel_destination(state, row).await
+                    })
+                })
+                .await
+                .unwrap();
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.wait())
+            .await
+            .unwrap();
+        crate::turn_queue::queue_input(
+            &state,
+            session,
+            thread.id,
+            crate::turn::TurnInput::text("newer direct"),
+        )
+        .await
+        .unwrap();
+        release.wait().await;
+        drain.await.unwrap();
+        let listed = state
+            .storage
+            .list_queued_turn_inputs(session)
+            .await
+            .unwrap();
+        // Claim through the same transactional drain the gateway uses. The
+        // barrier controls resolution, never the order returned by storage.
+        let drained = state
+            .storage
+            .drain_queued_turn_inputs(session, "gateway")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            drained.turn.user_input.as_deref(),
+            Some("older inbox\n\nnewer direct"),
+            "inbox arrival must run before a direct input accepted during destination resolution"
+        );
+        assert_eq!(
+            drained
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["older inbox", "newer direct"]
+        );
+        assert!(
+            drained
+                .messages
+                .iter()
+                .all(|message| message.origin == swage_storage::MessageOrigin::User)
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|input| input.content.as_str())
+                .collect::<Vec<_>>(),
+            ["older inbox", "newer direct"],
+            "the queue view must use the same arrival order as its drain"
+        );
+        assert!(
+            state
+                .storage
+                .list_pending_channel_messages()
+                .await
+                .unwrap()
+                .is_empty(),
+            "the shared drain must present its inbox rows"
+        );
+    }
+
     #[test]
     fn home_target_defaults_to_origin() {
         let origin = ChannelOrigin {
@@ -1348,7 +1567,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -1445,7 +1664,7 @@ mod tests {
     async fn an_unlinked_channel_opens_with_a_root_thread_in_the_general_scope() {
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
         let general = storage.general_scope().await.unwrap();
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),

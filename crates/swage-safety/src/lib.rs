@@ -91,8 +91,10 @@ impl LeakDetector {
 
         // Add the high-entropy credential context pattern separately,
         // since it needs group-based redaction (group 2 = the value).
+        // Consume reference prefixes without a value capture so they are
+        // not mistaken for a `secret:` credential assignment.
         let high_entropy_regex = Regex::new(
-            r#"(?i)(password|secret|token|api_key)\s*[=:]\s*["']?([A-Za-z0-9+/=_\-]{16,})"#,
+            r#"(?i)secret://|(password|secret|token|api_key)\s*[=:]\s*["']?([A-Za-z0-9+/=_\-]{16,})"#,
         )
         .expect("built-in high_entropy regex is valid");
         regex_patterns.push(CompiledRegex {

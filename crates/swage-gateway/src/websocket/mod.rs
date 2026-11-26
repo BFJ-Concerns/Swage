@@ -2,7 +2,7 @@ mod connection;
 mod dispatch;
 pub mod error_codes;
 mod protocol;
-mod work_surface;
+pub(crate) mod work_surface;
 
 #[allow(unused_imports)]
 pub(crate) use connection::check_upgrade_preconditions;

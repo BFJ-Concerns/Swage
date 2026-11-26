@@ -10,4 +10,8 @@ export type TopicResponse = { id: string, name: string, description: string, slu
  * Labels that narrow the surface library's catalogue for this topic's
  * sessions. They grant nothing and add nothing on their own.
  */
-tags?: Array<string>, created_at: string, };
+tags?: Array<string>,
+/**
+ * Default model selected by the topic's configuration cascade.
+ */
+effective_default_model?: string | null, created_at: string, };

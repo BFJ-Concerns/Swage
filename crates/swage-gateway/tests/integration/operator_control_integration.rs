@@ -76,7 +76,7 @@ impl LlmProvider for MockProvider {
 
 fn test_state() -> AppState {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    AppState::new(
+    AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),
@@ -152,6 +152,191 @@ async fn create_conversation(router: &Router) -> Uuid {
     let (status, body) = post_json(router, "/api/conversations", json!({})).await;
     assert_eq!(status, StatusCode::CREATED);
     body["id"].as_str().unwrap().parse().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conversational_agent_definition_create_and_update_record_audited_rows() {
+    use crate::support::{
+        CapturingProvider, LiveTestGateway, journey, live_http_json, scratch_tempdir,
+    };
+    use reqwest::Method;
+    use swage_gateway::tool::ToolDispatcher;
+
+    let root = scratch_tempdir();
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.tools.permissions.allow = vec!["*".into()];
+    let state = AppState::new_with_config_root(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(MockProvider),
+        config,
+        ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let gateway = LiveTestGateway::start(build_router(state.clone()), root).await;
+    // Saving settings builds the shipped registry, so missing registration is
+    // exercised too. Only the model is replaced with a scripted turn provider.
+    let settings = json!({
+        "default_provider": "local",
+        "providers": {"local": {"protocol": "openai", "base_url": "http://127.0.0.1:65535/v1"}},
+        "default_model": "sonnet",
+        "models": {"sonnet": {"provider_id": "local", "model_id": "claude-sonnet-5-5",
+            "aliases": [], "capabilities": {"reasoning_replay": false, "effort": null}}},
+        "sandbox": {"enabled": false, "allow_degraded_execution": false},
+        "tool_permissions": {"allow": ["*"], "deny": [], "bundles": {}, "require_approval": []}
+    });
+    let (status, saved) = live_http_json(
+        gateway.address,
+        Method::PUT,
+        "/api/settings",
+        Some(settings),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let registry = state.active_tool_dispatcher().registry().clone();
+    let tools = registry
+        .list()
+        .into_iter()
+        .map(|name| registry.get(name).unwrap());
+    let original = "Always open every reply with 'Heron here:'";
+    let revised = "Always open every reply with 'Heron revised:'";
+    let mutations = [
+        json!({"action": "create", "id": "heron", "display_name": "Heron",
+            "description": "Replies with a recognisable opening", "instructions": original, "model_id": "sonnet"}),
+        json!({"action": "update", "id": "heron", "instructions": revised}),
+    ];
+    let rounds = mutations
+        .iter()
+        .enumerate()
+        .flat_map(|(index, arguments)| {
+            [
+                vec![
+                    StreamChunk::ToolUse {
+                        call_id: format!("author-heron-{index}"),
+                        name: "agent_definition".into(),
+                        arguments: arguments.clone(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(swage_core::FinishReason::ToolUse),
+                    },
+                ],
+                vec![
+                    StreamChunk::Delta {
+                        content: "Definition request handled.".into(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(swage_core::FinishReason::Stop),
+                    },
+                ],
+            ]
+        })
+        .collect();
+    let (provider, requests) = CapturingProvider::new("definition-author", rounds);
+    state.replace_runtime(
+        state.active_config(),
+        Arc::new(provider),
+        ToolDispatcher::allow_all(tools),
+    );
+    let (status, conversation) = live_http_json(
+        gateway.address,
+        Method::POST,
+        "/api/conversations",
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{conversation}");
+    for (index, instructions) in [original, revised].iter().enumerate() {
+        let (status, submitted) = live_http_json(gateway.address, Method::POST, "/api/turns", Some(json!({
+            "conversation_id": conversation["id"],
+            "message": if index == 0 { "Create heron." } else { "Revise heron's instructions." },
+        }))).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{submitted}");
+        let turn_id = submitted["turn_id"].as_str().unwrap();
+        let settled = journey(async {
+            loop {
+                let (status, turn) = live_http_json(
+                    gateway.address,
+                    Method::GET,
+                    &format!("/api/turns/{turn_id}"),
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{turn}");
+                if !["pending", "processing"].contains(&turn["state"].as_str().unwrap()) {
+                    break turn;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert_eq!(settled["state"], "completed", "{settled}");
+        let calls = state
+            .storage
+            .list_tool_calls_by_turn(turn_id.parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1, "one authoring call per turn: {calls:?}");
+        assert_eq!(calls[0].tool, "agent_definition");
+        assert_eq!(
+            calls[0].status.as_deref(),
+            Some("success"),
+            "the authoring tool must succeed: {:?}",
+            calls[0].result
+        );
+        let result: Value = serde_json::from_str(calls[0].result.as_deref().unwrap()).unwrap();
+        assert_eq!(result["definition"]["instructions"], *instructions);
+        let rows = state.storage.list_agent_definitions(None).await.unwrap();
+        let heron = rows
+            .iter()
+            .find(|row| row.id == "heron")
+            .expect("the conversational create must store heron");
+        assert_eq!(&heron.instructions, instructions);
+        assert_eq!(heron.display_name, "Heron");
+        assert_eq!(heron.model_id.as_deref(), Some("sonnet"));
+        let events = state.storage.list_audit_events().await.unwrap();
+        let changes: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_kind == "configuration_change"
+                    && event.entity_id == "heron@global"
+                    && event.metadata["action"] == "upsert_agent_definition"
+            })
+            .collect();
+        assert_eq!(
+            changes.len(),
+            index + 1,
+            "each conversational mutation must leave exactly one configuration_change"
+        );
+        let event = changes
+            .iter()
+            .find(|event| event.metadata["new_state"]["instructions"] == *instructions)
+            .expect("the mutation's audit record contains its new instructions");
+        assert_eq!(event.metadata["source"], "agent_tool");
+        assert_eq!(
+            event.metadata["new_state"],
+            serde_json::to_value(heron).unwrap()
+        );
+        if index == 0 {
+            assert!(event.metadata["prior_state"].is_null());
+        } else {
+            let creation = changes
+                .iter()
+                .find(|event| event.metadata["prior_state"].is_null())
+                .unwrap();
+            assert_eq!(
+                event.metadata["prior_state"],
+                creation.metadata["new_state"]
+            );
+        }
+    }
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        4,
+        "each turn consumes the tool result before finishing"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -555,4 +740,361 @@ async fn operator_controls_manage_approvals_and_schedules_without_full_restart()
         decision.await.unwrap().decision,
         swage_agent::approval::ApprovalDecisionValue::Rejected
     );
+}
+
+async fn operator_child(
+    state: &AppState,
+    origin: swage_storage::SessionOrigin,
+    turn_state: TurnState,
+) -> swage_storage::Turn {
+    let topic = state.topic_store.general_scope().await.unwrap();
+    let session = state
+        .storage
+        .create_session(swage_storage::NewSession {
+            topic_id: topic.id,
+            agent_id: "gateway".into(),
+            origin,
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .unwrap();
+    let thread = state
+        .storage
+        .create(swage_storage::NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    state
+        .storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: turn_state,
+            user_input: Some("Work".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_counts_processing_detached_children_without_a_foreground_token() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let parent = create_conversation(&router).await;
+    let child = operator_child(
+        &state,
+        swage_storage::SessionOrigin::Delegation {
+            parent_session_id: parent,
+        },
+        TurnState::Processing,
+    )
+    .await;
+    let child_session = state
+        .storage
+        .get(child.thread_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id;
+    let (_, body) = get_json(&router, "/api/operator/overview").await;
+    let row = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == child_session.to_string())
+        .unwrap();
+    assert_eq!(row["has_running_turn"], true, "{body}");
+    assert_eq!(body["gateway"]["active_turn_count"], 1, "{body}");
+    state
+        .storage
+        .update_turn_state(child.id, TurnState::Completed)
+        .await
+        .unwrap();
+    let (_, settled) = get_json(&router, "/api/operator/overview").await;
+    assert_eq!(settled["gateway"]["active_turn_count"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_activity_describes_active_turn_before_newer_failure() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let parent = create_conversation(&router).await;
+    let active = operator_child(
+        &state,
+        swage_storage::SessionOrigin::Delegation {
+            parent_session_id: parent,
+        },
+        TurnState::AwaitingApproval,
+    )
+    .await;
+    let session_id = state
+        .storage
+        .get(active.thread_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id;
+    let newer = state
+        .storage
+        .create_turn(NewTurn {
+            thread_id: active.thread_id,
+            agent_id: "worker".into(),
+            state: TurnState::Failed,
+            user_input: Some("later failure".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let (_, body) = get_json(&router, "/api/operator/overview").await;
+    let row = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == session_id.to_string())
+        .unwrap();
+    assert_eq!(row["activity"], "awaiting_approval", "{body}");
+    assert_eq!(row["has_running_turn"], true);
+    assert_eq!(row["awaiting_approval"], true, "{body}");
+    assert!(row["ending"].is_null());
+    state
+        .storage
+        .update_turn_state(active.id, TurnState::Completed)
+        .await
+        .unwrap();
+    let (_, body) = get_json(&router, "/api/operator/overview").await;
+    let row = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == session_id.to_string())
+        .unwrap();
+    assert_eq!(row["has_running_turn"], false);
+    assert_eq!(row["awaiting_approval"], false);
+    assert_eq!(row["ending"], "failed", "latest ended turn {}", newer.id);
+}
+
+async fn operator_run(state: &AppState, parent: Option<Uuid>) -> swage_storage::WorkflowRunRecord {
+    state
+        .storage
+        .create_workflow_run(swage_storage::NewWorkflowRun {
+            topic_id: state.topic_store.general_scope().await.unwrap().id,
+            parent_run_id: None,
+            parent_seq: None,
+            dispatching_session_id: parent,
+            script_version_id: None,
+            inline_workflow_id: None,
+            inline_workflow_name: Some("Sweep".into()),
+            inline_workflow_version: None,
+            carrying_skill: None,
+            task: None,
+            source: Some("await swage.timer('1h');".into()),
+            source_hash: "operator-test".into(),
+            args: json!({}),
+            budget: json!({}),
+            engine_version: "test".into(),
+            dispatch_bound_agent_ids: vec![],
+            dispatch_bound_task_definition_ids: vec![],
+            workflow_call_tools: None,
+            inherited_worker_placement: None,
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_reads_a_failed_worker_from_the_journal_while_its_run_is_open() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let run = operator_run(&state, None).await;
+    // A call that missed its deadline stops the worker's turn, so the turn
+    // alone reads as cancelled; the journal records the call's failure.
+    let turn = operator_child(
+        &state,
+        swage_storage::SessionOrigin::WorkflowWorker { run_id: run.id },
+        TurnState::Cancelled,
+    )
+    .await;
+    let session_id = state
+        .storage
+        .get(turn.thread_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id;
+    let entry = state
+        .storage
+        .create_workflow_journal_intent(swage_storage::NewWorkflowJournalIntent {
+            run_id: run.id,
+            seq: 1,
+            kind: "agent_call".into(),
+            args_hash: "1".into(),
+            request: json!({"agent": "gateway"}),
+            effect_kind: None,
+            idempotency_key: None,
+            target_kind: None,
+        })
+        .await
+        .unwrap();
+    state
+        .storage
+        .record_workflow_call_dispatch(
+            entry.id,
+            json!({"prompt": "Work", "attempts": [{
+                "cause": {"cause": "first"}, "opened_at": chrono::Utc::now(),
+                "session_id": session_id, "thread_id": turn.thread_id, "turn_id": turn.id
+            }]}),
+        )
+        .await
+        .unwrap();
+    state
+        .storage
+        .fail_workflow_journal_entry(entry.id, "AgentCallTimeoutError")
+        .await
+        .unwrap();
+
+    let (_, body) = get_json(&router, "/api/operator/overview").await;
+    let row = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == session_id.to_string())
+        .unwrap();
+    assert_eq!(row["ending"], "failed", "{body}");
+    assert_eq!(row["has_running_turn"], false, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_uses_the_run_accounts_failed_and_cut_short_partition() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let run = operator_run(&state, None).await;
+    let mut workers = json!({"done": [], "failed": [], "cut_short": [], "unsettled": []});
+    let mut expected = Vec::new();
+    for (seq, partition, ending) in [(1, "failed", "failed"), (2, "cut_short", "cancelled")] {
+        let turn = operator_child(
+            &state,
+            swage_storage::SessionOrigin::WorkflowWorker { run_id: run.id },
+            TurnState::Interrupted,
+        )
+        .await;
+        let session_id = state
+            .storage
+            .get(turn.thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id;
+        let entry = state
+            .storage
+            .create_workflow_journal_intent(swage_storage::NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq,
+                kind: "agent_call".into(),
+                args_hash: seq.to_string(),
+                request: json!({"agent": "gateway"}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .unwrap();
+        state
+            .storage
+            .record_workflow_call_dispatch(
+                entry.id,
+                json!({"prompt": "Work", "attempts": [{
+                    "cause": {"cause": "first"}, "opened_at": chrono::Utc::now(),
+                    "session_id": session_id, "thread_id": turn.thread_id, "turn_id": turn.id
+                }]}),
+            )
+            .await
+            .unwrap();
+        state
+            .storage
+            .fail_workflow_journal_entry(entry.id, "worker stopped")
+            .await
+            .unwrap();
+        workers[partition]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"journal_entry_id": entry.id, "seq": seq,
+            "redispatched_after_interruption": false}));
+        expected.push((session_id, ending));
+    }
+    state.storage.set_workflow_run_terminal_account(run.id, json!({
+        "ending": {"ending": "cancelled"}, "workers": workers, "settled_at": chrono::Utc::now()
+    })).await.unwrap();
+    state
+        .storage
+        .update_workflow_run_state(run.id, "cancelled", None, None, None)
+        .await
+        .unwrap();
+    let (_, body) = get_json(&router, "/api/operator/overview").await;
+    for (session_id, ending) in expected {
+        let row = body["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == session_id.to_string())
+            .unwrap();
+        assert_eq!(row["ending"], ending, "{body}");
+        assert_eq!(row["has_interrupted_turn"], false, "{body}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_lists_live_runs_and_attributes_children() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let parent = create_conversation(&router).await;
+    let running = operator_run(&state, Some(parent)).await;
+    let parked = operator_run(&state, Some(parent)).await;
+    state
+        .storage
+        .update_workflow_run_state(parked.id, "parked", None, None, None)
+        .await
+        .unwrap();
+    let terminal = operator_run(&state, Some(parent)).await;
+    state
+        .storage
+        .update_workflow_run_state(terminal.id, "completed", None, None, None)
+        .await
+        .unwrap();
+    let child = operator_child(
+        &state,
+        swage_storage::SessionOrigin::Delegation {
+            parent_session_id: parent,
+        },
+        TurnState::Processing,
+    )
+    .await;
+    let child_id = state
+        .storage
+        .get(child.thread_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id;
+    let (_, body) = get_json(&router, "/api/operator/overview").await;
+    let runs = body["workflow_runs"]
+        .as_array()
+        .expect("live workflow runs belong on the fleet");
+    assert_eq!(runs.len(), 2, "{body}");
+    for id in [running.id, parked.id] {
+        let row = runs.iter().find(|row| row["id"] == id.to_string()).unwrap();
+        assert_eq!(row["parent_session_id"], parent.to_string());
+        assert_eq!(row["agent_id"], "gateway");
+    }
+    let row = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == child_id.to_string())
+        .unwrap();
+    assert_eq!(row["parent_session_id"], parent.to_string(), "{row}");
+    assert_eq!(row["agent_id"], "gateway");
 }

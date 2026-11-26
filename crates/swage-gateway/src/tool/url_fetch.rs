@@ -54,7 +54,17 @@ impl Tool for UrlFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch a URL and return its content as readable text. HTML is converted to plain text. Static content only — no JavaScript rendering. The bytes as fetched are kept on disk and the result names them; to capture the source into the knowledge base, pass the result's capture reference (carried whenever the fetch ran inside a conversation turn) to knowledge_record as fetch_call rather than retyping its content — the platform records the bytes it fetched and derives the citable text from them."
+        "Fetch a web address over HTTP or HTTPS and return what it serves as text, in \
+         `output`. An HTML page is reduced to its readable text, plain text and JSON come \
+         back as they are, and any other kind of content is refused. The page is taken as \
+         served, without running its scripts, so a page that builds itself in the browser \
+         comes back with little in it; the `browser_*` tools, where they are offered, read \
+         such a page. A redirect is not followed: it fails the call with its status, as any \
+         response that is not a success does. An address on this machine or a private \
+         network is refused. A long response is cut and marked `truncated`. Text and JSON \
+         carry on from `next_offset_bytes`; an HTML page does not, but every result names, \
+         in `raw_body_artifact_path`, a file holding everything that was fetched, which \
+         `file_read` opens. Where there is no address to give, `web_search` finds one."
     }
 
     fn parameters(&self) -> Value {
@@ -63,12 +73,12 @@ impl Tool for UrlFetchTool {
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "The URL to fetch."
+                    "description": "The address to fetch, complete with its `http://` or `https://` scheme."
                 },
                 "offset_bytes": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Byte offset into a text or JSON response. Use next_offset_bytes from a truncated result to continue."
+                    "description": "Where to carry on a cut text or JSON response: its `next_offset_bytes`, given with the same `url`, which is fetched again. An HTML page cannot be carried on this way."
                 }
             },
             "required": ["url"]
@@ -77,6 +87,14 @@ impl Tool for UrlFetchTool {
 
     fn requires_device_execution(&self) -> bool {
         true
+    }
+
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        optional_offset_bytes(params, self.name())?;
+        if let Some(url) = params["url"].as_str() {
+            parse_fetch_url(url, self.name())?;
+        }
+        Ok(())
     }
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
@@ -106,6 +124,21 @@ impl Tool for UrlFetchTool {
                 message: format!("Failed to build HTTP client: {e}"),
             })?;
 
+        self.fetch_and_retain(client, parsed_url, url, offset_bytes, ctx)
+            .await
+            .map_err(ToolError::after_execution)
+    }
+}
+
+impl UrlFetchTool {
+    async fn fetch_and_retain(
+        &self,
+        client: reqwest::Client,
+        parsed_url: reqwest::Url,
+        url: String,
+        offset_bytes: usize,
+        ctx: &dyn ToolContext,
+    ) -> Result<Value, ToolError> {
         let mut response = client.get(parsed_url.clone()).send().await.map_err(|e| {
             let message = if e.is_timeout() {
                 format!(

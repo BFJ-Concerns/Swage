@@ -30,10 +30,11 @@ pub use model::{
     ContextTransferMode, ContextTransferTargetConfig, GenerationConfig, GenerationPresetConfig,
     HierarchyLevel, HitlConfig, LogLevel, LoggingConfig, MemoryConfig, ModelCapabilitiesConfig,
     ModelCatalogConfig, ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig,
-    PricingConfig, Protocol, ProviderCatalogConfig, ProviderEndpointConfig, ProviderRoute,
-    PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig,
-    SandboxConfig, SearchProviderConfig, ServerConfig, SessionsConfig, TelegramChannelConfig,
-    ToolConfig, ToolPermissionConfig, VoiceConfig, resolve_provider_route,
+    PlaintextCredentialPolicy, PricingConfig, Protocol, ProviderCatalogConfig,
+    ProviderEndpointConfig, ProviderRoute, PythonExecuteToolConfig, PythonRuntimePolicy,
+    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
+    SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig, VoiceConfig,
+    resolve_provider_route,
 };
 
 // Error types
@@ -48,5 +49,5 @@ pub use merge::PartialConfig;
 // Resolution pipeline — primary public API
 pub use resolve::{
     apply_overlay, configuration_hierarchy, load_resolved_config, load_resolved_config_from,
-    validate_files,
+    load_running_config, load_running_config_from, overlay_scope_layers, validate_files,
 };

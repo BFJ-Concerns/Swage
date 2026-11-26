@@ -28,18 +28,15 @@ const CODEX_COMPLETION_UNSUPPORTED_REASON: &str = "Codex turns run through the A
 /// Optional overrides take precedence over configured values:
 /// - `port` — TCP port to listen on
 /// - `host` — host address to bind
-/// - `config_path` — path to a TOML configuration file (name used for lookup)
 ///
 /// Errors during startup are printed to stderr and the process exits.
-pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: Option<String>) {
-    // Step 1: Load configuration. Errors go to stderr — no logging yet.
-    // The gateway's own configuration is the global layer with a default
-    // agent overlay; a configured name selects the topic whose layer applies.
-    let scope = match config_path.as_deref() {
-        Some(name) => swage_core::ScopeLocation::topic(name),
-        None => swage_core::ScopeLocation::General,
-    };
-    let mut config = match swage_config::load_resolved_config(&scope, "default") {
+pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
+    // Step 1: Load the running configuration. Errors go to stderr — no
+    // logging yet. This is the global layer, read from disk here and at no
+    // later point: settings saves replace it in place, and each turn overlays
+    // its session's topic and agent layers on it (swage-config's resolver
+    // states the reload policy).
+    let mut config = match swage_config::load_running_config() {
         Ok(c) => c,
         Err(e) => {
             for problem in &e.problems {
@@ -92,7 +89,44 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 4: Open persistent storage.
     let raw_storage = open_storage(&db_path);
 
-    // Step 5: Requeue channel messages claimed by a crashed gateway before
+    // Step 5: Create provider clients from governed credential resolution.
+    let startup_secret_manager = crate::secret::SecretManager::new(
+        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>
+    );
+    let provider = create_provider(&config, &startup_secret_manager, raw_storage.as_ref()).await;
+    let voice_provider =
+        create_voice_provider(&config, &startup_secret_manager, raw_storage.as_ref()).await;
+    let telegram = create_telegram_client(&config, &startup_secret_manager).await;
+
+    // Step 6: Build the tool dispatch pipeline from the root selected above.
+    let browser_host_slot = Arc::new(std::sync::OnceLock::new());
+    let tool_dispatcher = build_tool_dispatcher(
+        &config,
+        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
+        &root,
+        &browser_host_slot,
+    );
+    let browser_host = browser_host_slot.get().cloned();
+
+    // Step 7: Assemble application state, including the message router
+    // and hooks that startup recovery and live turns share. No work starts yet.
+    let storage: Arc<dyn swage_storage::store::Storage> =
+        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
+    let topic_store: Arc<dyn swage_storage::store::TopicStore> = raw_storage.clone();
+    let mut state = crate::state::AppState::new_with_config_root(
+        storage,
+        topic_store,
+        provider,
+        config.clone(),
+        tool_dispatcher,
+        None,
+        root,
+    );
+    state.browser_host = browser_host_slot;
+    state.replace_voice_provider(voice_provider);
+    state.telegram = telegram;
+
+    // Step 8: Requeue channel messages claimed by a crashed gateway before
     // interrupting the orphaned turns they were attached to. A running process
     // cannot survive startup, so any in-flight turn here is a crash orphan.
     match raw_storage.requeue_presented_for_inflight_turns().await {
@@ -104,8 +138,14 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
-    // Step 5b: Recover orphaned turns from a previous unclean shutdown.
-    match crate::shutdown::recover_orphaned_turns(&*raw_storage, &*raw_storage).await {
+    // Step 8b: Recover orphaned turns from a previous unclean shutdown.
+    match crate::shutdown::recover_orphaned_turns(
+        &*state.storage,
+        &*state.topic_store,
+        &state.message_router(),
+    )
+    .await
+    {
         Ok(0) => {}
         Ok(n) => info!("Recovered {n} orphaned turn(s) from a previous shutdown"),
         Err(e) => {
@@ -154,7 +194,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
-    // Step 5c: Apply timeout policy to any approval requests that expired
+    // Step 8c: Apply timeout policy to any approval requests that expired
     // while the gateway was offline. Approvals still within their window are
     // left as-is and will be re-emitted to clients on WebSocket connect.
     let message_ttl = std::time::Duration::from_secs(config.communication.message_ttl_secs);
@@ -186,40 +226,6 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
-    // Step 6: Create provider clients from governed credential resolution.
-    let startup_secret_manager = crate::secret::SecretManager::new(
-        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>
-    );
-    let provider = create_provider(&config, &startup_secret_manager).await;
-    let voice_provider = create_voice_provider(&config, &startup_secret_manager).await;
-    let telegram = create_telegram_client(&config, &startup_secret_manager).await;
-
-    // Step 7: Build the tool dispatch pipeline from the root selected above.
-    let browser_host_slot = Arc::new(std::sync::OnceLock::new());
-    let tool_dispatcher = build_tool_dispatcher(
-        &config,
-        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
-        &root,
-        &browser_host_slot,
-    );
-    let browser_host = browser_host_slot.get().cloned();
-
-    // Step 8: Assemble application state and build the router.
-    let storage: Arc<dyn swage_storage::store::Storage> =
-        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
-    let topic_store: Arc<dyn swage_storage::store::TopicStore> = raw_storage;
-    let mut state = crate::state::AppState::new_with_config_root(
-        storage,
-        topic_store,
-        provider,
-        config.clone(),
-        tool_dispatcher,
-        None,
-        root,
-    );
-    state.browser_host = browser_host_slot;
-    state.replace_voice_provider(voice_provider);
-    state.telegram = telegram;
     // The Codex CLI's auth store lives under a Swage-owned state directory;
     // registering it as file-backed secrets brings the harness's own tokens
     // under governance — audited resolution and redaction — without moving
@@ -414,6 +420,7 @@ async fn recover_worktrees_after_crash(state: &crate::state::AppState) -> Result
 pub(crate) async fn create_voice_provider(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
+    storage: &dyn swage_storage::store::Storage,
 ) -> Arc<dyn swage_provider::VoiceProvider> {
     let Some((provider_endpoint, model_endpoint)) = default_provider_model(config) else {
         return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
@@ -434,6 +441,15 @@ pub(crate) async fn create_voice_provider(
             ));
         }
     };
+    if let Err(reason) = crate::provider_credential_exposure::judge(
+        storage,
+        &model_endpoint.provider_id,
+        provider_config.plaintext_credential_verdict(provider_endpoint.plaintext_credentials),
+    )
+    .await
+    {
+        return Arc::new(swage_provider::UnsupportedVoiceProvider::new(reason));
+    }
 
     match provider_endpoint.protocol {
         swage_config::Protocol::OpenAi
@@ -752,11 +768,12 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     config_root: &std::path::Path,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
-        Tool, browser::browser_tools, docs_read::DocsReadTool, hold::WorkflowHoldTool,
-        knowledge::KnowledgeCiteTool, knowledge::KnowledgeCurateOrientationTool,
-        knowledge::KnowledgeCurateTool, knowledge::KnowledgeOrientTool,
-        knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool, memory::MemoryReadTool,
-        memory::MemoryWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        Tool, agent_definition::AgentDefinitionTool, browser::browser_tools,
+        docs_read::DocsReadTool, hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
+        knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
+        knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
+        knowledge::KnowledgeSearchTool, memory::MemoryReadTool, memory::MemoryWriteTool,
+        plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
         run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
         session_variable::SessionVariableTool, surface::SurfaceLibraryTool,
         surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
@@ -797,6 +814,10 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         // Schedule tools reach the gateway's schedule service through the host
         // tool context; both are host-only (requires_device_execution).
         Arc::new(ScheduleTool),
+        // The two definition kinds a conversation can author: the agents a
+        // person picks for a session, and the contracts a delegated child
+        // runs under. Both host-only, both audited through their service.
+        Arc::new(AgentDefinitionTool),
         Arc::new(TaskDefinitionTool),
         Arc::new(WakeMeLaterTool),
         Arc::new(RunEventPostTool),
@@ -1005,7 +1026,7 @@ pub(crate) async fn selected_model_provider(
     {
         return runtime;
     }
-    create_provider(config, &state.secret_manager).await
+    create_provider(config, &state.secret_manager, state.storage.as_ref()).await
 }
 
 fn runtime_serves_selected_route(
@@ -1039,6 +1060,7 @@ fn same_connection(
 ) -> bool {
     let resolved =
         |endpoint: &swage_config::ProviderEndpointConfig| swage_config::ProviderEndpointConfig {
+            display_name: None,
             base_url: Some(provider_base_url(endpoint).to_owned()),
             ..endpoint.clone()
         };
@@ -1060,14 +1082,17 @@ pub(crate) fn selected_provider_route(config: &swage_config::ResolvedConfig) -> 
     ))
 }
 
-/// Create the LLM provider from resolved configuration.
+/// Create the LLM provider from resolved configuration. `storage` takes the
+/// audit record of a credential that would travel in plaintext.
 pub(crate) async fn create_provider(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
+    storage: &dyn swage_storage::store::Storage,
 ) -> Arc<dyn swage_provider::LlmProvider> {
     create_provider_with_retry(
         config,
         secret_manager,
+        storage,
         swage_provider::retry::RetryConfig::default(),
     )
     .await
@@ -1076,6 +1101,7 @@ pub(crate) async fn create_provider(
 async fn create_provider_with_retry(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
+    storage: &dyn swage_storage::store::Storage,
     retry: swage_provider::retry::RetryConfig,
 ) -> Arc<dyn swage_provider::LlmProvider> {
     use swage_provider::ProviderConfig;
@@ -1148,10 +1174,25 @@ async fn create_provider_with_retry(
                 )
             }
         };
-        providers.push(concrete_provider(
-            provider_endpoint.protocol.clone(),
-            provider_config,
-        ));
+        providers.push(
+            match crate::provider_credential_exposure::judge(
+                storage,
+                &model_endpoint.provider_id,
+                provider_config
+                    .plaintext_credential_verdict(provider_endpoint.plaintext_credentials),
+            )
+            .await
+            {
+                Ok(()) => concrete_provider(
+                    provider_endpoint.protocol.clone(),
+                    provider_config.with_provider_id(&model_endpoint.provider_id),
+                ),
+                Err(reason) => Box::new(swage_provider::UnsupportedLlmProvider::for_model(
+                    reason,
+                    &model_endpoint.model_id,
+                )),
+            },
+        );
     }
 
     if providers.is_empty() {
@@ -1359,7 +1400,7 @@ mod tests {
             )
             .await
             .expect("complete run with worker result");
-        let state = crate::state::AppState::new(
+        let state = crate::state::AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -1743,6 +1784,7 @@ mod tests {
                     (
                         "primary".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
@@ -1750,11 +1792,13 @@ mod tests {
                             base_url: Some(primary_base_url),
                             command: None,
                             state_dir: None,
+                            plaintext_credentials: Default::default(),
                         },
                     ),
                     (
                         "secondary".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
@@ -1762,6 +1806,7 @@ mod tests {
                             base_url: Some(secondary_base_url),
                             command: None,
                             state_dir: None,
+                            plaintext_credentials: Default::default(),
                         },
                     ),
                 ]
@@ -1791,7 +1836,8 @@ mod tests {
             max_backoff: std::time::Duration::ZERO,
         };
 
-        let provider = create_provider_with_retry(&config, &secret_manager, retry).await;
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), retry).await;
         let response = provider
             .complete(swage_core::CompletionRequest {
                 effort: None,
@@ -1825,6 +1871,7 @@ mod tests {
                 entries: [(
                     "codex".to_string(),
                     ProviderEndpointConfig {
+                        display_name: None,
                         worker_staleness_threshold_ms: None,
                         protocol: Protocol::Codex,
                         api_key_secret_ref: None,
@@ -1832,6 +1879,7 @@ mod tests {
                         base_url: None,
                         command: None,
                         state_dir: None,
+                        plaintext_credentials: Default::default(),
                     },
                 )]
                 .into_iter()
@@ -1856,7 +1904,8 @@ mod tests {
                     .build()
                     .unwrap()
                     .block_on(async {
-                        let provider = create_provider(&config, &secret_manager).await;
+                        let provider =
+                            create_provider(&config, &secret_manager, storage.as_ref()).await;
                         let provider_model = provider.model_id().to_string();
                         let completion_error = provider
                             .complete(swage_core::CompletionRequest {
@@ -1907,7 +1956,7 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(create_provider(&config, &secret_manager));
+                .block_on(create_provider(&config, &secret_manager, storage.as_ref()));
         });
 
         let events = captured.lock().unwrap();
@@ -1933,6 +1982,7 @@ mod tests {
         let events = MessageRecorder::default();
         let captured = Arc::clone(&events.0);
         let provider = ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol: Protocol::OpenAi,
             api_key_secret_ref: None,
@@ -1940,6 +1990,7 @@ mod tests {
             base_url: Some("https://provider.invalid".into()),
             command: None,
             state_dir: None,
+            plaintext_credentials: Default::default(),
         };
         let model = model("provider", "test-model");
         let telegram = TelegramChannelConfig {
@@ -1962,8 +2013,8 @@ mod tests {
             ..Default::default()
         };
         let _subscriber = tracing::subscriber::set_default(Registry::default().with(events));
-        create_provider(&config, &secret_manager).await;
-        create_voice_provider(&config, &secret_manager).await;
+        create_provider(&config, &secret_manager, storage.as_ref()).await;
+        create_voice_provider(&config, &secret_manager, storage.as_ref()).await;
         let telegram_token = resolve_telegram_token(&telegram, &secret_manager)
             .await
             .expect("legacy Telegram environment credential should still resolve");
@@ -2004,6 +2055,7 @@ mod tests {
                     (
                         "openai".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
@@ -2011,11 +2063,13 @@ mod tests {
                             base_url: Some("http://localhost/openai".to_string()),
                             command: None,
                             state_dir: None,
+                            plaintext_credentials: Default::default(),
                         },
                     ),
                     (
                         "anthropic".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::Anthropic,
                             api_key_secret_ref: None,
@@ -2023,6 +2077,7 @@ mod tests {
                             base_url: Some("http://localhost/anthropic".to_string()),
                             command: None,
                             state_dir: None,
+                            plaintext_credentials: Default::default(),
                         },
                     ),
                 ]
@@ -2060,6 +2115,7 @@ mod tests {
 
     fn endpoint(protocol: Protocol, base_url: String) -> ProviderEndpointConfig {
         ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol,
             api_key_secret_ref: None,
@@ -2067,7 +2123,264 @@ mod tests {
             base_url: Some(base_url),
             command: None,
             state_dir: None,
+            plaintext_credentials: Default::default(),
         }
+    }
+
+    /// An address of this machine that is not loopback, so a request to it
+    /// is plaintext in the policy's sense, or `None` on a host with no such
+    /// interface.
+    fn non_loopback_local_address() -> Option<std::net::IpAddr> {
+        crate::handlers::local_interface_addresses()
+            .ok()?
+            .into_iter()
+            .find(|address| matches!(address, std::net::IpAddr::V4(v4) if !v4.is_loopback()))
+    }
+
+    async fn plaintext_exposure_events(
+        storage: &swage_storage::SqliteStorage,
+    ) -> Vec<swage_storage::AuditEvent> {
+        use swage_storage::store::AuditStore;
+        storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                event_kind: Some(crate::provider_credential_exposure::EVENT_KIND.into()),
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .expect("list exposure events")
+    }
+
+    /// A one-provider, one-model configuration whose provider carries a
+    /// credential from the environment and the given policy.
+    fn keyed_provider_config(
+        base_url: String,
+        key_env: &'static str,
+        policy: swage_config::PlaintextCredentialPolicy,
+    ) -> swage_config::ResolvedConfig {
+        unsafe { std::env::set_var(key_env, "provider-key") };
+        let mut provider = endpoint(Protocol::OpenAi, base_url);
+        provider.api_key_env = Some(key_env.into());
+        provider.plaintext_credentials = policy;
+        swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "lan".into(),
+                entries: [("lan".into(), provider)].into_iter().collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "lan-model".into(),
+                entries: [("lan-model".into(), model("lan", "lan-wire"))]
+                    .into_iter()
+                    .collect(),
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A request that names a refused model is answered with the refusal at
+    /// that model's place in the chain, not passed to another provider.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_for_a_refused_model_is_refused_not_rerouted() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let local_url =
+            spawn_openai_compatible_server(Arc::clone(&calls), StatusCode::OK, "local reply").await;
+        let mut config = keyed_provider_config(
+            "http://192.0.2.13:9/v1".into(),
+            "SWAGE_PLAINTEXT_REROUTE_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Refuse,
+        );
+        config
+            .providers
+            .entries
+            .insert("local".into(), endpoint(Protocol::OpenAi, local_url));
+        config.providers.default = "local".into();
+        config
+            .models
+            .entries
+            .insert("local-model".into(), model("local", "local-wire"));
+        config.models.default = "local-model".into();
+
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                .await;
+        let error = provider
+            .complete(selected_model_request("lan-wire"))
+            .await
+            .expect_err("the refused model answers with its refusal");
+        assert!(error.to_string().contains("plaintext"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_credential_to_a_loopback_endpoint_sends_with_nothing_recorded() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let base_url =
+            spawn_openai_compatible_server(Arc::clone(&calls), StatusCode::OK, "local reply").await;
+        let config = keyed_provider_config(
+            base_url,
+            "SWAGE_PLAINTEXT_LOOPBACK_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Refuse,
+        );
+
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                .await;
+        let response = provider
+            .complete(selected_model_request("lan-model"))
+            .await
+            .expect("a loopback endpoint is never plaintext, whatever the policy");
+
+        assert_eq!(response.content, "local reply");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(plaintext_exposure_events(&storage).await.is_empty());
+    }
+
+    /// Under the refuse policy no request leaves: the provider built in the
+    /// chain's place answers every call with the reason, and the record
+    /// carries one refusal however often the provider is rebuilt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_credential_to_a_remote_plaintext_endpoint_is_refused_before_transmission() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        // TEST-NET-1 (RFC 5737): routable nowhere, so a request that did
+        // leave would hang rather than succeed; none may.
+        let config = keyed_provider_config(
+            "http://192.0.2.10:9/v1".into(),
+            "SWAGE_PLAINTEXT_REFUSE_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Refuse,
+        );
+
+        for _ in 0..2 {
+            let provider =
+                create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                    .await;
+            let error = provider
+                .complete(selected_model_request("lan-model"))
+                .await
+                .expect_err("the refuse policy sends nothing");
+            assert!(
+                matches!(&error, swage_core::ProviderError::InvalidConfig { message }
+                    if message.contains("plaintext") && message.contains("'lan'")),
+                "{error}"
+            );
+        }
+
+        let events = plaintext_exposure_events(&storage).await;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].entity_id, "lan");
+        assert_eq!(events[0].metadata["decision"], "refused");
+        assert_eq!(events[0].metadata["host"], "192.0.2.10");
+        assert!(!events[0].summary.contains("provider-key"));
+    }
+
+    /// Under the warn policy the request is sent, after one warning in the
+    /// record for the provider; a rebuild finds the warning and adds none.
+    /// Under the allow policy nothing is recorded. Both need an address of
+    /// this machine that is not loopback to send to.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_credential_to_a_remote_plaintext_endpoint_warns_once_or_sends_silently() {
+        let Some(address) = non_loopback_local_address() else {
+            eprintln!("no non-loopback interface: transmission under warn and allow not exercised");
+            return;
+        };
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let base_url = spawn_openai_compatible_server_on(
+            address,
+            Arc::clone(&calls),
+            StatusCode::OK,
+            "remote reply",
+        )
+        .await;
+
+        let warn = keyed_provider_config(
+            base_url.clone(),
+            "SWAGE_PLAINTEXT_WARN_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Warn,
+        );
+        for _ in 0..2 {
+            let provider =
+                create_provider_with_retry(&warn, &secret_manager, storage.as_ref(), no_retry())
+                    .await;
+            let response = provider
+                .complete(selected_model_request("lan-model"))
+                .await
+                .expect("the warn policy sends");
+            assert_eq!(response.content, "remote reply");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let events = plaintext_exposure_events(&storage).await;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].metadata["decision"], "warned");
+        let origin = events[0].metadata["origin"]
+            .as_str()
+            .expect("origin recorded");
+        assert!(
+            base_url.starts_with(origin),
+            "{origin} is {base_url}'s origin"
+        );
+
+        let allow_storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let allow = keyed_provider_config(
+            base_url,
+            "SWAGE_PLAINTEXT_ALLOW_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Allow,
+        );
+        let provider =
+            create_provider_with_retry(&allow, &secret_manager, allow_storage.as_ref(), no_retry())
+                .await;
+        provider
+            .complete(selected_model_request("lan-model"))
+            .await
+            .expect("the allow policy sends");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(plaintext_exposure_events(&allow_storage).await.is_empty());
+    }
+
+    /// The voice provider shares the default provider's credential and route,
+    /// so it is judged by the same policy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_voice_provider_follows_the_default_providers_plaintext_policy() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let config = keyed_provider_config(
+            "http://192.0.2.12:9/v1".into(),
+            "SWAGE_PLAINTEXT_VOICE_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Refuse,
+        );
+
+        let voice = create_voice_provider(&config, &secret_manager, storage.as_ref()).await;
+        let error = voice
+            .synthesise(swage_provider::SpeechRequest {
+                text: "hello".into(),
+                voice: None,
+                format: None,
+            })
+            .await
+            .expect_err("voice under the refuse policy sends nothing");
+        assert!(error.to_string().contains("plaintext"), "{error}");
+        assert_eq!(plaintext_exposure_events(&storage).await.len(), 1);
     }
 
     async fn unreachable_base_url() -> String {
@@ -2159,7 +2472,9 @@ mod tests {
             ..Default::default()
         };
 
-        let provider = create_provider_with_retry(&config, &secret_manager, no_retry()).await;
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                .await;
 
         let completion = provider
             .complete(selected_model_request("gpt-6-luna"))
@@ -2246,7 +2561,9 @@ mod tests {
             ..Default::default()
         };
 
-        let provider = create_provider_with_retry(&config, &secret_manager, no_retry()).await;
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                .await;
         let request = selected_model_request("gpt-6.1-sol");
         let _failed = provider.complete(request.clone()).await;
 
@@ -2258,6 +2575,7 @@ mod tests {
     #[test]
     fn a_scoped_credential_override_does_not_reuse_the_runtime_provider() {
         let endpoint_with = |secret: Option<&str>, env: Option<&str>| ProviderEndpointConfig {
+            display_name: None,
             api_key_secret_ref: secret.map(str::to_owned),
             api_key_env: env.map(str::to_owned),
             ..endpoint(Protocol::OpenAi, "https://proxy.example/v1".to_owned())
@@ -2302,6 +2620,22 @@ mod tests {
         status: StatusCode,
         content: &'static str,
     ) -> String {
+        spawn_openai_compatible_server_on(
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            calls,
+            status,
+            content,
+        )
+        .await
+    }
+
+    /// The same mock provider bound on `bind`, addressed by that address.
+    async fn spawn_openai_compatible_server_on(
+        bind: std::net::IpAddr,
+        calls: Arc<AtomicUsize>,
+        status: StatusCode,
+        content: &'static str,
+    ) -> String {
         let app = Router::new().route(
             "/chat/completions",
             post(move |Json(_body): Json<Value>| {
@@ -2338,7 +2672,7 @@ mod tests {
                 }
             }),
         );
-        let listener = TcpListener::bind("127.0.0.1:0")
+        let listener = TcpListener::bind((bind, 0))
             .await
             .expect("bind mock provider");
         let addr = listener.local_addr().expect("mock provider addr");
@@ -2367,6 +2701,105 @@ mod tests {
                 .get(swage_tool::delegate::DELEGATE_TOOL_NAME)
                 .is_some(),
             "delegate tool should be registered with the built-in dispatcher",
+        );
+    }
+
+    /// Every tool the orientation's preferences name is a tool of this
+    /// gateway — registered by the built-in dispatcher, or a built-in name a
+    /// host registers when its runtime is present — so a renamed tool fails
+    /// here rather than silently losing its sentence.
+    #[tokio::test]
+    async fn orientation_preferences_name_only_the_gateways_tools() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
+        );
+        let registry = dispatcher.registry();
+
+        for tool in swage_context::orientation::tools_named_in_preferences() {
+            assert!(
+                registry.get(tool).is_some() || registry.is_protected(tool),
+                "the orientation names `{tool}`, which is no tool of this gateway",
+            );
+        }
+    }
+
+    /// The registered-secrets section names, from the tools' own
+    /// declarations, each gateway tool whose parameters resolve a
+    /// `secret://` reference — so the text never names a tool or parameter
+    /// the executor does not resolve, nor omits one it does.
+    #[tokio::test]
+    async fn orientation_names_the_tools_that_resolve_secret_references() {
+        use swage_context::element::ContextElement;
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
+        );
+        let registry = dispatcher.registry();
+        let offered = registry.offered(registry.list().into_iter().map(str::to_string).collect());
+        assert!(
+            !offered.secret_reference_parameters.is_empty(),
+            "the gateway ships at least one tool that resolves a secret reference"
+        );
+        for (tool, parameters) in &offered.secret_reference_parameters {
+            let declared = registry
+                .get(tool)
+                .expect("a declared resolver is a registered tool");
+            assert_eq!(
+                parameters,
+                &declared
+                    .device_secret_keys()
+                    .iter()
+                    .map(|key| (*key).to_owned())
+                    .collect::<Vec<_>>()
+            );
+            for parameter in parameters {
+                assert!(
+                    declared.parameters()["properties"].get(parameter).is_some(),
+                    "`{tool}` resolves `{parameter}`, which its schema does not offer"
+                );
+            }
+        }
+
+        let text = swage_context::orientation::OrientationElement::new(
+            swage_context::orientation::SessionEnvironment {
+                workspaces: vec![],
+                topic_name: String::new(),
+                topic_description: String::new(),
+                tool_root: swage_context::orientation::ToolRoot::ManagedScratch(
+                    "/scratch/session".into(),
+                ),
+                started_at: chrono::Utc::now(),
+                channel: None,
+            },
+            vec![],
+            offered.names.clone(),
+            offered.secret_reference_parameters.clone(),
+        )
+        .content()[0]
+            .text_content();
+        for (tool, parameters) in &offered.secret_reference_parameters {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| format!("`{parameter}`"))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            assert!(
+                text.contains(&format!("`{tool}` resolves one in {parameters}")),
+                "{text}"
+            );
+        }
+        assert!(
+            text.contains("Every other tool, `shell` included,"),
+            "{text}"
         );
     }
 
@@ -2521,7 +2954,7 @@ mod tests {
             },
         );
 
-        let provider = create_provider(&config, &secret_manager).await;
+        let provider = create_provider(&config, &secret_manager, storage.as_ref()).await;
         let result = provider
             .complete(swage_core::CompletionRequest {
                 effort: None,
@@ -2569,6 +3002,7 @@ mod tests {
             .expect("secret should be created");
 
         let provider = swage_config::ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol: swage_config::Protocol::Anthropic,
             api_key_secret_ref: Some(secret.reference),
@@ -2576,6 +3010,7 @@ mod tests {
             base_url: Some("https://provider.invalid".into()),
             command: None,
             state_dir: None,
+            plaintext_credentials: Default::default(),
         };
         let model = swage_config::ModelEndpointConfig {
             provider_id: "anthropic".into(),

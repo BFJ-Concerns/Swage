@@ -15,7 +15,6 @@ use swage_safety::LeakDetector;
 
 use crate::context::ToolContext;
 use crate::output::ToolOutput;
-use crate::params::redact_params;
 use crate::permission::{PermissionCheckResult, PermissionConfig, check_permission};
 use crate::rate_limit::{RateLimitConfig, RateLimitDecision, RateLimiter};
 use crate::registry::ToolRegistry;
@@ -57,7 +56,10 @@ impl ToolExecutionStrategy for DefaultExecutionStrategy {
         params: &Value,
         ctx: &dyn ToolContext,
     ) -> Result<Value, ToolError> {
-        tool.execute(params.clone(), ctx).await
+        ctx.mark_execution_started();
+        tool.execute(params.clone(), ctx)
+            .await
+            .map_err(ToolError::execution_uncertain)
     }
 }
 
@@ -74,16 +76,14 @@ impl ToolExecutionStrategy for DefaultExecutionStrategy {
 ///    ensuring they never consume capacity.
 /// 3. **Rate limit** — calls that exceed the configured windows are rejected
 ///    with a descriptive `ExecutionFailed` error.
-/// 4. **Schema validation** — invalid parameters short-circuit before the
-///    tool's `execute()` method is invoked.
-/// 5. **Parameter redaction** — a sanitised copy is produced for logging;
-///    the original unredacted params are passed to `execute()`.
-/// 6. **Execute** — the tool runs; wall-clock time is measured by the
+/// 4. **Argument validation** — schema checks and the tool's I/O-free
+///    preflight short-circuit before `execute()` is invoked.
+/// 5. **Execute** — the tool runs; wall-clock time is measured by the
 ///    framework (not the tool itself).
-/// 7. **Leak detection** — the raw output is serialised to JSON, scanned,
+/// 6. **Leak detection** — the raw output is serialised to JSON, scanned,
 ///    and parsed back. If scanning breaks the JSON structure, the scanned
 ///    text is wrapped as a string value so output is never silently lost.
-/// 8. **ToolOutput assembly** — duration is always set; `raw` is populated
+/// 7. **ToolOutput assembly** — duration is always set; `raw` is populated
 ///    only when `debug_mode` is enabled.
 pub struct ToolDispatcher {
     registry: Arc<ToolRegistry>,
@@ -199,6 +199,35 @@ impl ToolDispatcher {
         self
     }
 
+    /// The tools this dispatcher offers the model, by name: registered,
+    /// permitted (an approval requirement keeps a granted tool offered), and
+    /// admitted by the advertisement filter — the names `tool_definitions`
+    /// advertises, for a caller that composes text around tools and must not
+    /// name one the model cannot call.
+    pub fn offered_tools(&self) -> std::collections::BTreeSet<String> {
+        self.registry
+            .list()
+            .into_iter()
+            .filter(|name| self.offered_tool(name).is_some())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The offered set with each tool's secret-resolving parameters, from
+    /// the registry's own declarations.
+    pub fn offered(&self) -> crate::registry::OfferedTools {
+        self.registry.offered(self.offered_tools())
+    }
+
+    fn offered_tool(&self, tool_name: &str) -> Option<Arc<dyn crate::tool::Tool>> {
+        check_permission(&self.permissions, tool_name).ok()?;
+        let tool = self.registry.get(tool_name)?;
+        self.advertisement_filter
+            .as_ref()
+            .is_none_or(|filter| filter(tool.as_ref()))
+            .then_some(tool)
+    }
+
     /// Returns tool schemas suitable for `ToolCompletionRequest.tool_definitions`.
     ///
     /// Only tools that the dispatcher would permit the agent to invoke are
@@ -209,13 +238,7 @@ impl ToolDispatcher {
         self.registry
             .list()
             .into_iter()
-            .filter(|name| check_permission(&self.permissions, name).is_ok())
-            .filter_map(|name| self.registry.get(name))
-            .filter(|tool| {
-                self.advertisement_filter
-                    .as_ref()
-                    .is_none_or(|filter| filter(tool.as_ref()))
-            })
+            .filter_map(|name| self.offered_tool(name))
             .map(|tool| {
                 serde_json::json!({
                     "name": tool.name(),
@@ -292,13 +315,9 @@ impl ToolDispatcher {
         // Step 4: Schema validation — invalid params never reach execute().
         let schema = tool.parameters();
         validate_tool_schema(tool_name, &schema, &params)?;
+        tool.validate_call(&params)?;
 
-        // Step 5: Parameter redaction for logging.
-        // The redacted copy is available here for future hook/audit integration;
-        // the original params are passed to execute() below.
-        let _redacted_params = redact_params(&params, tool.sensitive_keys());
-
-        // Step 6: Execute with wall-clock timing.
+        // Step 5: Execute with wall-clock timing.
         // If an execution strategy is set, delegate to it; otherwise call the
         // tool directly (the default, backward-compatible path).
         let start = Instant::now();
@@ -306,13 +325,18 @@ impl ToolDispatcher {
             Some(strategy) => {
                 strategy
                     .execute(tool.as_ref(), tool_name, &params, ctx)
-                    .await?
+                    .await
             }
-            None => tool.execute(params, ctx).await?,
-        };
+            None => {
+                ctx.mark_execution_started();
+                tool.execute(params, ctx).await
+            }
+        }
+        .map_err(ToolError::execution_uncertain)?;
+        let execution = tool.execution_outcome(&raw_output);
         let duration = start.elapsed();
 
-        // Step 7: Leak detection — serialise, scan, parse back.
+        // Step 6: Leak detection — serialise, scan, parse back.
         let raw_str = serde_json::to_string(&raw_output).unwrap_or_default();
         let scanned_str = self.leak_detector.scan(&raw_str);
         let result: Value = serde_json::from_str(&scanned_str).unwrap_or({
@@ -322,8 +346,9 @@ impl ToolDispatcher {
             Value::String(scanned_str)
         });
 
-        // Step 8: Assemble ToolOutput.
+        // Step 7: Assemble ToolOutput.
         Ok(ToolOutput {
+            execution,
             result,
             cost: None,
             duration,
@@ -378,30 +403,34 @@ impl ToolDispatcher {
         // Step 4: Schema validation.
         let schema = tool.parameters();
         validate_tool_schema(tool_name, &schema, &params)?;
+        tool.validate_call(&params)?;
 
-        // Step 5: Parameter redaction.
-        let _redacted_params = redact_params(&params, tool.sensitive_keys());
-
-        // Step 6: Execute with timing.
+        // Step 5: Execute with timing.
         let start = Instant::now();
         let raw_output = match &self.execution_strategy {
             Some(strategy) => {
                 strategy
                     .execute(tool.as_ref(), tool_name, &params, ctx)
-                    .await?
+                    .await
             }
-            None => tool.execute(params, ctx).await?,
-        };
+            None => {
+                ctx.mark_execution_started();
+                tool.execute(params, ctx).await
+            }
+        }
+        .map_err(ToolError::execution_uncertain)?;
+        let execution = tool.execution_outcome(&raw_output);
         let duration = start.elapsed();
 
-        // Step 7: Leak detection.
+        // Step 6: Leak detection.
         let raw_str = serde_json::to_string(&raw_output).unwrap_or_default();
         let scanned_str = self.leak_detector.scan(&raw_str);
         let result: Value =
             serde_json::from_str(&scanned_str).unwrap_or(Value::String(scanned_str));
 
-        // Step 8: Assemble output.
+        // Step 7: Assemble output.
         Ok(ToolOutput {
+            execution,
             result,
             cost: None,
             duration,
@@ -905,7 +934,10 @@ mod tests {
                 ctx: &dyn ToolContext,
             ) -> Result<Value, ToolError> {
                 self.called.store(true, Ordering::SeqCst);
-                tool.execute(params.clone(), ctx).await
+                ctx.mark_execution_started();
+                tool.execute(params.clone(), ctx)
+                    .await
+                    .map_err(ToolError::after_execution)
             }
         }
 
@@ -946,6 +978,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_strategy_error_propagates() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = ctx();
+        context.working_directory = root.path().to_path_buf();
         use super::ToolExecutionStrategy;
 
         // Strategy that always fails — verifies errors propagate through the pipeline.
@@ -971,13 +1006,22 @@ mod tests {
             make_dispatcher("echo", true, false).with_execution_strategy(Arc::new(FailingStrategy));
 
         let err = dispatcher
-            .dispatch("echo", json!({"text": "x"}), &ctx(), "agent-test")
+            .dispatch("echo", json!({"text": "x"}), &context, "agent-test")
             .await
             .expect_err("strategy error should propagate");
 
+        assert_eq!(
+            err.execution(),
+            swage_protocol::client::conversation::ToolExecution {
+                outcome: swage_protocol::client::conversation::ToolOutcome::Failed,
+                stage: swage_protocol::client::conversation::ToolExecutionStage::Unknown,
+                completion: swage_protocol::client::conversation::ToolCompletion::Unknown,
+            },
+            "a strategy error alone does not confirm work completed: {err:?}"
+        );
         assert!(
-            matches!(err, ToolError::ExecutionFailed { .. }),
-            "expected ExecutionFailed from strategy, got: {err:?}"
+            err.is_retriable(),
+            "the wrapped failure must remain retriable"
         );
         assert!(err.to_string().contains("strategy rejected"));
     }
@@ -1109,5 +1153,76 @@ mod tests {
             matches!(err, ToolError::InvalidParameters { .. }),
             "expected InvalidParameters, got: {err:?}"
         );
+    }
+    #[tokio::test]
+    async fn undeclared_error_completion_remains_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = ctx();
+        context.working_directory = root.path().to_path_buf();
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use swage_protocol::client::conversation::{
+            ToolCompletion, ToolExecutionStage, ToolOutcome,
+        };
+        struct UnclassifiedTool(Arc<AtomicUsize>);
+        #[async_trait]
+        impl Tool for UnclassifiedTool {
+            fn name(&self) -> &str {
+                "unclassified"
+            }
+            fn description(&self) -> &str {
+                "Checks an input."
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object"})
+            }
+            async fn execute(
+                &self,
+                params: Value,
+                _: &dyn ToolContext,
+            ) -> Result<Value, ToolError> {
+                if params["work"] == true {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: "cannot accept input".into(),
+                })
+            }
+        }
+        for strategy in [false, true] {
+            let work = Arc::new(AtomicUsize::new(0));
+            let mut dispatcher =
+                ToolDispatcher::allow_all(vec![
+                    Arc::new(UnclassifiedTool(work.clone())) as Arc<dyn Tool>
+                ]);
+            if strategy {
+                dispatcher =
+                    dispatcher.with_execution_strategy(Arc::new(super::DefaultExecutionStrategy));
+            }
+            for approved in [false, true] {
+                for did_work in [false, true] {
+                    let params = json!({"work":did_work});
+                    let error = if approved {
+                        dispatcher
+                            .dispatch_approved("unclassified", params, &context, "agent")
+                            .await
+                    } else {
+                        dispatcher
+                            .dispatch("unclassified", params, &context, "agent")
+                            .await
+                    }
+                    .unwrap_err();
+                    let execution = error.execution();
+                    assert_eq!(execution.stage, ToolExecutionStage::Unknown);
+                    assert_eq!(execution.completion, ToolCompletion::Unknown);
+                    assert_eq!(execution.outcome, ToolOutcome::Rejected);
+                }
+            }
+            assert_eq!(
+                work.load(Ordering::SeqCst),
+                2,
+                "both dispatch routes actually performed work"
+            );
+        }
     }
 }

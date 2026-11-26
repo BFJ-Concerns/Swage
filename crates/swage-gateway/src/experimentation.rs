@@ -35,9 +35,22 @@ pub const LOCATION_CONTEXT_ASSEMBLY: &str = "context.assembly";
 pub const LOCATION_WORKING_NORMS: &str = "context.working_norms";
 pub const LOCATION_TASK_PROMPT: &str = "task.prompt";
 
+/// The closing-account request: the text that asks the model for a final
+/// account when its last round after tool rounds returns none. The authored
+/// default (`swage_agent::closing_account::CLOSING_ACCOUNT_REQUEST`) is the
+/// first variant; a second sets `AgentConfig::closing_account_request`.
+pub const LOCATION_CLOSING_ACCOUNT_REQUEST: &str = "turn.closing_account_request";
+
 /// The memory curator's prompt: the instructions every curation pass runs
 /// under. The authored default is the first variant.
 pub const LOCATION_MEMORY_CURATOR_PROMPT: &str = "prompts.memory_curator";
+
+/// The succession summariser's instruction: the text the hand-over notes
+/// are written under when a session's history outgrows its room or keeps
+/// hitting walls. Drawn when a summary is first asked for, never before, so
+/// a session that never summarises holds no selection. The authored default
+/// is the first variant.
+pub const LOCATION_SUCCESSION_SUMMARY_PROMPT: &str = "prompts.succession_summary";
 
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
@@ -59,7 +72,7 @@ pub enum SelectionReason {
 }
 
 /// The outcome of one variant selection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VariantDecision {
     pub variant: String,
     pub reason: SelectionReason,

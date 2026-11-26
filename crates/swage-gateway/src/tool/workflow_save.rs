@@ -66,16 +66,20 @@ impl Tool for WorkflowSaveTool {
     }
 
     fn description(&self) -> &str {
-        "Keep a workflow you have written so this topic can run it again by name with \
-         workflow_run, and revise one you kept earlier. Use action 'save' with the whole \
-         script to store it — under a name the topic already uses, this adds a new version \
-         rather than replacing history; under the name of a shipped or skill-carried \
-         workflow, the topic's copy takes over from then on and the original is untouched. \
-         Use action 'update' to change a kept workflow's source or description. A workflow \
-         saved this way runs with exactly the reach this conversation already has, and \
-         cannot send results anywhere outside the machine. Activate the Workflow Authoring \
-         skill before writing the script: it documents the script surface and the \
-         determinism rules."
+        "Keep a workflow script under a name, so that sessions in this topic can start it \
+         by that name with `workflow_run`. `save` stores the whole script: under a new name \
+         it creates the workflow, and under a name the topic already uses it adds a version \
+         and keeps the earlier ones. Saving under the name of a workflow that came with the \
+         installation or with a skill gives the topic its own copy, which is what that name \
+         starts from then on, and leaves the original untouched. `update` changes the source \
+         or the description of a workflow the topic already keeps, and fails for a name it \
+         does not keep. A workflow saved here runs with the reach this session has and no \
+         more, and cannot send its results outside the machine. A script needs no saving to \
+         be run: `workflow_run` takes source directly, and saving is for one worth starting \
+         again. The result gives the name the workflow is kept under, its version and \
+         whether it was newly created. The script interface is set out by the \
+         `workflow-authoring` skill and by the `workflow-engine` document that `docs_read` \
+         returns."
     }
 
     fn parameters(&self) -> Value {
@@ -85,19 +89,19 @@ impl Tool for WorkflowSaveTool {
                 "action": {
                     "type": "string",
                     "enum": ["save", "update"],
-                    "description": "'save' stores a workflow under a name, creating it or adding a version. 'update' revises a workflow this topic already keeps."
+                    "description": "`save` stores the script under `name`, creating the workflow or adding a version to it. `update` changes the `source` or the `description` of a workflow this topic already keeps."
                 },
                 "name": {
                     "type": "string",
-                    "description": "The workflow's name in this topic — letters, digits, hyphens, and underscores. A name the script's own meta header declares wins over this one."
+                    "description": "The workflow's name in this topic, in letters, digits, hyphens and underscores. Where the script's own `meta` header declares a name, that name is used in place of this one."
                 },
                 "source": {
                     "type": "string",
-                    "description": "The workflow's JavaScript source. Required for 'save'; on 'update' it adds a new version."
+                    "description": "The whole script, in JavaScript. Required for `save`; given on `update`, it becomes a new version."
                 },
                 "description": {
                     "type": "string",
-                    "description": "What the workflow does, for whoever picks it later from the list."
+                    "description": "What the workflow does and when to start it, for whoever reads it in `workflow_list`."
                 }
             },
             "required": ["action", "name"],
@@ -227,7 +231,7 @@ mod tests {
 
     fn state() -> (AppState, Arc<SqliteStorage>) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),

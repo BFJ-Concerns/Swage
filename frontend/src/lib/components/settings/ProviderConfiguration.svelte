@@ -8,7 +8,8 @@
   import ProviderModelManagement from "./ProviderModelManagement.svelte";
 
   interface Props {
-    id: string; index: number; provider: ProviderSettings; displayName: string;
+    secrets: import("../../protocol/SecretResponse").SecretResponse[]; secretsError: string;
+    id: string; index: number; provider: ProviderSettings; displayName: string; kindLabel: string;
     models: [string, ModelSettings][]; defaultModel: string; saved: boolean;
     signInState: ProviderSignInState | undefined; deviceCode: { code: string; verificationUrl: string } | null;
     selected: boolean; query: string; discoveredModels: DiscoveredModel[]; addedModelIds: Set<string>; isPersisting: boolean;
@@ -18,7 +19,7 @@
     onbegin: (id: string, method: "browser" | "device_code") => void; oncheck: (id: string) => void; oncopy: () => void; onend: (id: string) => void;
   }
 
-  let { id, index, provider, displayName, models, defaultModel, saved, signInState, deviceCode, selected, query, discoveredModels, addedModelIds, isPersisting, onremoveprovider, onmanualadd, onremovemodel, ondefault, onselect, onquery, onrefresh, ondiscoveradd, onbegin, oncheck, oncopy, onend }: Props = $props();
+  let { secrets, secretsError, id, index, provider, displayName, kindLabel, models, defaultModel, saved, signInState, deviceCode, selected, query, discoveredModels, addedModelIds, isPersisting, onremoveprovider, onmanualadd, onremovemodel, ondefault, onselect, onquery, onrefresh, ondiscoveradd, onbegin, oncheck, oncopy, onend }: Props = $props();
   let collapsed = $state(false);
   let manualModelId = $state("");
   let baseUrlDraft = $state("");
@@ -42,6 +43,23 @@
     lastBaseUrl = value;
     provider.base_url = value || null;
   }
+  const selectedSecret = $derived(secrets.find((secret) => secret.reference === provider.api_key_secret_ref));
+  const credentialSource = $derived(provider.api_key_secret_ref
+    ? selectedSecret?.backend_kind === "managed" ? SETTINGS_LABELS["providers.*.api_key_secret_ref"]
+      : selectedSecret?.backend_kind === "env" ? "Environment credential"
+      : selectedSecret?.backend_kind === "file" ? "File credential" : "Governed credential"
+    : provider.api_key_env ? "Environment credential" : "No credential");
+  const canPasteCredential = $derived(!provider.api_key_secret_ref || selectedSecret?.backend_kind === "managed");
+  const credentialGuidance = $derived(canPasteCredential
+    ? "Paste a new value to store or rotate this provider's credential."
+    : selectedSecret?.backend_kind === "env" ? "Update this credential in its environment variable."
+    : selectedSecret?.backend_kind === "file" ? "Update this credential in its source file."
+    : "Credential source unavailable. Choose another credential or clear the selection to store a new key.");
+  function selectSecret(event: Event): void {
+    provider.api_key_secret_ref = (event.currentTarget as HTMLSelectElement).value || null;
+    provider.api_key_env = null;
+    provider.api_key = "";
+  }
   const codexUsable = $derived(provider.protocol !== "codex" || signInState?.status === "signed_in");
 </script>
 
@@ -49,8 +67,8 @@
   <div class="provider-head">
     <button type="button" class="provider-collapse" aria-expanded={!collapsed} aria-label={`Provider ${displayName} — ${collapsed ? "expand" : "collapse"}`} onclick={() => collapsed = !collapsed}>
       <span class="chevron" aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
-      <span class="provider-head-text"><span class="provider-index">Provider <span class="ix">{String(index + 1).padStart(2, "0")}</span></span><h2>{displayName}</h2><span class="provider-meta-line"><span class="meta-protocol">{provider.protocol}</span><span class="meta-key">{id}</span><span class="meta-endpoint">{provider.base_url || "provider default endpoint"}</span></span></span>
-      <span class="credential-status" class:set={provider.has_credential || signInState?.status === "signed_in"}>{provider.protocol === "codex" ? signInState?.status === "signed_in" ? "✓ Signed in" : signInState?.status === "signing_in" ? "Sign-in pending" : signInState?.status === "expired" ? "Sign-in expired" : "Signed out" : provider.has_credential ? `✓ ${SETTINGS_LABELS["providers.*.has_credential"]}` : "No credential"}</span>
+      <span class="provider-head-text"><span class="provider-index">Provider <span class="ix">{String(index + 1).padStart(2, "0")}</span></span><h2>{displayName}</h2><span class="provider-meta-line"><span class="meta-protocol">{kindLabel}</span><span class="meta-key">{id}</span><span class="meta-endpoint">{provider.base_url || "provider default endpoint"}</span></span></span>
+      <span class="credential-status" class:set={provider.has_credential || signInState?.status === "signed_in"}>{provider.protocol === "codex" ? signInState?.status === "signed_in" ? "✓ Signed in" : signInState?.status === "signing_in" ? "Sign-in pending" : signInState?.status === "expired" ? "Sign-in expired" : "Signed out" : credentialSource}</span>
     </button>
     <button type="button" class="provider-remove" aria-label={`Remove provider ${displayName}`} title="Remove provider" onclick={() => onremoveprovider(id)}><span aria-hidden="true">×</span></button>
   </div>
@@ -58,7 +76,16 @@
     <div class="provider-body">
       {#if provider.protocol !== "codex"}
         <div class="field"><div class="key">{SETTINGS_LABELS["providers.*.base_url"]}<small>Override the provider's canonical endpoint when needed.</small></div><div class="val"><input type="text" class="text" aria-label={`${SETTINGS_LABELS["providers.*.base_url"]} for ${displayName}`} aria-invalid={!!baseUrlError} aria-describedby={baseUrlError ? `provider-${id}-base-url-error` : undefined} value={baseUrlDraft} oninput={editBaseUrl} placeholder="Provider default" autocomplete="off" />{#if baseUrlError}<p id={`provider-${id}-base-url-error`} class="field-error" role="alert">{baseUrlError}</p>{/if}</div></div>
-        <div class="field"><div class="key">{SETTINGS_LABELS["providers.*.api_key"]}<small>Paste a new value to store or rotate this provider's credential.</small></div><div class="val key-val"><input type="password" class="text" bind:value={provider.api_key} placeholder={provider.has_credential ? SETTINGS_LABELS["providers.*.api_key_secret_ref"] : "Paste to store"} autocomplete="off" /><span class="credential-status" class:set={provider.has_credential}>{provider.has_credential ? "Stored" : "Empty"}</span></div></div>
+        <div class="field"><div class="key">Governed credential<small>Choose an existing governed provider credential.</small></div><div class="val">
+          <select class="text" aria-label={`Governed credential for ${displayName}`} value={provider.api_key_secret_ref ?? ""} onchange={selectSecret}>
+            <option value="">No governed credential selected</option>
+            {#if provider.api_key_secret_ref && !secrets.some((secret) => secret.reference === provider.api_key_secret_ref)}<option value={provider.api_key_secret_ref}>Current credential</option>{/if}
+            {#each secrets.filter((secret) => secret.scope_kind === "global" || (secret.scope_kind === "provider" && secret.scope_id === id)) as secret (secret.id)}<option value={secret.reference}>{secret.name}</option>{/each}
+          </select>
+          {#if secretsError}<p role="status">{secretsError}</p>{/if}
+        </div></div>
+        <div class="field"><div class="key">{SETTINGS_LABELS["providers.*.api_key"]}<small>{credentialGuidance}</small></div><div class="val key-val"><input aria-label={`${SETTINGS_LABELS["providers.*.api_key"]} for ${displayName}`} type="password" class="text" disabled={!canPasteCredential} bind:value={provider.api_key} placeholder={provider.api_key_secret_ref ? credentialSource : provider.api_key_env ? "Resolved from environment" : "Paste to store"} autocomplete="off" /><span class="credential-status" class:set={!!provider.api_key_secret_ref || !!provider.api_key_env}>{provider.api_key ? isPersisting ? "Saving credential" : "Credential not saved" : credentialSource}</span></div></div>
+        {#if models.some(([key]) => key === defaultModel) && !provider.api_key_secret_ref && !provider.api_key_env}<p class="readiness-note" role="status">Authenticated turns cannot run with this default model until a credential is set.</p>{/if}
       {:else}
         <CodexProviderAuthentication providerId={id} {saved} state={signInState} {deviceCode} {onbegin} {oncheck} {oncopy} {onend} />
       {/if}
@@ -84,18 +111,11 @@
   .provider-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .provider-index { display: block; margin-bottom: 6px; font-family: var(--font-mono); font-weight: 500; font-size: var(--font-meta); line-height: 1; letter-spacing: 0.22em; text-transform: uppercase; color: var(--ink-soft); }
   .provider-index .ix { color: var(--ink-orange); }
-  .provider-head h2 { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: var(--font-display-3); line-height: 1; letter-spacing: 0.06em; text-transform: uppercase; }
+  .provider-head h2 { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: var(--font-display-3); line-height: 1; letter-spacing: 0.06em; text-transform: none; }
   .provider-meta-line { margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 6px 14px; font-family: var(--font-mono); font-size: var(--font-label-sm); color: var(--ink-soft); word-break: break-word; }
   .provider-meta-line span { display: inline-flex; align-items: center; gap: 14px; }
   .provider-meta-line span + span::before { content: "·"; color: var(--rule-soft); }
   .provider-meta-line .meta-protocol { color: var(--ink); letter-spacing: 0.06em; text-transform: uppercase; }
-  .field { display: grid; grid-template-columns: 220px 1fr; gap: 24px; border-top: 1px solid var(--rule-soft); padding: 14px 0; align-items: baseline; }
-  .key { font-family: var(--font-mono); font-weight: 500; font-size: 11px; line-height: 1.5; letter-spacing: 0.18em; text-transform: uppercase; }
-  .key small { display: block; margin-top: 4px; font-family: var(--font-body); font-weight: 400; font-size: 11px; line-height: 1.4; letter-spacing: 0; text-transform: none; color: var(--ink-soft); }
-  .val { display: flex; gap: 10px; flex-wrap: wrap; }
   .field-error { margin: 0; font-family: var(--font-mono); font-size: var(--font-label-sm); color: var(--error); }
   .key-val { align-items: center; }
-  .text { width: 100%; max-width: 480px; padding: 9px 11px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 13px; line-height: 1.4; }
-  .text:focus { outline: none; background: color-mix(in srgb, var(--accent) 6%, transparent); }
-  @media (max-width: 760px) { .field { grid-template-columns: 1fr; gap: 10px; } }
 </style>

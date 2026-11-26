@@ -13,8 +13,7 @@ pub struct VoiceCapabilitiesResponse {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub supported_voices: Vec<String>,
-    /// Why transcription or synthesis is unavailable, naming what to
-    /// configure; absent when both are available.
+    /// Why transcription or synthesis is unavailable. Absent when both are available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub unavailable_reason: Option<String>,

@@ -18,8 +18,82 @@ pub enum TurnState {
     Incomplete,
     Failed,
     Interrupted,
+    Cancelled,
     AwaitingApproval,
     Delegating,
+}
+
+/// What the dispatcher established about a call, independently of its payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    Succeeded,
+    Failed,
+    Refused,
+    Rejected,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionStage {
+    NotStarted,
+    Started,
+    Finished,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCompletion {
+    NotRun,
+    Confirmed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct ToolExecution {
+    pub outcome: ToolOutcome,
+    pub stage: ToolExecutionStage,
+    pub completion: ToolCompletion,
+}
+
+impl ToolExecution {
+    pub const fn succeeded() -> Self {
+        Self {
+            outcome: ToolOutcome::Succeeded,
+            stage: ToolExecutionStage::Finished,
+            completion: ToolCompletion::Confirmed,
+        }
+    }
+    pub const fn failed() -> Self {
+        Self {
+            outcome: ToolOutcome::Failed,
+            ..Self::succeeded()
+        }
+    }
+    pub const fn refused() -> Self {
+        Self {
+            outcome: ToolOutcome::Refused,
+            stage: ToolExecutionStage::NotStarted,
+            completion: ToolCompletion::NotRun,
+        }
+    }
+    pub const fn cancelled(started: bool) -> Self {
+        Self {
+            outcome: ToolOutcome::Cancelled,
+            stage: if started {
+                ToolExecutionStage::Started
+            } else {
+                ToolExecutionStage::NotStarted
+            },
+            completion: if started {
+                ToolCompletion::Unknown
+            } else {
+                ToolCompletion::NotRun
+            },
+        }
+    }
 }
 
 /// Request body for the conversation and topic-session creation endpoints.
@@ -74,6 +148,7 @@ pub struct ConversationSummary {
     pub last_activity: DateTime<Utc>,
     pub message_preview: Option<String>,
     pub has_interrupted_turn: bool,
+    pub latest_turn_state: Option<TurnState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -166,6 +241,9 @@ pub struct ConversationThreadDetail {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct ToolCallView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub execution: Option<ToolExecution>,
     pub call_id: String,
     pub tool: String,
     #[ts(type = "Record<string, unknown>")]
@@ -175,6 +253,11 @@ pub struct ToolCallView {
     pub status: Option<String>,
     #[ts(optional, type = "number | null")]
     pub duration_ms: Option<u64>,
+    /// Whether later turns receive only a preview of this result. Absent when
+    /// there is no completed, recognised model replay to account for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_replay_truncated: Option<bool>,
     pub truncated: bool,
     #[ts(optional, type = "number | null")]
     pub total_bytes: Option<u64>,
@@ -328,8 +411,11 @@ pub struct RecentSession {
     pub last_activity: DateTime<Utc>,
     pub message_preview: Option<String>,
     pub has_interrupted_turn: bool,
+    pub latest_turn_state: Option<TurnState>,
     /// A turn is executing on the session right now.
     pub has_running_turn: bool,
+    /// The running turn is held on a request only the person can answer.
+    pub awaiting_approval: bool,
     /// Set while the inactivity sweep has the session hidden from the
     /// recent list.
     #[serde(default, skip_serializing_if = "Option::is_none")]

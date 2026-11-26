@@ -80,7 +80,6 @@ function makeConnectionStore(): ConnectionStore {
     connectTo: () => {},
     disconnect: () => {},
     sendMessage: () => {},
-    cancelTurn: () => {},
     onServerEvent: () => {},
   };
 }

@@ -11,7 +11,6 @@
  *   - connectTo() delegates to the WS client and sets status via callback
  *   - disconnect() delegates and surfaces "disconnected"
  *   - sendMessage() emits a send_message ClientEvent
- *   - cancelTurn() emits a cancel ClientEvent
  *   - Server events are routed to registered handlers
  *   - Error status + message on handshake rejection (mirrors 409 Conflict)
  *   - onReconnect callback fires when reconnect succeeds
@@ -29,7 +28,7 @@ import { createConnectionStore } from "../stores/connection";
 
 interface MockWsClient extends WebSocketClient {
   // Test helpers to drive callbacks registered by the store.
-  triggerStatus(s: ConnectionStatus): void;
+  triggerStatus(s: ConnectionStatus, message?: string): void;
   triggerEvent(e: ServerEvent): void;
   // Introspection on what the store sent.
   sentEvents(): string[];
@@ -37,7 +36,7 @@ interface MockWsClient extends WebSocketClient {
 }
 
 function createMockWsClient(): MockWsClient {
-  let statusHandler: ((s: ConnectionStatus) => void) | null = null;
+  let statusHandler: ((s: ConnectionStatus, message?: string) => void) | null = null;
   let eventHandler: ((e: ServerEvent) => void) | null = null;
   const connected: string[] = [];
   const sent: string[] = [];
@@ -57,7 +56,7 @@ function createMockWsClient(): MockWsClient {
       statusHandler = handler;
     }),
 
-    triggerStatus: (s) => statusHandler?.(s),
+    triggerStatus: (s, message) => statusHandler?.(s, message),
     triggerEvent: (e) => eventHandler?.(e),
     sentEvents: () => [...sent],
     lastConnectedId: () => connected[connected.length - 1],
@@ -269,19 +268,6 @@ describe("sendMessage", () => {
   });
 });
 
-describe("cancelTurn", () => {
-  it("sends a cancel ClientEvent via the WS client", () => {
-    const mock = createMockWsClient();
-    const store = createConnectionStore({ wsClientFactory: () => mock });
-
-    store.connectTo("conv-abc");
-    store.cancelTurn("conv-abc");
-
-    const events = mock.sentEvents().map((s) => JSON.parse(s));
-    expect(events).toContainEqual({ type: "cancel" });
-  });
-});
-
 describe("server event routing", () => {
   it("routes incoming server events to registered handlers", () => {
     const mock = createMockWsClient();
@@ -416,5 +402,24 @@ describe("reconnect callback", () => {
 
     // Should not throw even without a callback.
     expect(() => mock.triggerStatus("connected")).not.toThrow();
+  });
+});
+
+
+describe("connection explanations", () => {
+  it("uses a gateway reason only when supplied and clears it on recovery or disconnect", () => {
+    const client = createMockWsClient();
+    const store = createConnectionStore({ wsClientFactory: () => client });
+    store.connectTo("conv-abc");
+    client.triggerStatus("error");
+    expect(store.errorMessage).not.toContain("another tab");
+    client.triggerStatus("error", "Conversation already has an active connection");
+    expect(store.errorMessage).toBe("Conversation already has an active connection");
+    client.triggerStatus("connected");
+    expect(store.errorMessage).toBeNull();
+    client.triggerStatus("error", "Conversation already has an active connection");
+    store.disconnect();
+    expect(store.status).toBe("disconnected");
+    expect(store.errorMessage).toBeNull();
   });
 });

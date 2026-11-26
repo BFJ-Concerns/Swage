@@ -44,7 +44,31 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace directory."
+        "Run a command line with `sh` in the session's working directory and return what it \
+         printed. `output` holds its standard output, then its standard error after a \
+         `stderr:` label; `exit_code` is its exit status, and `success` is true only when \
+         that is zero, so a command that ran and failed is reported as failed. Each call \
+         starts a new shell: a change of directory or a variable set in one call is gone in \
+         the next. A command still running at the installation's time limit is stopped, \
+         along with every process it started, and the call fails saying so. Output beyond \
+         the installation's limit is cut and flagged for the stream it came from \
+         (`stdout_truncated`, `stderr_truncated`), and the result then gives the path of a \
+         file holding that whole stream, which `file_read` opens. Unless the operator has \
+         lifted it, the command runs sandboxed: it can change files under the working \
+         directory and little outside it, so a write refused elsewhere is that boundary and \
+         not a fault to retry. The file tools read, write, edit and search files directly; \
+         this tool is for running programs."
+    }
+
+    fn execution_outcome(
+        &self,
+        result: &Value,
+    ) -> swage_protocol::client::conversation::ToolExecution {
+        if result["success"] == false {
+            swage_protocol::client::conversation::ToolExecution::failed()
+        } else {
+            swage_protocol::client::conversation::ToolExecution::succeeded()
+        }
     }
 
     fn parameters(&self) -> Value {
@@ -53,7 +77,7 @@ impl Tool for ShellTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute."
+                    "description": "The command line, as `sh` reads it: pipes, redirections and several commands joined together all work."
                 }
             },
             "required": ["command"]
@@ -125,34 +149,38 @@ impl Tool for ShellTool {
             Ok::<_, ToolError>((stdout, stderr))
         };
 
-        // Safe to abandon on timeout: read_fut owns only local pipe handles and
-        // output buffers — no shared or persisted state. The timeout arm below
-        // kills the child and discards the partial buffers, so dropping the
-        // future leaves nothing half-written.
-        let read_result = tokio::time::timeout(self.timeout, read_fut).await;
+        // Pipe EOF does not mean the command has exited. Both output collection
+        // and process exit share one deadline; timeout stops the process group.
+        let execution = async {
+            let (stdout, stderr) = read_fut.await?;
+            let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Failed to wait for command: {e}"),
+            })?;
+            Ok::<_, ToolError>((stdout, stderr, exit_status))
+        };
+        let result = Box::pin(tokio::time::timeout(self.timeout, execution)).await;
 
-        match read_result {
+        match result {
             Err(_elapsed) => {
                 // Timeout expired — stop the process group to free resources.
                 kill_child(&mut child, &mut process_group).await;
                 Err(ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
-                    message: format!("Command timed out after {:.1}s", self.timeout.as_secs_f64()),
+                    message: format!(
+                        "Command timed out after {:.1}s (shell_timeout_secs)",
+                        self.timeout.as_secs_f64()
+                    ),
                 })
             }
 
             Ok(Err(e)) => {
-                // I/O error reading output — stop the process group and propagate.
+                // Output or process-wait error — stop the group and propagate.
                 kill_child(&mut child, &mut process_group).await;
                 Err(e)
             }
 
-            Ok(Ok((stdout, stderr))) => {
-                // Reap the child to get the exit status.
-                let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: format!("Failed to wait for command: {e}"),
-                })?;
+            Ok(Ok((stdout, stderr, exit_status))) => {
                 process_group.disarm();
 
                 let stdout_str = String::from_utf8_lossy(&stdout.bytes);
@@ -181,6 +209,7 @@ impl Tool for ShellTool {
 
                 let mut output = truncated_output_value(&combined, self.max_output_bytes);
                 output["exit_code"] = json!(exit_status.code());
+                output["success"] = json!(exit_status.success());
                 if stdout.truncated {
                     output["stdout_truncated"] = json!(true);
                     output["stdout_total_bytes"] = json!(stdout.total_bytes);
@@ -443,8 +472,59 @@ mod tests {
         assert!(result.is_err(), "timeout should produce an error");
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("timed out"),
+            msg.contains("timed out after 0.2s") && msg.contains("shell_timeout_secs"),
             "error message should mention timeout: {msg:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_stops_command_after_both_output_streams_close() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ctx_in_dir_with_ids(&workspace);
+        let t = ShellTool {
+            timeout: Duration::from_millis(200),
+            max_output_bytes: 1024 * 1024,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            t.execute(
+                json!({"command": "echo $$ > shell.pid; exec 1>&- 2>&-; sh -c 'echo $$ > descendant.pid; sleep 2; touch finished' & wait"}),
+                &context,
+            ),
+        )
+        .await
+        .expect("closing output streams must not bypass the shell deadline");
+        let error = result.expect_err("the command must time out before it finishes");
+        let message = error.to_string();
+        assert!(
+            message.contains("timed out after 0.2s") && message.contains("shell_timeout_secs"),
+            "{message}"
+        );
+        let pid: libc::pid_t = std::fs::read_to_string(workspace.path().join("shell.pid"))
+            .expect("the actual shell must record its PID")
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "the shell must stop");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert!(
+            workspace.path().join("descendant.pid").exists(),
+            "the descendant must actually start before the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        assert!(
+            !workspace.path().join("finished").exists(),
+            "the command's descendants must stop at the deadline"
+        );
+        let next = t
+            .execute(json!({"command": "printf fresh"}), &context)
+            .await;
+        assert_eq!(
+            next.expect("the next shell call must work")["output"],
+            "fresh"
         );
     }
 

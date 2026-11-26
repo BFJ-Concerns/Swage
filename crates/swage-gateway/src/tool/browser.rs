@@ -44,13 +44,21 @@ impl Tool for BrowserNavigateTool {
     }
 
     fn description(&self) -> &str {
-        "Open a web page in the browser and return what it shows as a semantic tree. The browser holds the operator's logged-in sessions, so pages may already be authenticated."
+        "Open a web page in the platform's browser and return a snapshot of it. A snapshot \
+         is a text outline of what the page shows: its elements with their roles, names and \
+         states, each one that can be acted on carrying a ref, which the other `browser_*` \
+         tools take. The result also gives the page's `url` and `title`. An outline too long \
+         to return whole is cut, and `full_snapshot` then names a file holding all of it, \
+         which `file_read` opens. The browser keeps its logins from one session to the next, \
+         so a site the operator has signed in to opens signed in. Only what an outline can \
+         say is seen: what an image shows, and anything drawn on a canvas, is not. For a \
+         page that needs no login, script or interaction, `url_fetch` is lighter."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
-            "properties": {"url": {"type": "string", "description": "The URL to open."}},
+            "properties": {"url": {"type": "string", "description": "The address to open, complete with its `http://` or `https://` scheme."}},
             "required": ["url"]
         })
     }
@@ -83,7 +91,10 @@ impl Tool for BrowserSnapshotTool {
     }
 
     fn description(&self) -> &str {
-        "Return the current page as a semantic tree of elements: roles, names, and states. Interactive elements carry refs that the browser action tools accept."
+        "Return a new snapshot of the page this session's browser is on, without acting on \
+         it: the text outline `browser_navigate` describes, with new refs. It shows what a \
+         page has become when it changed by itself, as when content arrives late. It fails \
+         until `browser_navigate` has opened a page in this session."
     }
 
     fn parameters(&self) -> Value {
@@ -117,7 +128,9 @@ impl Tool for BrowserClickTool {
     }
 
     fn description(&self) -> &str {
-        "Click an element on the current page, identified by its ref from the latest snapshot. Refs are only valid for the snapshot that issued them: after the page changes, take or read the latest snapshot — a ref from a superseded snapshot is rejected rather than clicking whatever now sits there. Returns the page as it looks after the click."
+        "Click an element of the current page, named by its ref, and return a snapshot of \
+         the page as the click left it. A click acts on the site as the signed-in operator \
+         would: it can submit, send, buy or delete, and nothing here undoes it."
     }
 
     fn parameters(&self) -> Value {
@@ -152,24 +165,24 @@ impl Tool for BrowserTypeTool {
     }
 
     fn description(&self) -> &str {
-        "Type text into a field identified by its ref. Set submit to press Enter afterwards. The text may be a secret:// reference, which is resolved without the secret entering the conversation."
+        "Enter text in a field of the current page, named by its ref, and return a snapshot \
+         of the page afterwards. The text becomes the field's whole value, and with `submit` the \
+         form the field belongs to is then submitted. `text` may be a registered secret's \
+         reference in place of a value: the secret's value is then what is entered, and it \
+         is kept out of the conversation, the record and the snapshots that follow."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "ref": {"type": "string", "description": "A ref from the latest browser snapshot."},
-                "text": {"type": "string", "description": "Text to type, or a secret:// reference."},
-                "submit": {"type": "boolean", "default": false, "description": "Press Enter after typing, submitting the form the field belongs to."},
-                "replace": {"type": "boolean", "default": true}
+                "ref": {"type": "string", "description": "The element's ref, taken from the most recent snapshot. Every `browser_*` call returns a new snapshot with new refs, and a ref from an earlier one is refused, since the element it named may no longer be there."},
+                "text": {"type": "string", "description": "The text to enter, or a registered secret's reference to enter that secret's value."},
+                "submit": {"type": "boolean", "default": false, "description": "Once the text is entered, submit the form the field belongs to, as pressing Enter in the field would."},
+                "replace": {"type": "boolean", "default": true, "description": "Empty the field before the text is entered. The text becomes the field's whole value whichever is given."}
             },
             "required": ["ref", "text"]
         })
-    }
-
-    fn sensitive_keys(&self) -> &[&str] {
-        TEXT_SECRET_KEYS
     }
 
     fn device_secret_keys(&self) -> &[&str] {
@@ -216,15 +229,17 @@ impl Tool for BrowserSelectTool {
     }
 
     fn description(&self) -> &str {
-        "Choose an option in a dropdown or list identified by its ref. Returns the updated page."
+        "Choose an option in a dropdown or list box of the current page, named by its ref, \
+         and return a snapshot of the page afterwards. The option is matched exactly, by its \
+         label or by its value, and one that matches neither fails the call saying so."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "ref": {"type": "string", "description": "A ref from the latest browser snapshot."},
-                "value": {"type": "string", "description": "The option label or value to choose."}
+                "ref": {"type": "string", "description": "The element's ref, taken from the most recent snapshot. Every `browser_*` call returns a new snapshot with new refs, and a ref from an earlier one is refused, since the element it named may no longer be there."},
+                "value": {"type": "string", "description": "The option to choose: its label as the snapshot shows it, or its underlying value."}
             },
             "required": ["ref", "value"]
         })
@@ -259,15 +274,18 @@ impl Tool for BrowserScrollTool {
     }
 
     fn description(&self) -> &str {
-        "Scroll the page up or down, or bring a ref into view. Returns the updated page."
+        "Scroll the current page and return a snapshot of it afterwards: most of a screen \
+         `up` or `down`, or to the element a ref names. Give `direction` or `ref`; given \
+         both, the ref decides. Scrolling matters on a page that loads more of its content \
+         as it is scrolled."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "direction": {"type": "string", "enum": ["up", "down"], "description": "Page-sized scroll direction."},
-                "ref": {"type": "string", "description": "Optional ref to bring into view."}
+                "direction": {"type": "string", "enum": ["up", "down"], "description": "Which way to scroll, by most of a screen."},
+                "ref": {"type": "string", "description": "An element to bring into view, in place of a direction. The element's ref, taken from the most recent snapshot. Every `browser_*` call returns a new snapshot with new refs, and a ref from an earlier one is refused, since the element it named may no longer be there."}
             }
         })
     }
@@ -277,6 +295,14 @@ impl Tool for BrowserScrollTool {
     }
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        if params.get("ref").is_some_and(|value| {
+            !value.is_null() && value.as_str().is_none_or(|text| text.trim().is_empty())
+        }) {
+            return Err(ToolError::InvalidParameters {
+                name: self.name().into(),
+                message: "ref must be a non-empty string".into(),
+            });
+        }
         let direction = params.get("direction").and_then(Value::as_str);
         let reference = params.get("ref").and_then(Value::as_str);
         if direction.is_none() && reference.is_none() {
@@ -461,7 +487,7 @@ fn observation_json(
 fn ref_schema() -> Value {
     json!({
         "type": "object",
-        "properties": {"ref": {"type": "string", "description": "A ref from the latest browser snapshot."}},
+        "properties": {"ref": {"type": "string", "description": "The element's ref, taken from the most recent snapshot. Every `browser_*` call returns a new snapshot with new refs, and a ref from an earlier one is refused, since the element it named may no longer be there."}},
         "required": ["ref"]
     })
 }

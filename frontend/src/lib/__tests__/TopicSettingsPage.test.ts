@@ -1,11 +1,21 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
+import { fromStore, writable } from "svelte/store";
 
 import TopicSettingsPage from "../components/TopicSettingsPage.svelte";
 import * as topicsApi from "../api/topics";
 import * as surfacesApi from "../api/surfaces";
-import type { Topic } from "../types";
+import type { ServerEvent, Topic } from "../types";
+
+let onSessionSignal: ((event: ServerEvent) => void) | undefined;
+vi.mock("../api/work-surface", () => ({
+  openSharedWorkSurfaceChannel: () => ({
+    onSignal(handler: (event: ServerEvent) => void) { onSessionSignal = handler; },
+    onReconnect() {},
+    close() { onSessionSignal = undefined; },
+  }),
+}));
 
 vi.mock("../api/topics", () => ({
   attachTopicWorkspace: vi.fn(),
@@ -75,6 +85,166 @@ describe("TopicSettingsPage", () => {
     component = undefined;
     document.body.innerHTML = "";
     vi.clearAllMocks();
+  });
+
+  it("labels latest failures and interruptions in topic sessions and leaves recovery unmarked", async () => {
+    vi.mocked(topicsApi.listTopicSessions).mockResolvedValue([
+      { id: "failed", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Failed reply", has_interrupted_turn: false, latest_turn_state: "failed" },
+      { id: "interrupted", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Interrupted reply", has_interrupted_turn: true, latest_turn_state: "interrupted" },
+      { id: "recovered", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Recovered reply", has_interrupted_turn: true, latest_turn_state: "completed" },
+    ]);
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "sessions" } });
+    await flushUi();
+    const rows = Array.from(document.querySelectorAll('.record-row'));
+    for (const [preview, label, opposite] of [
+      ["Failed reply", "Last response failed", "Interrupted"],
+      ["Interrupted reply", "Interrupted", "Last response failed"],
+    ]) {
+      const row = rows.find(row => row.querySelector('strong')?.textContent?.trim() === preview);
+      expect(row).toBeDefined();
+      const marker = row!.querySelector(`[aria-label="${label}"]`) ?? Array.from(row!.querySelectorAll("span")).find(span => span.textContent?.replace("⚠", "").trim() === label);
+      expect(marker?.textContent?.replace("⚠", "").trim()).toBe(label);
+      expect(marker?.querySelector('[aria-hidden="true"]')?.textContent).toBe("⚠");
+      expect(marker?.hasAttribute("aria-label")).toBe(false);
+      expect(row!.querySelector(`[aria-label="${opposite}"]`)).toBeNull();
+    }
+    const recovered = rows.find(row => row.querySelector('strong')?.textContent?.trim() === "Recovered reply");
+    expect(recovered).toBeDefined();
+    expect(Array.from(recovered!.querySelectorAll('[aria-hidden="true"]'))
+      .filter(marker => marker.textContent === "⚠")).toHaveLength(0);
+    expect(recovered!.textContent).not.toContain("⚠");
+    expect(recovered!.textContent).not.toContain("Last response failed");
+    expect(recovered!.textContent).not.toContain("Interrupted");
+  });
+
+  it("refreshes outcomes when opening and while viewing the Sessions tab", async () => {
+    const tab = writable<import("../router").TopicSettingsTab>("overview");
+    const currentTab = fromStore(tab);
+    const props = { topic, get tab() { return currentTab.current; } };
+    component = mount(TopicSettingsPage, { target: document.body, props });
+    await flushUi();
+    vi.mocked(topicsApi.listTopicSessions).mockResolvedValue([
+      { id: "session-1", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Review the release", has_interrupted_turn: false, latest_turn_state: "failed" },
+    ]);
+    tab.set("sessions");
+    await flushUi();
+    const row = document.querySelector(".record-row");
+    expect(row?.textContent).toContain("Last response failed");
+    expect(topicsApi.listTopicSessions).toHaveBeenCalledTimes(2);
+
+    vi.mocked(topicsApi.listTopicSessions).mockResolvedValue([
+      { id: "session-1", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Review the release", has_interrupted_turn: false, latest_turn_state: "completed" },
+    ]);
+    expect(onSessionSignal).toBeDefined();
+    onSessionSignal?.({ type: "session_updated", session_id: "session-1" });
+    await flushUi();
+    expect(document.querySelector(".record-row")).toBe(row);
+    expect(row?.textContent).toContain("Review the release");
+    expect(row?.textContent).not.toContain("Last response failed");
+
+    tab.set("overview");
+    await flushUi();
+    expect(onSessionSignal).toBeUndefined();
+  });
+
+  it("waits for the workspace load before showing an empty list", async () => {
+    let finish!: (value: Awaited<ReturnType<typeof topicsApi.listTopicWorkspaces>>) => void;
+    vi.mocked(topicsApi.listTopicWorkspaces).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
+    await flushUi();
+    expect(document.body.textContent).toContain("Loading topic settings");
+    expect(document.body.textContent).not.toContain("No workspace folders");
+    finish([]);
+    await flushUi();
+    expect(document.body.textContent).toContain("No workspace folders");
+  });
+
+  it("hides the empty workspace message while an attachment reload is pending", async () => {
+    const attached: Awaited<ReturnType<typeof topicsApi.attachTopicWorkspace>> = {
+      id: "workspace-2", topic_id: topic.id, label: "New source", path: "/work/new",
+      canonical_path: "/work/new", is_missing: false, permissions: ["read"],
+      is_trusted: false, is_default: true, created_at: "2026-05-26T10:00:00Z",
+    };
+    let finish!: (value: Awaited<ReturnType<typeof topicsApi.listTopicWorkspaces>>) => void;
+    vi.mocked(topicsApi.listTopicWorkspaces).mockResolvedValueOnce([])
+      .mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    vi.mocked(topicsApi.attachTopicWorkspace).mockResolvedValueOnce(attached);
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
+    await flushUi();
+    expect(document.body.textContent).toContain("No workspace folders");
+    const path = document.querySelector("input") as HTMLInputElement;
+    path.value = attached.path;
+    path.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(topicsApi.attachTopicWorkspace).toHaveBeenCalledOnce();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain("Loading topic settings");
+    expect(document.body.textContent).not.toContain("No workspace folders");
+    finish([attached]);
+    await flushUi();
+    expect(document.querySelector(".record-row")?.textContent).toContain(attached.path);
+    expect(document.body.textContent).not.toContain("No workspace folders");
+  });
+
+  it("retries a failed load and shows the current working folder", async () => {
+    vi.mocked(topicsApi.listTopicWorkspaces).mockRejectedValueOnce(new Error("Workspace load failed"));
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
+    await flushUi();
+    expect(document.body.textContent).toContain("Workspace load failed");
+    const retry = Array.from(document.querySelectorAll("button")).find((button) => button.textContent === "Retry");
+    expect(retry).toBeDefined();
+    let finish!: (value: Awaited<ReturnType<typeof topicsApi.listTopicWorkspaces>>) => void;
+    vi.mocked(topicsApi.listTopicWorkspaces).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    retry!.click();
+    await flushUi();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.body.textContent).toContain("Loading topic settings");
+    finish([{
+      id: "workspace-1", topic_id: topic.id, label: "Moved source", path: "/work/moved",
+      canonical_path: "/work/moved", is_missing: false, permissions: ["read"], is_trusted: true,
+      is_default: true, created_at: "2026-05-26T10:00:00Z",
+    }]);
+    await flushUi();
+    const row = document.querySelector(".record-row");
+    expect(row?.textContent).toContain("/work/moved");
+    expect(row?.textContent).toContain("working folder");
+    expect(row?.textContent).toContain("trusted · read");
+    expect(document.body.textContent).not.toContain("/work/source");
+    expect(topicsApi.listTopicSessions).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("retries a failed refresh after a successful load", async () => {
+    vi.mocked(topicsApi.detachTopicWorkspace).mockResolvedValue();
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
+    await flushUi();
+    expect(document.body.textContent).toContain("/work/source");
+    vi.mocked(topicsApi.listTopicWorkspaces).mockRejectedValueOnce(new Error("Refresh failed"));
+    Array.from(document.querySelectorAll("button")).find(button => button.textContent?.trim() === "Detach")!.click();
+    await flushUi();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain("Refresh failed");
+    const retry = Array.from(document.querySelectorAll("button")).find(button => button.textContent?.trim() === "Retry");
+    expect(retry, "failed refresh offers Retry").toBeDefined();
+    vi.mocked(topicsApi.listTopicWorkspaces).mockResolvedValueOnce([]);
+    retry!.click();
+    await flushUi();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(3);
+    expect(topicsApi.listTopicSessions).toHaveBeenCalledTimes(3);
+    expect(document.body.textContent).toContain("No workspace folders");
+    expect(document.body.textContent).not.toContain("/work/source");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("shows the topic's effective default model in its overview", async () => {
+    component = mount(TopicSettingsPage, { target: document.body, props: {
+      topic: { ...topic, effective_default_model: "local:topic-model" }, tab: "overview",
+    } });
+    await flushUi();
+    const rows = Array.from(document.querySelectorAll(".shell-row"));
+    const model = rows.find((row) => row.querySelector(".shell-label")?.textContent === "Default model");
+    expect(model?.querySelector(".shell-value")?.textContent).toBe("local:topic-model");
   });
 
   it("loads topic-scoped data for the overview", async () => {
@@ -229,6 +399,28 @@ describe("TopicSettingsPage", () => {
     expect(topicsApi.relinkTopicWorkspace).toHaveBeenCalledWith("topic-1", "workspace-1", "/work/moved");
     expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(2);
     expect(topicsApi.detachTopicWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("retries only a failed surface-library load from the shared alert", async () => {
+    const entry = {
+      id: "entry-retry", name: "Recovered plan", description: "Planning notes",
+      tags: [], origin_topic_deleted: false, updated_at: "2026-10-19T10:00:00Z",
+    };
+    vi.mocked(surfacesApi.listLibrary).mockRejectedValueOnce(new Error("Library unavailable"))
+      .mockResolvedValueOnce({ entries: [entry] });
+    vi.mocked(surfacesApi.listTopicDefaultSurfaces).mockResolvedValue({ entries: [] });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "surfaces" } });
+    await flushUi();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledOnce();
+    expect(surfacesApi.listLibrary).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("Library unavailable");
+    Array.from(document.querySelectorAll("button")).find((button) => button.textContent === "Retry")!.click();
+    await flushUi();
+    expect(surfacesApi.listLibrary).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[aria-label="Surface library"] .record-row')?.textContent).toContain(entry.name);
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledOnce();
   });
 
   it("designates a library surface as a topic default and saves the topic's tags", async () => {

@@ -4,7 +4,9 @@
 
 Private alpha — internal dogfooding, no external users. Don't build
 backward-compatibility or data-migration paths for schema and format
-changes; change them freely and let the fresh migration rebuild. Strip out any existing migrations when working in the area. This is a
+changes; change them freely and let the fresh migration rebuild. Where the
+schema or format you are changing still carries a step or branch that exists
+only to bring older data forward, remove it in the same change. This is a
 deliberate "for now": it lifts the day there are users with data to migrate.
 
 ## Build and Verification
@@ -53,10 +55,9 @@ produced it and tells the model nothing useful.
 
 Keep internal identifiers — agent ids, struct names, context element keys like
 `"prompts"` and `"history"` — in the code, where they address developers. Where
-the same concept crosses into the model's context, describe it by function. The
-built-in tool descriptions get this right (`file_read` opens "Read the contents
-of a file in the workspace…"); the assembly element keys stay inside the report
-and never reach the model.
+the same concept crosses into the model's context, describe it by function: a
+built-in tool's description opens with what the tool does for its caller, and
+the assembly element keys stay inside the report and never reach the model.
 
 ### Build for experimentation and audit
 
@@ -82,9 +83,8 @@ Two consequences for new work:
 
 Experimentation must be switchable off. There has to be a backend plug to
 disable it globally and per location — down to a single important task that
-shouldn't become anyone's sample. The frontend control isn't built yet; the
-backend capability is the requirement, so leave the seam for it even though
-nothing toggles it from the UI today.
+shouldn't become anyone's sample. The backend capability is the requirement:
+build the seam for it whether or not anything in the UI toggles it.
 
 ### The wire contract is one definition, projected
 
@@ -105,7 +105,6 @@ and channel (the contract external integrators speak). Subset clients
 implement only their surfaces; external parties see only the surface
 published to them.
 
-The migration is complete. Do not hand-author wire-contract copies in the
-gateway, clients, or frontend. Frontend view types may adapt imports from
-`frontend/src/lib/protocol/`, but the wire definition remains in
-`swage-protocol` and its generated projections.
+No wire type is hand-authored in the gateway, the clients, or the frontend.
+Frontend view types may adapt imports from `frontend/src/lib/protocol/`, but
+the wire definition remains in `swage-protocol` and its generated projections.

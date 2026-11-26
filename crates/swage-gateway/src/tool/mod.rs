@@ -4,8 +4,10 @@
 //! re-exports them so the rest of the gateway can import from `crate::tool`
 //! without updating every import site.
 
+pub mod agent_definition;
 pub mod browser;
 pub mod docs_read;
+mod exact_text_replacement;
 pub mod file_edit;
 pub mod file_list;
 pub mod file_read;

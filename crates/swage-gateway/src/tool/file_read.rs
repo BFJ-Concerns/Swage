@@ -34,7 +34,12 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file in the workspace, optionally from a byte offset."
+        "Read a text file and return its contents as `output`. A file longer than the \
+         installation's output limit comes back cut at that limit and marked `truncated`, \
+         with the file's size in `total_bytes` and the place to carry on from in \
+         `next_offset_bytes`; pass that as `offset_bytes` to read the next part. A file that \
+         does not exist fails saying so, and a binary file is refused, not shown. Reading \
+         changes nothing."
     }
 
     fn parameters(&self) -> Value {
@@ -43,12 +48,12 @@ impl Tool for FileReadTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file, relative to the workspace root."
+                    "description": "The file to read: relative to the session's working directory, or absolute for one elsewhere the session has been allowed to reach."
                 },
                 "offset_bytes": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Byte offset to start reading from. Use next_offset_bytes from a truncated result to continue."
+                    "description": "Where in the file to start, counted in bytes: the `next_offset_bytes` of the result being continued. Omit to read from the beginning."
                 }
             },
             "required": ["path"]
@@ -57,6 +62,11 @@ impl Tool for FileReadTool {
 
     fn requires_device_execution(&self) -> bool {
         true
+    }
+
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        optional_offset_bytes(params, self.name())?;
+        Ok(())
     }
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
@@ -93,7 +103,14 @@ impl Tool for FileReadTool {
                     message: format!("Failed to inspect {path_str}: {error}"),
                 })?
                 .len();
-            read_window(file, len, &path_str, offset_bytes, max_bytes)
+            // Window validation follows file inspection; I/O failures retain
+            // unknown completion rather than claiming the read finished.
+            read_window(file, len, &path_str, offset_bytes, max_bytes).map_err(
+                |error| match error {
+                    ToolError::InvalidParameters { .. } => error.after_execution(),
+                    error => error,
+                },
+            )
         })
         .await
         .map_err(|error| ToolError::ExecutionFailed {
@@ -413,6 +430,45 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir).execute(json!({}), &ctx(&dir)).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
+    }
+    #[tokio::test]
+    async fn dispatch_records_rejection_after_reading_the_file() {
+        use swage_protocol::client::conversation::{
+            ToolCompletion, ToolExecutionStage, ToolOutcome,
+        };
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("text.txt"), "settlement text").unwrap();
+        let dispatcher = crate::tool::ToolDispatcher::allow_all(vec![
+            std::sync::Arc::new(tool(&dir)) as std::sync::Arc<dyn Tool>,
+        ]);
+        for approved in [false, true] {
+            let params = json!({"path":"text.txt", "offset_bytes":100});
+            let error = if approved {
+                dispatcher
+                    .dispatch_approved("file_read", params, &ctx(&dir), "agent")
+                    .await
+            } else {
+                dispatcher
+                    .dispatch("file_read", params, &ctx(&dir), "agent")
+                    .await
+            }
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("valid UTF-8 byte boundary"),
+                "expected a post-read offset rejection: {error}"
+            );
+            let execution = error.execution();
+            assert_eq!(execution.outcome, ToolOutcome::Rejected);
+            assert_eq!(execution.stage, ToolExecutionStage::Finished);
+            assert_eq!(execution.completion, ToolCompletion::Confirmed);
+            let rendered = swage_agent::agent::format_tool_error_for_model(&error);
+            assert!(rendered.contains("valid UTF-8 byte boundary"));
+            assert!(rendered.contains("Correct the arguments and retry"));
+            assert!(
+                rendered.contains("operation ran before its result was rejected"),
+                "post-read rejection must disclose execution: {rendered}"
+            );
+        }
     }
 }
 

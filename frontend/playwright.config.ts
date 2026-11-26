@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { defineConfig } from "@playwright/test";
 import { scratchParent } from "./e2e/scratch-root.mjs";
@@ -5,6 +6,15 @@ import { scratchParent } from "./e2e/scratch-root.mjs";
 const gatewayPort = Number(process.env.SWAGE_E2E_GATEWAY_PORT ?? "33100");
 const resultsDir = process.env.SWAGE_E2E_RESULTS_DIR
   ?? join(scratchParent, "swage-browser-e2e-results");
+
+// Chromium also keeps certificates outside its explicit user-data directory.
+const browserEnvironment = { ...process.env };
+const browserRoot = join(process.env.SWAGE_E2E_INVOCATION_DIR ?? resultsDir, "browser-environment");
+for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"]) {
+  const directory = join(browserRoot, key);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  browserEnvironment[key] = directory;
+}
 
 export default defineConfig({
   testDir: "./e2e",
@@ -18,6 +28,7 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${gatewayPort}`,
     browserName: "chromium",
     headless: true,
+    launchOptions: { env: browserEnvironment },
     trace: "retain-on-failure",
   },
   webServer: {

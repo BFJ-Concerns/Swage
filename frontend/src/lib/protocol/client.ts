@@ -3,6 +3,7 @@
 // change the manifest and regenerate.
 
 import type { ChannelLinkCodeListResponse } from "./ChannelLinkCodeListResponse";
+import type { ChannelLinkCodeResponse } from "./ChannelLinkCodeResponse";
 import type { ChannelLinkListResponse } from "./ChannelLinkListResponse";
 import type { ChannelStatusListResponse } from "./ChannelStatusListResponse";
 import type { ConversationBranchListResponse } from "./ConversationBranchListResponse";
@@ -11,6 +12,7 @@ import type { ConversationDetail } from "./ConversationDetail";
 import type { ConversationListResponse } from "./ConversationListResponse";
 import type { ConversationResponse } from "./ConversationResponse";
 import type { ConversationThreadDetail } from "./ConversationThreadDetail";
+import type { CreateChannelLinkCodeRequest } from "./CreateChannelLinkCodeRequest";
 import type { CreateConversationBranchRequest } from "./CreateConversationBranchRequest";
 import type { CreateConversationRequest } from "./CreateConversationRequest";
 import type { CreateSurfaceAnnotationRequest } from "./CreateSurfaceAnnotationRequest";
@@ -36,6 +38,7 @@ import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
 import type { SaveSurfaceToLibraryRequest } from "./SaveSurfaceToLibraryRequest";
+import type { SecretListResponse } from "./SecretListResponse";
 import type { SettingsResponse } from "./SettingsResponse";
 import type { StartProviderSignInRequest } from "./StartProviderSignInRequest";
 import type { StartProviderSignInResponse } from "./StartProviderSignInResponse";
@@ -88,6 +91,11 @@ export async function listChannelStatuses(): Promise<ChannelStatusListResponse> 
 /** List linked channel conversations. */
 export async function listChannelLinks(): Promise<ChannelLinkListResponse> {
   return request<ChannelLinkListResponse>("GET", `/api/onboarding/channels`);
+}
+
+/** Issue a single-use channel link code. */
+export async function createChannelLinkCode(body: CreateChannelLinkCodeRequest): Promise<ChannelLinkCodeResponse> {
+  return request<ChannelLinkCodeResponse>("POST", `/api/onboarding/channels/link-codes`, body);
 }
 
 /** Read unredeemed channel link codes. */
@@ -182,6 +190,11 @@ export async function abandonThread(id: string): Promise<ConversationThreadDetai
 /** Delete a conversation. */
 export async function deleteConversation(id: string): Promise<void> {
   return request<void>("DELETE", `/api/conversations/${encodeURIComponent(id)}`);
+}
+
+/** Stop the conversation's running turn, whichever client holds its connection. */
+export async function cancelConversationTurn(id: string): Promise<void> {
+  return request<void>("POST", `/api/conversations/${encodeURIComponent(id)}/cancel`);
 }
 
 /** Read a turn context report. */
@@ -302,6 +315,11 @@ export async function updateSurfaceAnnotation(annotationId: string, body: Update
 /** Delete a surface annotation. */
 export async function deleteSurfaceAnnotation(annotationId: string): Promise<DeleteSurfaceAnnotationResponse> {
   return request<DeleteSurfaceAnnotationResponse>("DELETE", `/api/surface-annotations/${encodeURIComponent(annotationId)}`);
+}
+
+/** List governed secrets without revealing values. */
+export async function listSecrets(): Promise<SecretListResponse> {
+  return request<SecretListResponse>("GET", `/api/secrets`);
 }
 
 /** Read gateway settings. */

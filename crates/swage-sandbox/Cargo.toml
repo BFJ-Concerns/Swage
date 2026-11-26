@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 # Workspace crates
+swage-protocol = { path = "../swage-protocol" }
 swage-core = { path = "../swage-core" }
 swage-tool = { path = "../swage-tool" }
 

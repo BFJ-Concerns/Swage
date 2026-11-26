@@ -11,8 +11,6 @@
 //! `record_reconstruction_gap` and escalated only when the gap itself cannot
 //! be recorded.
 
-use std::mem;
-
 use super::{
     AgentEvent, AppState, GatewayError, Uuid, WorkflowProviderRoundOutcome, record_durability,
 };
@@ -115,7 +113,9 @@ pub(crate) async fn apply_provider_snapshot_event(
             }
             if let Some(error) = &mut record.error {
                 match known_secret_values(state).await {
-                    Ok(secrets) => redact_text(error, &secrets),
+                    Ok(secrets) => {
+                        redact_text(error, &secrets);
+                    }
                     Err(_) => {
                         *error =
                             "Error detail omitted because secret redaction was unavailable".into();
@@ -173,9 +173,18 @@ pub(crate) async fn apply_provider_snapshot_event(
     }
 }
 
-async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core::StorageError> {
-    state
-        .secret_manager
+pub(super) async fn known_secret_values(
+    state: &AppState,
+) -> Result<Vec<String>, swage_core::StorageError> {
+    registered_secret_values(&state.secret_manager).await
+}
+
+/// Every registered secret's value, longest first so that a value containing
+/// another is masked whole.
+pub(crate) async fn registered_secret_values(
+    secret_manager: &crate::secret::SecretManager,
+) -> Result<Vec<String>, swage_core::StorageError> {
+    let mut values = secret_manager
         .known_values()
         .await
         .map_err(|error| match error {
@@ -183,32 +192,61 @@ async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core
             other => swage_core::StorageError::Corruption {
                 message: format!("secret redaction set could not be read: {other}"),
             },
-        })
+        })?;
+    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+    Ok(values)
 }
 
-fn redact_text(text: &mut String, secret_values: &[String]) {
-    let mut redacted = mem::take(text);
+pub(super) const REDACTED_SECRET: &str = "[REDACTED_SECRET]";
+
+pub(super) fn redact_text(text: &mut String, secret_values: &[impl AsRef<str>]) -> bool {
+    let mut replaced = false;
     for secret in secret_values {
-        redacted = redacted.replace(secret, "[REDACTED_SECRET]");
+        let secret = secret.as_ref();
+        if text.contains(secret) {
+            *text = text.replace(secret, REDACTED_SECRET);
+            replaced = true;
+        }
     }
-    *text = redacted;
+    replaced
 }
 
-fn redact_secret_values(value: &mut serde_json::Value, secret_values: &[String]) {
+/// Mask every registered value in text that may hold them inside serialised
+/// JSON, where a value with quotes, backslashes or control characters appears
+/// escaped: both the escaped and the plain form are replaced.
+pub(crate) fn redact_serialised_text(text: &mut String, secret_values: &[String]) -> bool {
+    let mut changed = false;
+    for secret in secret_values {
+        let encoded = serde_json::to_string(secret).expect("secret text serialises");
+        let escaped = &encoded[1..encoded.len() - 1];
+        if escaped != secret.as_str() {
+            changed |= redact_text(text, &[escaped]);
+        }
+        changed |= redact_text(text, &[secret.as_str()]);
+    }
+    changed
+}
+
+pub(super) fn redact_secret_values(
+    value: &mut serde_json::Value,
+    secret_values: &[String],
+) -> bool {
+    let mut replaced = false;
     match value {
-        serde_json::Value::String(text) => redact_text(text, secret_values),
+        serde_json::Value::String(text) => return redact_text(text, secret_values),
         serde_json::Value::Array(values) => {
             for value in values {
-                redact_secret_values(value, secret_values);
+                replaced |= redact_secret_values(value, secret_values);
             }
         }
         serde_json::Value::Object(values) => {
             for value in values.values_mut() {
-                redact_secret_values(value, secret_values);
+                replaced |= redact_secret_values(value, secret_values);
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
+    replaced
 }
 
 pub(crate) fn append_provider_visible_reasoning(
@@ -361,6 +399,22 @@ pub(super) fn record_effort_snapshot(
     }
     report_json["provider_visible"]["effort"] =
         serde_json::to_value(resolved).expect("resolved effort serialises");
+}
+
+/// Record the output limit the turn's request carries beside the effort:
+/// the tokens sent and which source named them. Absent from the snapshot
+/// when no source declared one — the adapter's protocol floor then applies,
+/// and the per-round request record shows what went on the wire.
+pub(super) fn record_output_limit_snapshot(
+    report_json: &mut serde_json::Value,
+    resolved: swage_core::ResolvedOutputLimit,
+) {
+    normalise_report_object(report_json);
+    if !report_json["provider_visible"].is_object() {
+        report_json["provider_visible"] = serde_json::json!({});
+    }
+    report_json["provider_visible"]["output_limit"] =
+        serde_json::to_value(resolved).expect("resolved output limit serialises");
 }
 
 pub(super) fn record_effective_model_snapshot(

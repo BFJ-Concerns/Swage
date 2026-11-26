@@ -28,6 +28,7 @@ pub struct CreateChannelLinkCodeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct ChannelLinkCodeResponse {
+    pub integration: String,
     pub link_code: String,
     pub expires_at: DateTime<Utc>,
 }

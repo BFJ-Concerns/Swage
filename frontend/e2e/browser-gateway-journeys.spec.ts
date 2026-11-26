@@ -1,22 +1,14 @@
 // The provider is controlled; Chromium, the rendered Svelte app, HTTP/WebSocket
 // transport, gateway turn loop, storage, cancellation and approvals are live.
-import { createServer } from "node:net";
 import { access, readFile, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { makeScratchDir } from "./scratch-root.mjs";
+import { unusedPorts } from "./unused-ports.mjs";
 
 const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-
-async function unusedPort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
-  const port = (server.address() as { port: number }).port;
-  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-  return port;
-}
 
 async function waitForHealth(baseUrl: string): Promise<void> {
   await expect.poll(async () => {
@@ -32,8 +24,7 @@ async function startIsolatedStack(): Promise<{ baseUrl: string; child: ChildProc
   const root = await makeScratchDir("swage-browser-e2e-isolation-");
   let child: ChildProcess | undefined;
   try {
-    const gatewayPort = await unusedPort();
-    const providerPort = await unusedPort();
+    const [gatewayPort, providerPort] = await unusedPorts(2);
     child = spawn(process.execPath, [join(frontendDir, "e2e/run-stack.mjs")], {
       cwd: frontendDir,
       stdio: "pipe",
@@ -331,6 +322,42 @@ test("separates the cells of a multi-column table in a surface document module",
       // The gap between one cell's text and the next is visible space, not touching glyphs.
       expect(cells[index].left - cells[index - 1].right).toBeGreaterThanOrEqual(8);
     }
+  }
+});
+
+
+test("keeps a long topic heading compact and all workspace controls visible", async ({ page }) => {
+  const topic = {
+    id: "topic-layout", slug: "layout", description: "", created_at: "2026-10-15T00:00:00Z",
+    name: "Marsh Atlas regional observations and comparative field research across coastal habitats",
+  };
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.route((url) => url.pathname.startsWith("/api/"), async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    let body: unknown = {};
+    if (path === "/api/settings") body = { models: {}, default_model: "" };
+    else if (path === "/api/topics") body = { topics: [topic] };
+    else if (path === `/api/topics/${topic.id}`) body = topic;
+    else if (path.endsWith("/workspaces")) body = { workspaces: [1, 2, 3].map((id) => ({
+      id: `workspace-${id}`, topic_id: topic.id, label: `Folder ${id}`, path: `/work/folder-${id}`,
+      canonical_path: `/work/folder-${id}`, is_missing: false, is_default: id === 1,
+      is_trusted: true, permissions: ["read"], created_at: topic.created_at,
+    })) };
+    else if (path.endsWith("/sessions") || path === "/api/conversations") body = { conversations: [] };
+    await route.fulfill({ json: body });
+  });
+  await page.goto("/settings/topic/layout/workspaces");
+  const heading = page.getByRole("heading", { name: topic.name.trim(), exact: true });
+  await expect(heading).toBeVisible();
+  const bounds = await heading.boundingBox();
+  expect(bounds!.height).toBeLessThanOrEqual(80);
+  await expect(page.getByRole("button", { name: "Attach workspace", exact: true })).toBeInViewport({ ratio: 1 });
+  const rows = page.locator(".record-row");
+  await expect(rows).toHaveCount(3);
+  for (const row of await rows.all()) {
+    await expect(row.getByText(/trusted · read/)).toBeInViewport({ ratio: 1 });
+    await expect(row.getByRole("button", { name: "Revoke trust" })).toBeInViewport({ ratio: 1 });
+    await expect(row.getByRole("button", { name: "Detach", exact: true })).toBeInViewport({ ratio: 1 });
   }
 });
 

@@ -41,6 +41,8 @@
   // Local draft content — cleared after every successful send.
   let content = $state("");
   let selectedModel = $state("");
+  let modelSessionId = $state<string | null | undefined>(undefined);
+  let modelDefaultId = $state<string | null | undefined>(undefined);
   let selectedEffort = $state<"" | Effort>("");
   let effortSessionId = $state<string | null | undefined>(undefined);
 
@@ -55,8 +57,29 @@
 
   $effect(() => {
     const fallback = selectedModelId ?? modelOptions[0] ?? "";
-    if (!selectedModel || !modelOptions.includes(selectedModel)) selectedModel = fallback;
+    if (sessionId !== modelSessionId || selectedModelId !== modelDefaultId || !modelOptions.includes(selectedModel)) {
+      selectedModel = fallback;
+      modelSessionId = sessionId;
+      modelDefaultId = selectedModelId;
+    }
   });
+
+  // Why the last Stop did not reach the turn. The turn keeps running, so this
+  // is a notice beside the control, never the turn's own failure; it clears
+  // once nothing is running here.
+  let stopError = $state<string | null>(null);
+  $effect(() => {
+    if (!isStreamingHere) stopError = null;
+  });
+
+  async function stop(): Promise<void> {
+    stopError = null;
+    try {
+      await store!.cancelTurn();
+    } catch (error) {
+      stopError = error instanceof Error ? error.message : "Stop did not reach the turn.";
+    }
+  }
 
   // Direct reference to the textarea DOM node for height adjustment and refocus.
   let textarea: HTMLTextAreaElement | undefined = $state(undefined);
@@ -145,6 +168,9 @@
         {/if}
       </div>
     {/if}
+    {#if stopError}
+      <p class="stop-notice" role="alert">Stop did not reach the turn: {stopError}</p>
+    {/if}
     {#if hasNoConfiguredModels}
       <p class="model-guidance">
         No models are configured. Add a provider in
@@ -154,7 +180,7 @@
   </div>
 
   {#if isStreamingHere}
-    <button class="action stop" onclick={() => store!.cancelTurn()}>
+    <button class="action stop" onclick={stop}>
       Stop
     </button>
   {:else}
@@ -232,7 +258,8 @@
     cursor: pointer;
   }
 
-  .model-guidance {
+  .model-guidance,
+  .stop-notice {
     margin: 0;
     padding: 7px 14px;
     border-top: 1px dotted var(--rule-soft);

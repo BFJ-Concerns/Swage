@@ -1,10 +1,12 @@
 <!--
   Sidebar conversation list — shows all conversations, supports create and delete.
-  Pure renderer — reads from conversation store passed as a prop.
+  The list reloads the store on mount and when the gateway announces a change.
 -->
 <script lang="ts">
+  import { watchSessionList } from "../session-list-updates";
   import type { ConversationStore } from "../stores/conversations";
   import { relativeTime } from "../utils/relative-time";
+  import { sessionOutcomeLabel } from "../session-outcome";
   import { messagePreview } from "../message-preview";
 
   interface Props {
@@ -15,6 +17,14 @@
   }
 
   let { store, onNewConversation }: Props = $props();
+
+  $effect(() => {
+    const current = store;
+    if (!current?.refreshConversations) return;
+    const stop = watchSessionList(() => current.refreshConversations!());
+    void current.refreshConversations();
+    return stop;
+  });
 
   // Track which conversation is awaiting inline delete confirmation.
   // Only one can be pending at a time — clicking another collapses any open one.
@@ -65,6 +75,7 @@
           {@const isActive = store.activeConversation?.id === conversation.id}
           {@const isPendingDelete = pendingDelete === conversation.id}
           {@const preview = messagePreview(conversation.message_preview ?? "New conversation")}
+          {@const outcome = sessionOutcomeLabel(conversation.latest_turn_state)}
 
           <li
             class="conversation-item"
@@ -80,10 +91,9 @@
                   {preview}
                 </span>
 
-                <!-- Warn when a turn was interrupted (e.g. by disconnection). -->
-                {#if conversation.has_interrupted_turn}
-                  <span class="interrupted" title="A previous response was interrupted">
-                    ⚠
+                {#if outcome}
+                  <span class="interrupted">
+                    <span aria-hidden="true">⚠</span> {outcome}
                   </span>
                 {/if}
               </div>
@@ -251,8 +261,7 @@
   }
 
   .item-header {
-    display: flex;
-    align-items: baseline;
+    display: grid;
     gap: 4px;
     min-width: 0;
   }
@@ -273,7 +282,6 @@
   }
 
   .interrupted {
-    flex-shrink: 0;
     color: var(--ink-orange);
     font-size: 11px;
     line-height: 1;

@@ -24,11 +24,13 @@ pub(super) enum SandboxDegradationApproval {
     Approved,
     Rejected,
     Interrupted,
+    Cancelled,
 }
 
 pub(super) struct SandboxDegradationApprovalRequest<'a> {
     pub(super) config: &'a swage_config::ResolvedConfig,
     pub(super) ws_tx: &'a mpsc::UnboundedSender<ServerEvent>,
+    pub(super) session_id: Uuid,
     pub(super) turn_id: Uuid,
     pub(super) agent_id: &'a str,
     pub(super) prompt: String,
@@ -43,6 +45,7 @@ pub(super) async fn request_sandbox_degradation_approval(
     let SandboxDegradationApprovalRequest {
         config,
         ws_tx,
+        session_id,
         turn_id,
         agent_id,
         prompt,
@@ -93,6 +96,7 @@ pub(super) async fn request_sandbox_degradation_approval(
         timeout_at: timeout_at.to_rfc3339(),
         timeout_policy: timeout_policy.to_string(),
     });
+    crate::service::announce_session_updated(&state.broadcast, session_id);
 
     enum ApprovalWait {
         Decision(swage_agent::ApprovalDecision),
@@ -124,6 +128,7 @@ pub(super) async fn request_sandbox_degradation_approval(
                 decision: "approved".to_string(),
                 reason: decision.reason,
             });
+            crate::service::announce_session_updated(&state.broadcast, session_id);
             SandboxDegradationApproval::Approved
         }
         ApprovalWait::Decision(decision) => {
@@ -140,6 +145,7 @@ pub(super) async fn request_sandbox_degradation_approval(
                 decision: "rejected".to_string(),
                 reason: decision.reason,
             });
+            crate::service::announce_session_updated(&state.broadcast, session_id);
             SandboxDegradationApproval::Rejected
         }
         ApprovalWait::Timeout => {
@@ -155,6 +161,7 @@ pub(super) async fn request_sandbox_degradation_approval(
                 approval_id: approval.id,
                 timeout_policy: timeout_policy.to_string(),
             });
+            crate::service::announce_session_updated(&state.broadcast, session_id);
             match timeout_policy {
                 ApprovalTimeoutPolicy::Reject => SandboxDegradationApproval::Rejected,
                 ApprovalTimeoutPolicy::Interrupt => SandboxDegradationApproval::Interrupted,
@@ -165,11 +172,14 @@ pub(super) async fn request_sandbox_degradation_approval(
                 .storage
                 .update_approval_state(approval.id, ApprovalState::Expired, Some("turn cancelled"))
                 .await?;
-            SandboxDegradationApproval::Interrupted
+            SandboxDegradationApproval::Cancelled
         }
     };
 
-    if !matches!(outcome, SandboxDegradationApproval::Interrupted) {
+    if !matches!(
+        outcome,
+        SandboxDegradationApproval::Interrupted | SandboxDegradationApproval::Cancelled
+    ) {
         state
             .storage
             .update_turn_state(turn_id, TurnState::Processing)

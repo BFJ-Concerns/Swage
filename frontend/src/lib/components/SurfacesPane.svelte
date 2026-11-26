@@ -503,7 +503,7 @@
               <div class="stale-notice" role="alert">
                 <p>This module changed while you were editing it. It now reads:</p>
                 <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitised above -->
-                <div class="module-content">{@html renderDocument(staleModule.source)}</div>
+                <div class="module-content riso-tables">{@html renderDocument(staleModule.source)}</div>
                 <div class="module-actions">
                   <button onclick={replaceAnyway}>Replace it with my edit</button>
                   <button onclick={stopEditing}>Keep the current version</button>
@@ -520,7 +520,7 @@
           {:else if module.kind === "document"}
             <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitised above -->
             <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events — native checkboxes supply keyboard activation -->
-            <div class="module-content" onclick={(event) => void toggleChecklist(event, module)}>{@html renderChecklist(module.source)}</div>
+            <div class="module-content riso-tables" onclick={(event) => void toggleChecklist(event, module)}>{@html renderChecklist(module.source)}</div>
             <div class="module-actions">
               <button onclick={() => startEditing(module)}>
                 Edit
@@ -769,32 +769,6 @@
     border-left: 3px solid var(--ink);
     padding: 8px 0 8px 12px;
     margin: 12px 0;
-  }
-
-  /* Document tables read as distinct cells, as conversation markdown does. */
-  .module-content :global(table) {
-    border-collapse: collapse;
-    width: 100%;
-    margin: 0.5em 0;
-    font-size: 0.875em;
-    border: 1px solid var(--ink);
-  }
-
-  .module-content :global(th),
-  .module-content :global(td) {
-    border: 1px solid var(--rule-soft);
-    padding: 6px 10px;
-    text-align: left;
-  }
-
-  .module-content :global(th) {
-    background: var(--ink);
-    color: var(--paper);
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
   }
 
   .module textarea {
