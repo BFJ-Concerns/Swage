@@ -218,7 +218,11 @@ mod tests {
 
         let events = recorded(&storage).await;
         assert_eq!(events.len(), 4);
-        let newest = &events[0];
+        // Events written within the same millisecond list in no fixed order.
+        let newest = events
+            .iter()
+            .find(|event| event.entity_id == "other")
+            .expect("the other provider's record");
         assert_eq!(newest.entity_kind, ENTITY_KIND);
         assert_eq!(newest.entity_id, "other");
         assert_eq!(newest.session_id, None);
