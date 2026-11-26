@@ -908,6 +908,11 @@ one is available.
 `file_search`, `shell`, and `python_execute`. Of these, `shell` is one of the
 two sandbox-eligible tools.
 
+`python_execute` runs each program in a fresh interpreter with Python's standard
+built-ins and standard-library imports. The default Python sandbox starts it in
+a private working directory with no network access. The supplied `swage` module
+can call the file, shell and web tools available to the turn.
+
 **Browser** — `browser_navigate`, `browser_snapshot`, `browser_click`,
 `browser_type`, `browser_select`, and `browser_scroll`.
 

@@ -170,6 +170,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Python execution has the standard Python built-ins. Idle workers stop without starting replacements until the tool is used again, and cancelled execution or gateway shutdown also stops the worker's sandbox.
+
 - The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.
 - The memory curator's own session is no longer told that it cannot write memory: a session offered `memory_write` is told it keeps memory.
 - Failed settings saves leave configuration, managed credentials and the active runtime unchanged. History distinguishes absent values from strings and identifies its audit-event and saved-context sources.
