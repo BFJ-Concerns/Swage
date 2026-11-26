@@ -10,12 +10,35 @@ use swage_gateway::{
 use swage_sandbox::{EgressSetup, SandboxConfig};
 use swage_storage::{SqliteStorage, store::AuditStore};
 
+/// A fixture operator credential helper that answers for one host only,
+/// written into `dir` with a git configuration naming it; returns that
+/// configuration's path, for GIT_CONFIG_GLOBAL.
+fn operator_helper_config(dir: &std::path::Path, host: &str, token: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let helper = dir.join("operator-helper");
+    std::fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = get ] || exit 0\nhost=$(sed -n 's/^host=//p')\n[ \"$host\" = {host} ] && printf 'username=operator\\npassword={token}\\n'\nexit 0\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = dir.join("operator-gitconfig");
+    std::fs::write(
+        &config,
+        format!("[credential]\n\thelper = !{}\n", helper.display()),
+    )
+    .unwrap();
+    config
+}
+
+/// A sandboxed git asks the gateway, which answers from the operator's own
+/// helper on the host; a secret registered with the gateway for the same
+/// host is never the answer.
 #[tokio::test(flavor = "multi_thread")]
-async fn git_get_resolves_over_ipc_and_unknown_hosts_receive_nothing() {
+async fn git_get_answers_from_the_operators_helper_never_a_registered_secret() {
     let mut env = ProcessEnvGuard::new();
-    // The machine's own git configuration stays out of the test: the
-    // host's credential helpers are the fixture's, or none.
-    env.set_var("GIT_CONFIG_GLOBAL", "/dev/null");
     env.set_var("GIT_CONFIG_NOSYSTEM", "1");
     env.set_managed_secret_key(11);
     env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
@@ -45,7 +68,11 @@ async fn git_get_resolves_over_ipc_and_unknown_hosts_receive_nothing() {
     let runtime_root = root.path().join("r");
     std::fs::create_dir(&runtime_root).unwrap();
     env.set_var("XDG_RUNTIME_DIR", &runtime_root);
-    let server = CredentialServer::start(manager, storage.clone(), None, None).unwrap();
+    env.set_var(
+        "GIT_CONFIG_GLOBAL",
+        operator_helper_config(root.path(), "scratch.example", "operator-helper-token"),
+    );
+    let server = CredentialServer::start(storage.clone(), None, None).unwrap();
     let mut policy = SandboxConfig::builder()
         .working_directory(root.path())
         .write_path(root.path())
@@ -86,8 +113,12 @@ async fn git_get_resolves_over_ipc_and_unknown_hosts_receive_nothing() {
     let answer = String::from_utf8(known.stdout).unwrap();
     assert!(answer.contains("username=operator\n"), "{answer}");
     assert!(
-        answer.contains("password=fixture-forge-token\n"),
-        "credential not returned"
+        answer.contains("password=operator-helper-token\n"),
+        "the operator's helper must answer: {answer}"
+    );
+    assert!(
+        !answer.contains("fixture-forge-token"),
+        "a registered secret must never be the answer"
     );
     let unknown = get("unlisted.example").await;
     assert!(
@@ -122,10 +153,11 @@ async fn git_get_resolves_over_ipc_and_unknown_hosts_receive_nothing() {
         assert!(result.error.is_none(), "{:?}", result.error);
         let output = result.output["output"].as_str().unwrap_or_default();
         assert_eq!(
-            output.contains("password=fixture-forge-token"),
+            output.contains("password=operator-helper-token"),
             expected,
             "sandboxed git must use only the requested host's credential: {output}"
         );
+        assert!(!output.contains("fixture-forge-token"), "{output}");
         assert_eq!(
             result.output["exit_code"] == 0,
             expected,
@@ -152,20 +184,18 @@ async fn git_get_resolves_over_ipc_and_unknown_hosts_receive_nothing() {
                 && event.metadata["outcome"] == "resolved")
     );
     assert!(
-        events
+        !events
             .iter()
             .any(|event| event.event_kind == "accessed" && event.entity_kind == "secret"),
-        "secret resolution must be audited"
+        "no registered secret is resolved for a sandboxed git"
     );
-    assert!(
-        !serde_json::to_string(&events)
-            .unwrap()
-            .contains("fixture-forge-token")
-    );
+    let audit = serde_json::to_string(&events).unwrap();
+    assert!(!audit.contains("fixture-forge-token"));
+    assert!(!audit.contains("operator-helper-token"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_refuses_inherited_askpass_and_audits_governed_credentials() {
+async fn sandboxed_git_refuses_inherited_askpass_and_audits_each_lookup() {
     use std::os::unix::fs::PermissionsExt;
     use swage_sandbox::Sandbox;
     use tokio::io::AsyncWriteExt;
@@ -182,31 +212,25 @@ async fn sandboxed_git_refuses_inherited_askpass_and_audits_governed_credentials
     )
     .unwrap();
     std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // The operator's configuration: a helper that answers for one host,
+    // and, for one case, an askpass as well.
+    let helper_config =
+        operator_helper_config(root.path(), "scratch.example", "operator-helper-token");
     let gitconfig = root.path().join("gitconfig");
     std::fs::write(
         &gitconfig,
-        format!("[{}]\naskPass = {}\n", "core", askpass.display()),
+        format!(
+            "{}[{}]\naskPass = {}\n",
+            std::fs::read_to_string(&helper_config).unwrap(),
+            "core",
+            askpass.display()
+        ),
     )
     .unwrap();
     env.set_var("GIT_CONFIG_NOSYSTEM", "1");
     env.set_var("GIT_TERMINAL_PROMPT", "0");
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let manager = Arc::new(SecretManager::new(storage.clone()));
-    manager
-        .create_secret(CreateSecretRequest {
-            name: "scratch forge".into(),
-            material_kind: "git_credential".into(),
-            owner_kind: "operator".into(),
-            backend_kind: "managed".into(),
-            scope_kind: "gateway".into(),
-            scope_id: None,
-            metadata: Some(json!({"host": "scratch.example", "username": "operator"})),
-            value: Some("governed-token".into()),
-            external_reference: None,
-        })
-        .await
-        .unwrap();
-    let server = CredentialServer::start(manager, storage.clone(), None, None).unwrap();
+    let server = CredentialServer::start(storage.clone(), None, None).unwrap();
 
     for source in ["GIT_ASKPASS", "SSH_ASKPASS", "core.askPass"] {
         env.remove_var("GIT_ASKPASS");
@@ -214,7 +238,7 @@ async fn sandboxed_git_refuses_inherited_askpass_and_audits_governed_credentials
         if source == "core.askPass" {
             env.set_var("GIT_CONFIG_GLOBAL", &gitconfig);
         } else {
-            env.set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+            env.set_var("GIT_CONFIG_GLOBAL", &helper_config);
             env.set_var(source, &askpass);
         }
         // Local credential-echoing control: Git really obtains both fields
@@ -277,7 +301,7 @@ async fn sandboxed_git_refuses_inherited_askpass_and_audits_governed_credentials
             assert!(!output.contains("inherited-user"), "{source}: {output}");
             assert!(!output.contains("inherited-password"), "{source}: {output}");
             assert_eq!(
-                output.contains("password=governed-token"),
+                output.contains("password=operator-helper-token"),
                 expected,
                 "{output}"
             );
@@ -303,7 +327,7 @@ async fn sandboxed_git_refuses_inherited_askpass_and_audits_governed_credentials
         }
     }
     let audit = serde_json::to_string(&events).unwrap();
-    assert!(!audit.contains("governed-token"));
+    assert!(!audit.contains("operator-helper-token"));
     assert!(!audit.contains("inherited-password"));
 }
 
@@ -492,7 +516,7 @@ touch "$(dirname "$0")/marker-invoked"
     }
     if source == "indexed" {
         // Unused and non-numeric suffixes must not survive just because the
-        // governed COUNT currently prevents Git from interpreting them.
+        // gateway's COUNT currently prevents Git from interpreting them.
         env.set_var("GIT_CONFIG_KEY_81", "credential.helper");
         env.set_var("GIT_CONFIG_VALUE_81", &marker);
         env.set_var("GIT_CONFIG_KEY_unused", "credential.helper");
@@ -549,7 +573,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         auth = self.headers.get('Authorization')
         headers.append(auth)
         extra_headers.append(self.headers.get('X-Inherited'))
-        if auth != 'Basic ' + base64.b64encode(b'operator:governed-password').decode():
+        if auth != 'Basic ' + base64.b64encode(b'inherited-user:inherited-password').decode():
             self.send_response(401)
             self.send_header('WWW-Authenticate', 'Basic realm="fixture"')
             self.end_headers()
@@ -583,18 +607,15 @@ try:
         assert setup_git('-C', 'client', 'config', '--add', f'credential.https://{host}.helper', marker).returncode == 0
     repository_name = setup_git('-C', 'client', 'config', 'user.name').stdout.strip()
     results = []
-    for host in ['127.0.0.1', 'localhost', 'url-user@localhost']:
+    for host in ['127.0.0.1', 'localhost']:
         headers.clear()
         extra_headers.clear()
         fetched = git('-C', 'client', '-c', 'http.sslVerify=false', 'fetch',
                       f'https://{host}:18443/repo.git')
         results.append({'success': fetched.returncode == 0,
                         'authenticated': any(headers), 'extra_header': any(extra_headers), 'error': fetched.stderr,
-                        'governed': any(h == 'Basic ' + base64.b64encode(b'operator:governed-password').decode()
+                        'operator': any(h == 'Basic ' + base64.b64encode(b'inherited-user:inherited-password').decode()
                                         for h in headers)})
-    credential = subprocess.run(['git', 'credential', 'fill'],
-                                input='url=https://url-user@localhost:18443/repo.git\n\n',
-                                capture_output=True, text=True, timeout=15)
     username = git('config', '--get-urlmatch', 'credential.username', 'https://unlisted.invalid/repo.git')
     scoped_header = git('config', '--get-urlmatch', 'http.extraHeader', 'https://127.0.0.1:18443/repo.git')
     configured = git('config', '--get-all', 'credential.helper')
@@ -603,9 +624,6 @@ try:
                     'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_CONFIG_PARAMETERS']
     print(json.dumps({
         'fetches': results,
-        'url_username_resolved': (credential.returncode == 0
-                                  and 'username=operator\n' in credential.stdout
-                                  and 'password=governed-password\n' in credential.stdout),
         'repository_name': repository_name,
         'foreign_env': [k for k in foreign_keys if k in os.environ],
         'username': username.stdout.strip(),
@@ -620,29 +638,14 @@ finally:
     server.server_close()
 "#).unwrap();
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let manager = Arc::new(SecretManager::new(storage.clone()));
-    manager
-        .create_secret(CreateSecretRequest {
-            name: "local forge".into(),
-            material_kind: "git_credential".into(),
-            owner_kind: "operator".into(),
-            backend_kind: "managed".into(),
-            scope_kind: "gateway".into(),
-            scope_id: None,
-            metadata: Some(json!({"host": "localhost:18443", "username": "operator"})),
-            value: Some("governed-password".into()),
-            external_reference: None,
-        })
-        .await
-        .unwrap();
-    let server = CredentialServer::start(manager, storage.clone(), None, None).unwrap();
+    let server = CredentialServer::start(storage.clone(), None, None).unwrap();
     let mut policy = SandboxConfig::builder()
         .working_directory(root.path())
         .write_path(root.path())
         .build()
         .unwrap();
     server.configure(&mut policy).unwrap();
-    let governed = policy.environment["GIT_CONFIG_VALUE_1"].clone();
+    let gateway_helper = policy.environment["GIT_CONFIG_VALUE_1"].clone();
     policy
         .environment
         .insert("HOME".into(), root.path().display().to_string());
@@ -699,7 +702,7 @@ finally:
             .map(|v| v.as_str().unwrap())
             .collect();
         assert!(
-            helpers.ends_with(&["", governed.as_str()]),
+            helpers.ends_with(&["", gateway_helper.as_str()]),
             "{source}: command scope resets every helper for the host's: {helpers:?}"
         );
         assert_eq!(
@@ -721,38 +724,22 @@ finally:
     if config_first {
         check_config();
     }
-    assert_eq!(
-        observed["fetches"][0]["authenticated"], operator_file,
-        "{source}: an unregistered host is answered by the operator's helper, and only that"
-    );
-    assert_eq!(observed["fetches"][0]["governed"], false);
-    assert_eq!(observed["fetches"][0]["success"], false);
-    assert_eq!(observed["fetches"][0]["extra_header"], scoped_sections);
-    for fetched in &observed["fetches"].as_array().unwrap()[1..] {
-        assert_eq!(fetched["extra_header"], false);
+    // Both hosts are answered by the operator's helper, run on the host,
+    // and only where the operator's configuration names one.
+    for fetched in observed["fetches"].as_array().unwrap() {
+        assert_eq!(
+            fetched["authenticated"], operator_file,
+            "{source}: only the operator's helper answers: {fetched}"
+        );
+        assert_eq!(fetched["operator"], operator_file, "{fetched}");
+        assert_eq!(
+            fetched["success"], operator_file,
+            "{source}: {}",
+            fetched["error"]
+        );
     }
-    assert_eq!(
-        observed["fetches"][1]["governed"], true,
-        "listed fetch must authenticate through the governed helper despite {source}"
-    );
-    assert_eq!(
-        observed["fetches"][1]["success"], true,
-        "{}",
-        observed["fetches"][1]["error"]
-    );
-    assert_eq!(
-        observed["fetches"][2]["governed"], true,
-        "listed URL with a username must authenticate through the governed helper"
-    );
-    assert_eq!(
-        observed["fetches"][2]["success"], true,
-        "{}",
-        observed["fetches"][2]["error"]
-    );
-    assert_eq!(
-        observed["url_username_resolved"], true,
-        "listed credential URL username must resolve to the governed account"
-    );
+    assert_eq!(observed["fetches"][0]["extra_header"], scoped_sections);
+    assert_eq!(observed["fetches"][1]["extra_header"], false);
     if !config_first {
         check_config();
     }
@@ -762,31 +749,18 @@ finally:
         "{source}: the operator's helper runs, on the host, and no other"
     );
     let events = storage.list_audit_events().await.unwrap();
-    let unregistered = if operator_file {
-        (
-            "127.0.0.1:18443",
-            "resolved",
-            json!("operator_credential_helper"),
-        )
-    } else {
-        ("127.0.0.1:18443", "absent", serde_json::Value::Null)
-    };
-    for (host, outcome, credential_source) in [
-        unregistered,
-        ("localhost:18443", "resolved", json!("registered_secret")),
-    ] {
+    let outcome = if operator_file { "resolved" } else { "absent" };
+    for host in ["127.0.0.1:18443", "localhost:18443"] {
         assert!(
             events
                 .iter()
                 .any(|e| e.event_kind == "git_credential_lookup"
                     && e.metadata["host"] == host
-                    && e.metadata["outcome"] == outcome
-                    && e.metadata["source"] == credential_source),
+                    && e.metadata["outcome"] == outcome),
             "every fetch credential lookup must be audited: {host} {outcome}: {events:?}"
         );
     }
     let audit = serde_json::to_string(&events).unwrap();
-    assert!(!audit.contains("governed-password"));
     assert!(!audit.contains("inherited-password"));
 }
 
@@ -922,82 +896,6 @@ except urllib.error.URLError as error:
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn git_path_scoped_credentials_match_only_the_repository_url() {
-    let mut env = ProcessEnvGuard::new();
-    // The machine's own git configuration stays out of the test: the
-    // host's credential helpers are the fixture's, or none.
-    env.set_var("GIT_CONFIG_GLOBAL", "/dev/null");
-    env.set_var("GIT_CONFIG_NOSYSTEM", "1");
-    env.set_managed_secret_key(11);
-    env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
-    let root = tempfile::tempdir().unwrap();
-    env.set_var("XDG_RUNTIME_DIR", root.path());
-    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let manager = Arc::new(SecretManager::new(storage.clone()));
-    manager
-        .create_secret(CreateSecretRequest {
-            name: "repository credential".into(),
-            material_kind: "git_credential".into(),
-            owner_kind: "operator".into(),
-            backend_kind: "managed".into(),
-            scope_kind: "gateway".into(),
-            scope_id: None,
-            metadata: Some(json!({
-                "host": "scratch.example", "username": "operator", "path": "owner/repo.git"
-            })),
-            value: Some("repository-token".into()),
-            external_reference: None,
-        })
-        .await
-        .unwrap();
-    let server = CredentialServer::start(manager, storage, None, None).unwrap();
-    let mut policy = SandboxConfig::builder()
-        .working_directory(root.path())
-        .build()
-        .unwrap();
-    server.configure(&mut policy).unwrap();
-    for (path, expected) in [("owner/repo.git", true), ("owner/other.git", false)] {
-        use tokio::io::AsyncWriteExt;
-        let mut child = tokio::process::Command::new("git")
-            .args(["credential", "fill"])
-            .current_dir(root.path())
-            .envs(&policy.environment)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_ASKPASS", "/bin/false")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(format!("url=https://scratch.example/{path}\n\n").as_bytes())
-            .await
-            .unwrap();
-        let output = child.wait_with_output().await.unwrap();
-        assert_eq!(
-            output.status.success(),
-            expected,
-            "git must resolve only the credential's repository URL ({path}): {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if expected {
-            assert!(
-                String::from_utf8_lossy(&output.stdout).contains("password=repository-token\n")
-            );
-        } else {
-            assert!(
-                output.stdout.is_empty(),
-                "another repository received credentials"
-            );
-        }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn python_runtime_beneath_a_mask_starts_and_imports_stdlib() {
     let mut env = ProcessEnvGuard::new();
     env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
@@ -1101,7 +999,6 @@ async fn sandboxed_git_commits_are_signed_on_the_host_with_the_operators_key() {
     env.set_managed_secret_key(13);
     env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let manager = Arc::new(SecretManager::new(storage.clone()));
     let root = tempfile::Builder::new()
         .prefix("t")
         .tempdir_in(
@@ -1132,7 +1029,7 @@ async fn sandboxed_git_commits_are_signed_on_the_host_with_the_operators_key() {
     let operator_pub = keys.join("operator.pub");
     let signing = SigningConfig::from_signing_key(operator_pub.to_str().unwrap(), true, false);
     assert!(signing.material.is_ok(), "{:?}", signing.material);
-    let credentials = CredentialServer::start(manager, storage.clone(), None, None).unwrap();
+    let credentials = CredentialServer::start(storage.clone(), None, None).unwrap();
     let signer = SignerServer::start(storage.clone(), None, None, signing).unwrap();
     let mut policy = SandboxConfig::builder()
         .working_directory(root.path())

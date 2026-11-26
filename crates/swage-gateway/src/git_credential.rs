@@ -1,12 +1,12 @@
 //! HTTP(S) git credentials for sandboxed commands, resolved on the host.
 //!
-//! A sandboxed git's only credential helper asks the gateway over a socket.
-//! The gateway answers from a git credential registered with it for the
-//! host, and otherwise from the operator's own git credential helpers, run on
-//! the host with the operator's configuration. The sandbox never reads the
-//! files those helpers keep their credentials in.
+//! A sandboxed git's only credential helper asks the gateway over a socket,
+//! and the gateway answers from the operator's own git credential helpers,
+//! run on the host with the operator's configuration. The sandbox never
+//! reads the files those helpers keep their credentials in, and no secret
+//! registered with the gateway is ever an answer: a governed secret never
+//! reaches a sandboxed command.
 
-use crate::secret::SecretManager;
 use std::{
     io::{BufRead, Write},
     sync::Arc,
@@ -23,10 +23,6 @@ pub const SOCKET_ENV: &str = "SWAGE_GIT_CREDENTIAL_SOCKET";
 /// waiting on a person cannot hold the sandboxed git for ever.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Where an answered credential came from, as the audit trail names it.
-const SOURCE_REGISTERED: &str = "registered_secret";
-const SOURCE_OPERATOR_HELPER: &str = "operator_credential_helper";
-
 /// Owns a turn-scoped IPC listener; dropping it stops service and removes it.
 pub struct CredentialServer {
     socket: swage_sandbox::SocketManager,
@@ -41,7 +37,6 @@ impl Drop for CredentialServer {
 
 impl CredentialServer {
     pub fn start(
-        manager: Arc<SecretManager>,
         storage: Arc<dyn swage_storage::Storage>,
         session_id: Option<uuid::Uuid>,
         turn_id: Option<uuid::Uuid>,
@@ -64,13 +59,11 @@ impl CredentialServer {
                     (&mut stream).take(16 * 1024).read_line(&mut line).await?;
                     let request: GitCredentialRequest =
                         serde_json::from_str(&line).map_err(std::io::Error::other)?;
-                    let resolution = resolve(&manager, storage.as_ref(), &request).await;
-                    let (outcome, source) = match &resolution {
-                        Ok((response, source)) if response.password.is_some() => {
-                            ("resolved", Some(*source))
-                        }
-                        Ok(_) => ("absent", None),
-                        Err(_) => ("failed", None),
+                    let response = resolve(&request).await;
+                    let outcome = if response.password.is_some() {
+                        "resolved"
+                    } else {
+                        "absent"
                     };
                     // Attribute every lookup, including an absent host, before
                     // releasing any material. A failed record releases nothing.
@@ -80,9 +73,8 @@ impl CredentialServer {
                         event_kind: "git_credential_lookup".into(),
                         summary: format!("Git credential for {}: {outcome}", request.host),
                         metadata: serde_json::json!({"host": request.host, "protocol": request.protocol,
-                            "turn_id": turn_id, "outcome": outcome, "source": source}),
+                            "turn_id": turn_id, "outcome": outcome}),
                     }).await.map_err(std::io::Error::other)?;
-                    let (response, _) = resolution.map_err(std::io::Error::other)?;
                     let mut body = serde_json::to_vec(&response).map_err(std::io::Error::other)?;
                     body.push(b'\n');
                     stream.get_mut().write_all(&body).await
@@ -196,22 +188,12 @@ pub(crate) fn append_git_config(
         .insert("GIT_CONFIG_COUNT".into(), count.to_string());
 }
 
-/// The credential for a request: one registered with the gateway for the
-/// host first, then whatever the operator's own helpers give.
-async fn resolve(
-    manager: &SecretManager,
-    storage: &dyn swage_storage::Storage,
-    request: &GitCredentialRequest,
-) -> Result<(GitCredentialResponse, &'static str), swage_core::GatewayError> {
+/// The credential the operator's own helpers give for an HTTP(S) request.
+async fn resolve(request: &GitCredentialRequest) -> GitCredentialResponse {
     if !matches!(request.protocol.as_str(), "https" | "http") || request.host.is_empty() {
-        return Ok((empty_response(), SOURCE_REGISTERED));
+        return empty_response();
     }
-    if request.protocol == "https"
-        && let Some(response) = registered(manager, storage, request).await?
-    {
-        return Ok((response, SOURCE_REGISTERED));
-    }
-    Ok((operator_helper(request).await, SOURCE_OPERATOR_HELPER))
+    operator_helper(request).await
 }
 
 fn empty_response() -> GitCredentialResponse {
@@ -219,42 +201,6 @@ fn empty_response() -> GitCredentialResponse {
         username: None,
         password: None,
     }
-}
-
-async fn registered(
-    manager: &SecretManager,
-    storage: &dyn swage_storage::Storage,
-    request: &GitCredentialRequest,
-) -> Result<Option<GitCredentialResponse>, swage_core::GatewayError> {
-    for record in storage.list_secrets().await? {
-        if record.status != "active"
-            || record.material_kind != "git_credential"
-            || record.scope_kind != "gateway"
-            || !record.metadata["host"]
-                .as_str()
-                .is_some_and(|host| host.eq_ignore_ascii_case(&request.host))
-        {
-            continue;
-        }
-        let username = record.metadata["username"].as_str().unwrap_or("oauth2");
-        // The stored account is authoritative for this host and path. A URL
-        // username is a hint, not a reason to refuse the governed account;
-        // the helper returns the canonical username alongside its password.
-        if let Some(path) = record.metadata["path"].as_str()
-            && request.path.as_deref() != Some(path)
-        {
-            continue;
-        }
-        let secret = manager.resolve(&record.reference).await?;
-        if secret.value.contains(['\n', '\r', '\0']) || username.contains(['\n', '\r', '\0']) {
-            return Ok(Some(empty_response()));
-        }
-        return Ok(Some(GitCredentialResponse {
-            username: Some(username.into()),
-            password: Some(secret.value),
-        }));
-    }
-    Ok(None)
 }
 
 /// Ask the operator's own credential helpers, as their git on the host

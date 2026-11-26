@@ -470,11 +470,11 @@ the operator's own `~/.ssh/config` alone (`ssh -F`) unless they set
 root-owned ssh configuration shows as owned by nobody, which OpenSSH
 refuses. Over HTTPS, the
 sandboxed git's one credential helper asks the gateway through the turn's
-private socket: a git credential registered with the gateway for the host
-answers first, and otherwise the gateway runs `git credential fill` on the
-host, so the operator's own helpers answer with their own stores. Neither
-prompts; every lookup is in the audit trail, with where its answer came
-from.
+private socket, and the gateway runs `git credential fill` on the host, so
+the operator's own helpers answer with their own stores. A secret
+registered with the gateway is never an answer: governed secrets do not
+reach the sandbox. Nothing prompts, and every lookup is in the audit
+trail.
 
 Commit signing runs on the host: when the operator signs commits with SSH
 (`gpg.format ssh` and a `user.signingkey`), the sandboxed git is configured

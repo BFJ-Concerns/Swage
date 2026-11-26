@@ -466,9 +466,9 @@ operator's agent and helpers: `SSH_AUTH_SOCK` is bound in, and git's ssh
 reads only `~/.ssh/config` (`ssh -F`) unless the operator sets
 `core.sshCommand`, since the system's root-owned ssh configuration shows
 as owned by nobody inside the user namespace. Over HTTPS the sandboxed
-git's one credential helper asks the gateway (`git_credential.rs`): a git
-credential registered with the gateway for the host, else `git credential
-fill` run on the host with the operator's helpers, never prompting. Commit
+git's one credential helper asks the gateway (`git_credential.rs`), which
+runs `git credential fill` on the host with the operator's helpers, never
+prompting; a secret registered with the gateway is never an answer. Commit
 signing (SSH or OpenPGP) is forwarded to the host by `git_signer.rs`,
 which signs with the operator's configured key and records each signing.
 

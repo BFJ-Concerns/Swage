@@ -893,7 +893,6 @@ pub(crate) async fn build_gateway_dispatcher(
         )
     });
     let credentials = crate::git_credential::CredentialServer::start(
-        state.secret_manager.clone(),
         state.storage.clone(),
         session_id,
         turn_id,
