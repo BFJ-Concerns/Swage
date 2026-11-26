@@ -19995,7 +19995,10 @@ async fn sandbox_degradation_approval_uses_resolved_hitl_settings() {
     let session_signals = std::iter::from_fn(|| signals.try_recv().ok())
         .filter(|event| matches!(event, ServerEvent::SessionUpdated { session_id: id } if *id == session_id))
         .count();
-    assert_eq!(session_signals, 2, "one signal for the request, one for its answer");
+    assert_eq!(
+        session_signals, 2,
+        "one signal for the request, one for its answer"
+    );
 }
 
 #[tokio::test]

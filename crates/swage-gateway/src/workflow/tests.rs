@@ -6541,7 +6541,10 @@ async fn cancelling_a_parked_run_settles_journal_and_records_terminal_budget() {
             let mut seen = Vec::new();
             loop {
                 match events.recv().await {
-                    Ok(event) if crate::websocket::work_surface::work_surface_signal(&event).is_some() => {
+                    Ok(event)
+                        if crate::websocket::work_surface::work_surface_signal(&event)
+                            .is_some() =>
+                    {
                         let done = matches!(event, ServerEvent::WorkflowRunCompleted { .. });
                         seen.push(event);
                         if done {
