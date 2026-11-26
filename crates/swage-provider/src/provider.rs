@@ -144,6 +144,7 @@ pub struct ProviderConfig {
     pub api_key: Option<MaskedString>,
     pub model: String,
     pub base_url: String,
+    provider_id: Option<String>,
 }
 
 impl ProviderConfig {
@@ -157,6 +158,7 @@ impl ProviderConfig {
             api_key: Some(MaskedString::from(api_key.into())),
             model: model.into(),
             base_url: base_url.into(),
+            provider_id: None,
         }
     }
 
@@ -166,7 +168,18 @@ impl ProviderConfig {
             api_key: None,
             model: model.into(),
             base_url: base_url.into(),
+            provider_id: None,
         }
+    }
+
+    /// Name the configured provider in diagnostics for this connection.
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self
+    }
+
+    pub(crate) fn provider_id_or<'a>(&'a self, adapter: &'a str) -> &'a str {
+        self.provider_id.as_deref().unwrap_or(adapter)
     }
 }
 
@@ -209,6 +222,7 @@ impl
             api_key: Some(api_key.into()),
             model: model.model_id.clone(),
             base_url,
+            provider_id: Some(model.provider_id.clone()),
         })
     }
 }

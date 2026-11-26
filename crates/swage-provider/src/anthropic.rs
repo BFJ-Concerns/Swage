@@ -658,7 +658,11 @@ impl AnthropicProvider {
     }
 
     fn make_http_client(&self) -> HttpClient {
-        HttpClient::new(self.config.base_url.clone(), self.build_headers())
+        HttpClient::new(
+            self.config.provider_id_or("anthropic"),
+            self.config.base_url.clone(),
+            self.build_headers(),
+        )
     }
 
     /// Build the two-message follow-up sequence required after tool execution.

@@ -215,7 +215,11 @@
     // conversation's current selection can change before the notice renders.
     const recorded = detail.match(/^Model (.+?): /);
     const diagnostic = recorded ? detail.slice(recorded[0].length) : detail;
-    const provider = diagnostic.match(/^(?:provider error: )?provider '([^']+)' at /)?.[1];
+    const configuredRoute = diagnostic.match(/^(?:provider error: )?provider '([^']+)' at \S+: /);
+    const cause = configuredRoute ? diagnostic.slice(configuredRoute[0].length) : diagnostic;
+    const rejectingProvider = cause.match(/^rate limited by provider (.+)$/)?.[1]
+      ?? cause.match(/^provider (.+?) overloaded: /)?.[1];
+    const provider = rejectingProvider ?? configuredRoute?.[1];
     let reportedCause: string | undefined;
     const jsonStart = detail.indexOf("{");
     if (jsonStart >= 0) {

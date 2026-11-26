@@ -265,6 +265,28 @@ describe("provider failure notice", () => {
     expect(document.querySelector(".turn-error p")?.textContent).toContain("using model Routed-Model failed");
   });
 
+  it.each([
+    "rate limited by provider fallback",
+    "provider fallback overloaded: capacity exhausted",
+  ])("names the provider that reported %s", (cause) => {
+    const request: MessageView = {
+      role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z",
+    };
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", {
+      get: () => ({
+        code: "agent_error",
+        message: `Model routed-model: provider 'primary' at https://example.test: ${cause}`,
+      }),
+    });
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([request]), streamingStore: streaming },
+    });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toContain("to provider fallback");
+  });
+
   it("shows the gateway's model for a failed turn with no reply", () => {
     const request: MessageView = {
       role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z",
