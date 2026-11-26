@@ -692,7 +692,6 @@ mod tests {
         assert_eq!(warned.status(), 200);
     }
 
-
     /// Every route the protocol manifest names is registered on the router
     /// with the same method and path template. The probe substitutes a nil
     /// UUID for each path parameter and asks only whether the router

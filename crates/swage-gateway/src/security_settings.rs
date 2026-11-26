@@ -538,12 +538,22 @@ mod tests {
         assert!(reset.effective.sandbox_enabled);
         assert_eq!(reset.overrides.access_gate, Some(AccessGateMode::Warn));
         assert!(reset.overrides.require_approval.unwrap().is_empty());
-        let reset = save_security_settings(&state, SettingsScope::Install,
-            serde_json::from_value(serde_json::json!({"require_approval": null, "access_gate": null})).unwrap()
-        ).await.unwrap();
+        let reset = save_security_settings(
+            &state,
+            SettingsScope::Install,
+            serde_json::from_value(
+                serde_json::json!({"require_approval": null, "access_gate": null}),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
         assert!(no_overrides(&reset.overrides));
         assert_eq!(reset.effective.access_gate, AccessGateMode::Token);
-        assert_eq!(reset.effective.require_approval.len(), shipped_defaults().require_approval.len());
+        assert_eq!(
+            reset.effective.require_approval.len(),
+            shipped_defaults().require_approval.len()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -764,7 +774,10 @@ mod tests {
             .await
             .expect("read");
         assert!(before.effective.sandbox_enabled);
-        assert_eq!(before.effective.require_approval.len(), shipped_defaults().require_approval.len());
+        assert_eq!(
+            before.effective.require_approval.len(),
+            shipped_defaults().require_approval.len()
+        );
         assert!(no_overrides(&before.overrides));
         assert!(before.relaxed.is_empty());
 
