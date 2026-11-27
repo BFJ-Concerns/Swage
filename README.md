@@ -63,7 +63,7 @@ things those tend to leave out:
 | **Providers** | Anthropic, OpenAI Chat Completions and Responses, Google, OpenRouter, and the built-in Codex app server (temporarily disabled); retries; interactive turns honour the selected model's provider; per-model reasoning effort |
 | **Tools** | File read/write/edit/search, shell, URL fetch, web search¹, a Chromium browser¹, Python execution¹, memory, a knowledge base with citations, schedules, workflows, and agent-built *surfaces* |
 | **Safety** | Per-tool permissions with interactive approvals, grants that narrow as work is delegated, per-turn bubblewrap + Landlock sandboxing, and credential leak detection with redaction |
-| **Workflows** | A JavaScript workflow engine (V8, one isolate per run) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause for a human decision |
+| **Workflows** | A JavaScript workflow engine (V8, one isolate per run) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause on a decision until an agent answers it |
 | **Automation** | Schedules that start or continue sessions, external channels (Telegram¹), delivery targets, and remote *devices* that dial in and execute tools on other machines |
 | **Context** | Scriptable context assembly, compaction, and recovery for sessions that keep failing: separate readers diagnose what went wrong and the session continues from their notes |
 | **Interfaces** | Web UI, desktop shell and CLI; a wire contract defined once in Rust and projected to TypeScript, JSON Schema and OpenAPI |

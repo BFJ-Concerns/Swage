@@ -1049,7 +1049,9 @@ of the attached workspace's write permission:
 
 `shell` retains stdout and stderr artefacts only when the output stream was
 truncated — a stream that fits in the tool result is reported inline and the
-artefact file is removed. Three browser action tools — `browser_click`,
+artefact file is removed. The two streams share the output limit: a short
+stream is reported whole beside a long one, and two long streams take half
+the limit each. Three browser action tools — `browser_click`,
 `browser_select`, and `browser_scroll` — write a post-action screenshot when
 the browser screenshot policy is not Off; `browser_type` never captures.
 `browser_snapshot` writes a full
@@ -1072,4 +1074,6 @@ workspace. Paired-device execution still stores artefacts relative to its
 working directory at `.swage/tool-output/` and reports relative paths.
 
 Operators can register additional tools through plugins; plugin tool names come
-from the plugin manifest rather than the gateway's built-in set.
+from the plugin manifest rather than the gateway's built-in set. A plugin
+whose tool takes a built-in tool's name, or a name another tool already has,
+is left out at startup with a warning in the gateway's log.

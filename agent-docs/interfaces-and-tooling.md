@@ -1175,4 +1175,7 @@ Paired-device execution still stores artefacts in its working directory at
 `.swage/tool-output/` and reports relative paths.
 
 Plugin tools (`plugin.rs`) are dynamically registered from operator
-configuration; their names come from the plugin manifest.
+configuration; their names come from the plugin manifest. Each enters
+through `ToolRegistry::register`, so one named after a built-in
+(`PROTECTED_NAMES`) or after a tool already registered is left out with a
+startup warning.

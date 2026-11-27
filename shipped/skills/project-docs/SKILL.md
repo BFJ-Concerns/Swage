@@ -98,7 +98,10 @@ out and name the gap in the report.
 **Publish no secrets.** Surveying reads config files, environment handling
 and CI settings. Documentation describes the shape of a credential setting,
 such as an API key read from a named variable, and never carries a secret, a
-token, a private hostname or a path that exists only on one machine.
+token or a private hostname. A path that exists only on the machine the
+survey ran on, such as this checkout's own location, is written relative to
+the repository. The deployment paths of the paragraph above are the
+exception, and name their scope.
 
 ## Two readers, two registers
 

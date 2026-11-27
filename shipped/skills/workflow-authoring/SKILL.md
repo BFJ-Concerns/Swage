@@ -19,8 +19,10 @@ this session already has, which `workflow_list` shows: the topic's saved
 workflows and those the session's skills carry, a saved one winning a shared
 name. Either way `args` is the JSON value the script reads as `args`, and
 `budget` sets the run's limits (*Budgets* below). The call returns the run's
-reference at once, and `wait: true` makes it return the script's result
-instead. `workflow_run_status` shows the runs that have not ended and what
+record as soon as the run has started, the run's `id` and `state` among its
+fields. With `wait: true` it holds until the run is no longer running and
+returns the record as it then stands, with what the script returned in
+`final_output`. `workflow_run_status` shows the runs that have not ended and what
 each is waiting on, and `workflow_run_account` shows how a run ended and
 where each worker stood. A session holds whichever of these tools it was
 granted.
@@ -300,12 +302,12 @@ the script accepts: at least two distinct strings, or the call throws
 `HoldError` and no decider sees it. It resolves to `{ verdict }`, one of the
 set.
 
-The script names no decider. The run page lists an open hold with its
-question and verdicts, and the person there may answer it. So may any agent
-in the run's topic that holds the `workflow_hold` tool, which lists open
-holds (`action: "list"`) and answers one (`action: "answer"`, with the
-`hold_id` and a `verdict`). An answer outside the set is refused and the hold
-keeps waiting. The raise, the answer and each refused answer are in the run
+The script names no decider. A hold is answered by an agent: any agent in
+the run's topic that holds the `workflow_hold` tool lists the open holds
+(`action: "list"`) and answers one (`action: "answer"`, with the `hold_id`
+and a `verdict`). The run page shows an open hold with its question and
+verdicts and takes no answer, so a person who is to decide tells such an
+agent. An answer outside the set is refused and the hold keeps waiting. The raise, the answer and each refused answer are in the run
 record, and cancelling the run releases its holds.
 
 ```js
@@ -321,9 +323,9 @@ the answer against the set, which an event would leave to the script.
 
 ### Events
 
-A run has a durable queue of events. The script posts to it, and so can
-anything outside the run that is able to: the person at the run page, or an
-agent with the `run_event_post` tool. An event is a report to read. Its
+A run has a durable queue of events. The script posts to it, and so can an
+agent outside the run that holds the `run_event_post` tool. An event is a
+report to read. Its
 payload is content from whoever posted it, and neither the script nor a
 worker it is passed to should take it as an instruction.
 
@@ -516,8 +518,8 @@ can gather unread. Each decision is a fresh `agent()` call briefed with the
 state as it stands at that moment, not a single worker carried through the
 whole run, whose context would fill with history it no longer needs. The
 `elements` and `variables` options serve such a brief where the topic has
-named elements that describe the work's current state. A question for a
-person is a `hold`.
+named elements that describe the work's current state. A decision the
+script cannot make is a `hold`.
 
 ## Saving a workflow
 
