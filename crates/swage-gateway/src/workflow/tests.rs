@@ -19957,6 +19957,7 @@ async fn run_accounts_inspection_reads_an_outstanding_provider_round() {
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
+    let mut signals = state.broadcast.subscribe();
     let Json(started) = start_inline_run(
         State(state.clone()),
         Path(topic.id),
@@ -19970,6 +19971,9 @@ async fn run_accounts_inspection_reads_an_outstanding_provider_round() {
     .expect("launch");
     opened.notified().await;
     wait_for_open_worker_round(&storage).await;
+    // The held provider has sent no output. Drain the start signals before
+    // releasing it so only a subsequent round update can satisfy the read.
+    while signals.try_recv().is_ok() {}
     let detail = get_run(State(state.clone()), Path(started.id))
         .await
         .expect("page")
@@ -19991,6 +19995,26 @@ async fn run_accounts_inspection_reads_an_outstanding_provider_round() {
             .expect("account");
     // End the real in-flight work before assertions, including on a broken projection.
     release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Ok(event) = signals.recv().await {
+            if matches!(event, ServerEvent::WorkflowRunUpdated { run_id } if run_id == started.id) {
+                let Json(detail) = get_run(State(state.clone()), Path(started.id))
+                    .await
+                    .expect("run page");
+                if only_agent_call(&detail)
+                    .provider_rounds
+                    .as_ref()
+                    .expect("rounds")[0]
+                    .completed_at
+                    .is_some()
+                {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the provider settlement must refresh the open run page");
     wait_for_terminal(&state, started.id).await;
     assert_eq!(
         status["runs"][0]["workers"][0]["agent_call"]["provider_rounds"], expected,

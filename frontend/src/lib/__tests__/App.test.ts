@@ -401,6 +401,28 @@ describe("ambient channel control path", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it("recovers a failed terminal refresh without another signal", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockImplementationOnce(async () => runResponse("recovering"))
+      .mockImplementationOnce(async () => new Response("Unavailable", { status: 503 }))
+      .mockImplementationOnce(async () => runResponse("recovering", "completed"));
+    const channel = openRunView("recovering");
+    await vi.waitFor(() => expect(document.querySelector(".run .state")?.textContent).toBe("running"));
+
+    vi.useFakeTimers();
+    try {
+      channel.signal({ type: "workflow_run_updated", run_id: "recovering" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(document.querySelector('.run [role="alert"]')?.textContent).toContain("Unavailable");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(document.querySelector(".ending-line")?.textContent).toBe("Returned");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fetch).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rereads after a run signal received during an outstanding read", async () => {
     let release!: (response: Response) => void;
     const fetch = vi.spyOn(globalThis, "fetch")

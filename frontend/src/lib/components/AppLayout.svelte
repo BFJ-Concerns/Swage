@@ -28,6 +28,7 @@
   import ThemeToggle from "./ThemeToggle.svelte";
   import WorkflowRunDetail from "./WorkflowRunDetail.svelte";
   import { openSharedWorkSurfaceChannel } from "../api/work-surface";
+  import { ApiError } from "../api/error";
   import { fetchWorkflowRun } from "../api/workflow-runs";
   import { conversationPath } from "../router";
   import type { DisplayPreferences } from "../display-preferences";
@@ -164,16 +165,20 @@
     let disposed = false;
     let reading = false;
     let changedDuringRead = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryDelay = 1000;
     async function refresh(runId: string) {
       if (disposed || runId !== workflowRunId) return;
       if (reading) {
         changedDuringRead = true;
         return;
       }
+      clearTimeout(retryTimer);
       reading = true;
       try {
         const loaded = await fetchWorkflowRun(runId);
         if (disposed || runId !== workflowRunId) return;
+        retryDelay = 1000;
         workflowRunDetail = loaded;
         workflowRunLoadState = loaded === null ? "absent" : "loaded";
         workflowRunError = "";
@@ -181,6 +186,10 @@
         if (disposed || runId !== workflowRunId) return;
         workflowRunError = error instanceof Error ? error.message : String(error);
         workflowRunLoadState = "error";
+        if (!(error instanceof ApiError) || error.status >= 500 || error.status === 429) {
+          retryTimer = setTimeout(() => { void refresh(runId); }, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 30_000);
+        }
       } finally {
         reading = false;
         if (changedDuringRead) {
@@ -200,6 +209,7 @@
     refreshRun();
     return () => {
       disposed = true;
+      clearTimeout(retryTimer);
       channel.close();
     };
   });

@@ -2772,6 +2772,7 @@ async fn execute_workflow_agent_turn(
         Some(journal_entry_id),
         requested_model,
         Some(provider_failure.clone()),
+        Some(run_id),
         reuse_persisted_input,
     ));
     let timeout = timeout_ms.map(std::time::Duration::from_millis);
