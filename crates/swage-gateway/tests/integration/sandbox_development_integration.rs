@@ -121,6 +121,7 @@ async fn host_lookup_from_the_current_directory() {
             host: "forge.example".into(),
             path: None,
             username: None,
+            directory: None,
         },
     )
     .await
@@ -129,35 +130,46 @@ async fn host_lookup_from_the_current_directory() {
     assert!(!std::path::Path::new(&marker).exists());
 }
 
-/// A helper the operator's global configuration selects for the workspace
-/// (`includeIf "gitdir:..."`) answers the turn's lookup, as it would answer
-/// their own git there, though the lookup itself runs outside any
-/// repository.
+/// A helper the operator's global configuration selects for a repository
+/// (`includeIf "gitdir:..."`) answers a sandboxed git working in it, though
+/// the repository lies beneath the turn's workspace and the lookup itself
+/// runs outside any repository. A directory the sandbox names outside the
+/// workspace selects nothing: another project's helper never answers.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_helper_the_operator_selects_for_the_workspace_answers() {
+async fn a_helper_the_operator_selects_for_the_asking_repository_answers() {
+    use tokio::io::AsyncWriteExt;
+
     let mut env = ProcessEnvGuard::new();
     env.set_var("GIT_CONFIG_NOSYSTEM", "1");
     env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
     let root = tempfile::tempdir().unwrap();
-    let projects = root.path().join("projects");
-    let workspace = projects.join("work");
-    std::fs::create_dir_all(&workspace).unwrap();
-    let init = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&workspace)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .status()
-        .unwrap();
-    assert!(init.success());
-    let helper_config =
-        operator_helper_config(root.path(), "forge.example", "workspace-helper-token");
+    let workspace = root.path().join("work");
+    let checkout = workspace.join("checkout");
+    let outside = root.path().join("other-project");
+    for repository in [&checkout, &outside] {
+        std::fs::create_dir_all(repository).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repository)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(init.success());
+    }
+    let helpers = |name: &str, token: &str| {
+        let dir = root.path().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        operator_helper_config(&dir, "forge.example", token)
+    };
     let global = root.path().join("global-gitconfig");
     std::fs::write(
         &global,
         format!(
-            "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
-            projects.display(),
-            helper_config.display()
+            "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
+            checkout.display(),
+            helpers("checkout-helper", "checkout-token").display(),
+            outside.display(),
+            helpers("other-helper", "other-project-token").display(),
         ),
     )
     .unwrap();
@@ -170,23 +182,55 @@ async fn a_helper_the_operator_selects_for_the_workspace_answers() {
         .build()
         .unwrap();
     server.configure(&mut policy).unwrap();
+
+    // The sandboxed side: git in the nested checkout, on no configuration of
+    // the operator's own, asks through the gateway's helper.
+    let mut child = tokio::process::Command::new("git")
+        .args(["-C"])
+        .arg(&checkout)
+        .args(["credential", "fill"])
+        .envs(policy.environment.clone())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"protocol=https\nhost=forge.example\n\n")
+        .await
+        .unwrap();
+    let filled = child.wait_with_output().await.unwrap();
+    assert!(
+        filled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&filled.stderr)
+    );
+    let answer = String::from_utf8(filled.stdout).unwrap();
+    assert!(answer.contains("password=checkout-token\n"), "{answer}");
+
     let socket = policy
         .environment
         .get(swage_gateway::git_credential::SOCKET_ENV)
         .unwrap()
         .clone();
-    let answer = swage_gateway::git_credential::lookup(
+    let elsewhere = swage_gateway::git_credential::lookup(
         Path::new(&socket),
         &swage_protocol::hosting::GitCredentialRequest {
             protocol: "https".into(),
             host: "forge.example".into(),
             path: None,
             username: None,
+            directory: Some(outside.display().to_string()),
         },
     )
     .await
     .unwrap();
-    assert_eq!(answer.password.as_deref(), Some("workspace-helper-token"));
+    assert_eq!(elsewhere.password, None);
 }
 
 /// A sandboxed git asks the gateway, which answers from the operator's own

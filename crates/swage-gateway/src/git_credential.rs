@@ -37,9 +37,10 @@ impl Drop for CredentialServer {
 
 impl CredentialServer {
     /// Serve lookups for one turn. `workspace` is the turn's working
-    /// directory: the operator's configuration is read as it applies there,
-    /// so a helper their global configuration selects for that directory
-    /// (`includeIf "gitdir:..."`) answers, as it would on the host.
+    /// directory: the operator's configuration is read as it applies in the
+    /// repository asking, within the workspace, so a helper their global
+    /// configuration selects for it (`includeIf "gitdir:..."`) answers, as
+    /// it would on the host.
     pub fn start(
         storage: Arc<dyn swage_storage::Storage>,
         session_id: Option<uuid::Uuid>,
@@ -202,10 +203,30 @@ async fn resolve(
         return empty_response();
     }
     let entries = match workspace {
-        Some(workspace) => operator_credential_entries(workspace).await,
+        Some(workspace) => operator_credential_entries(&asking_directory(request, workspace)).await,
         None => Vec::new(),
     };
     operator_helper(request, &entries).await
+}
+
+/// Where the operator's configuration is read for a lookup: the directory
+/// git asked from, a repository the turn works in, when it lies within the
+/// workspace; the workspace otherwise. The sandboxed command names the
+/// directory, so one outside the workspace — which would select another
+/// project's helpers — is not taken.
+fn asking_directory(
+    request: &GitCredentialRequest,
+    workspace: &std::path::Path,
+) -> std::path::PathBuf {
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    request
+        .directory
+        .as_deref()
+        .and_then(|directory| std::path::Path::new(directory).canonicalize().ok())
+        .filter(|directory| directory.starts_with(&workspace))
+        .unwrap_or(workspace)
 }
 
 /// The `credential.*` settings of the operator's system and global
@@ -387,6 +408,9 @@ pub async fn run_helper(operation: &str) -> std::io::Result<()> {
         host: String::new(),
         path: None,
         username: None,
+        directory: std::env::current_dir()
+            .ok()
+            .map(|directory| directory.display().to_string()),
     };
     for line in std::io::stdin().lock().lines().take(128) {
         let line = line?;

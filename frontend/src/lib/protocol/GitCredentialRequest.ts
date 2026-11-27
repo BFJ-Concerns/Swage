@@ -3,4 +3,9 @@
 /**
  * One HTTPS git credential lookup on the turn's private IPC socket.
  */
-export type GitCredentialRequest = { protocol: string, host: string, path?: string | null, username?: string | null, };
+export type GitCredentialRequest = { protocol: string, host: string, path?: string | null, username?: string | null,
+/**
+ * The directory git ran the helper in: the repository asking, which
+ * decides the operator's directory-conditional configuration.
+ */
+directory?: string | null, };

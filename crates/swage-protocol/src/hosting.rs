@@ -427,6 +427,11 @@ pub struct GitCredentialRequest {
     pub host: String,
     pub path: Option<String>,
     pub username: Option<String>,
+    /// The directory git ran the helper in: the repository asking, which
+    /// decides the operator's directory-conditional configuration.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub directory: Option<String>,
 }
 
 /// An absent credential makes git continue without this helper's answer.

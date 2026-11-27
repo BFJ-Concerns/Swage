@@ -900,6 +900,14 @@
     "GitCredentialRequest": {
       "description": "One HTTPS git credential lookup on the turn's private IPC socket.",
       "properties": {
+        "directory": {
+          "default": null,
+          "description": "The directory git ran the helper in: the repository asking, which\ndecides the operator's directory-conditional configuration.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "host": {
           "type": "string"
         },
