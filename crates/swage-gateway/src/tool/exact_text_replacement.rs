@@ -13,12 +13,12 @@ pub(super) fn replace_exact_text(
     old: &str,
     new: &str,
 ) -> Result<String, ReplacementError> {
-    if old.is_empty() {
+    let Some(first_char) = old.chars().next() else {
         return Err(ReplacementError::Missing);
-    }
+    };
+    let first_char_bytes = first_char.len_utf8();
     let mut remaining = content;
     let mut count = 0;
-    let first_char_bytes = old.chars().next().unwrap().len_utf8();
     while let Some(position) = remaining.find(old) {
         count += 1;
         remaining = &remaining[position + first_char_bytes..];
