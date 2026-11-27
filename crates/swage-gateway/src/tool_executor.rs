@@ -711,15 +711,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn gateway_strategy_resolves_secret_refs_on_host_and_bypasses_inner_strategy() {
         // The managed-secret backend reads its encryption key from the
-        // environment. Provide one so the test is self-contained (mirroring
-        // the swage-storage secret tests) rather than passing only in shells
-        // that happen to export a dev key.
-        unsafe {
-            std::env::set_var(
-                "SWAGE_MANAGED_SECRET_KEY",
-                "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
-            );
-        }
+        // environment; the guard sets it and holds it against the other
+        // tests that set it, for as long as this test runs.
+        let _key = crate::secret::tests::with_secret_env();
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
