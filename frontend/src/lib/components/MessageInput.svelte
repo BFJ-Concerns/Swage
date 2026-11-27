@@ -144,7 +144,9 @@
     return created;
   }
 
-  async function register(target: string, title: string, path: string, file: File, body: string): Promise<void> {
+  // Registers one file against `target`. The list takes it only while the
+  // composer still stands where the attach began.
+  async function register(generation: number, target: string, title: string, path: string, file: File, body: string): Promise<void> {
     const segments = path.split("/").map((segment) => segment.replace(/[^a-zA-Z0-9._-]/g, "-"));
     const registered = await createMaterial({
       scope_kind: "session",
@@ -154,6 +156,7 @@
       mime_type: materialMimeType(file.name, file.type),
       content_text: body,
     });
+    if (generation !== attachmentGeneration) return;
     materials = [...materials, { id: registered.id, title: registered.title }];
   }
 
@@ -177,7 +180,7 @@
         target ??= await targetSession();
         if (!target) throw new Error("Could not create a session for the file. Please try again.");
         if (generation !== attachmentGeneration) return;
-        await register(target, file.name, file.name, file, body);
+        await register(generation, target, file.name, file.name, file, body);
       }
     } catch (error) {
       if (generation === attachmentGeneration) attachmentError = describe(error, "Could not attach the file.");
@@ -211,7 +214,7 @@
         if (body.includes("\u0000")) { skipped += 1; continue; }
         if (generation !== attachmentGeneration) return;
         const path = file.webkitRelativePath || file.name;
-        await register(target, path, path, file, body);
+        await register(generation, target, path, path, file, body);
         attached += 1;
       }
     } catch (error) {

@@ -151,6 +151,27 @@ describe("composer attachments", () => {
     expect(sendMessage.mock.calls[0]?.[3]).toBeUndefined();
   });
 
+  it("keeps a file registered for the previous session out of the next session's list", async () => {
+    const { input, conversations } = await setup();
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => { answer = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        await answered;
+        return new Response(JSON.stringify({ ...JSON.parse(init.body as string), id: "late", status: "active" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ materials: [] }), { status: 200 });
+    }));
+    choose([new File(["notes"], "late.md")]);
+    await vi.waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+    await conversations.selectConversation("session-two");
+    input.$set({ sessionId: "session-two" });
+    flushSync();
+    answer();
+    await vi.waitFor(() => expect(document.body.textContent).not.toContain("Attaching…"));
+    expect(document.body.textContent).not.toContain("late.md");
+  });
+
   it("registers a folder's text files by their paths and skips the rest", async () => {
     const { created } = await setup();
     choose([
