@@ -1294,10 +1294,11 @@ fn succession_report(
     compactions: &[swage_protocol::client::context::CompactionRecord],
 ) -> serde_json::Value {
     if record.get("removed").is_none() {
-        let served = succession_ran(compactions)
-            .then(|| record["summariser"].clone())
-            .unwrap_or(serde_json::Value::Null);
-        record["served"] = served;
+        record["served"] = if succession_ran(compactions) {
+            record["summariser"].clone()
+        } else {
+            serde_json::Value::Null
+        };
     }
     record
 }
