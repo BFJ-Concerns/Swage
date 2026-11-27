@@ -60,6 +60,15 @@ impl RecordingProvider {
     }
 }
 
+impl RecordingProvider {
+    fn pending(&self, account: CompletionAccount) -> PendingCompletion {
+        PendingCompletion {
+            account: Some(account),
+            recorder: self.recorder.clone(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CompletionRecorder {
     storage: Arc<dyn Storage>,
@@ -204,7 +213,7 @@ impl CompletionAccount {
         });
         let content_omitted = match secret_values {
             Some(values) => {
-                crate::turn::redact_secret_values(&mut returned, values);
+                mask_registered_values(&mut returned, values);
                 false
             }
             None => {
@@ -245,6 +254,27 @@ impl CompletionAccount {
     }
 }
 
+/// Mask every registered value in each string, in its plain form and in the
+/// escaped form it takes inside JSON text, which a completion may return.
+fn mask_registered_values(value: &mut Value, secret_values: &[String]) {
+    match value {
+        Value::String(text) => {
+            crate::turn::redact_serialised_text(text, secret_values);
+        }
+        Value::Array(values) => {
+            for value in values {
+                mask_registered_values(value, secret_values);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                mask_registered_values(value, secret_values);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
 impl CompletionRecorder {
     async fn record(&self, account: CompletionAccount) {
         let secret_values = crate::turn::registered_secret_values(&self.secret_manager)
@@ -259,8 +289,8 @@ impl CompletionRecorder {
         }
     }
 
-    /// Record from a place that cannot wait — a stream dropped before it
-    /// ended — on the runtime the gateway runs on.
+    /// Record on a task of its own, so that neither a caller that stops
+    /// waiting nor a stream dropped mid-read loses the record.
     fn record_detached(&self, account: CompletionAccount) {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
@@ -275,12 +305,42 @@ impl CompletionRecorder {
     }
 }
 
-/// A provider stream that records its completion when it ends, or when it
-/// is dropped before ending (the turn was stopped).
-struct RecordingStream {
-    inner: Pin<Box<dyn Stream<Item = StreamChunk> + Send>>,
+/// A completion in flight. It is recorded once, when it is finished or,
+/// failing that, when it is dropped: a caller that stops waiting, or a
+/// reader that stops reading a stream before its end, leaves a completion
+/// recorded as interrupted with whatever had arrived.
+struct PendingCompletion {
     account: Option<CompletionAccount>,
     recorder: CompletionRecorder,
+}
+
+impl PendingCompletion {
+    fn account(&mut self) -> Option<&mut CompletionAccount> {
+        self.account.as_mut()
+    }
+
+    fn finish(&mut self) {
+        if let Some(account) = self.account.take() {
+            self.recorder.record_detached(account);
+        }
+    }
+}
+
+impl Drop for PendingCompletion {
+    fn drop(&mut self) {
+        if let Some(account) = self.account.as_mut() {
+            // A stream its reader stops reading after `Done` has still ended;
+            // one dropped before then was cut short.
+            account.interrupted = account.finish_reason.is_none() && account.error.is_none();
+        }
+        self.finish();
+    }
+}
+
+/// A provider stream that records its completion when it ends.
+struct RecordingStream {
+    inner: Pin<Box<dyn Stream<Item = StreamChunk> + Send>>,
+    pending: PendingCompletion,
 }
 
 impl Stream for RecordingStream {
@@ -291,29 +351,14 @@ impl Stream for RecordingStream {
         let polled = this.inner.as_mut().poll_next(cx);
         match &polled {
             Poll::Ready(Some(chunk)) => {
-                if let Some(account) = this.account.as_mut() {
+                if let Some(account) = this.pending.account() {
                     account.take_chunk(chunk);
                 }
             }
-            Poll::Ready(None) => {
-                if let Some(account) = this.account.take() {
-                    this.recorder.record_detached(account);
-                }
-            }
+            Poll::Ready(None) => this.pending.finish(),
             Poll::Pending => {}
         }
         polled
-    }
-}
-
-impl Drop for RecordingStream {
-    fn drop(&mut self) {
-        if let Some(mut account) = self.account.take() {
-            // A stream its consumer stops reading after `Done` has still
-            // ended; one dropped before then was cut short.
-            account.interrupted = account.finish_reason.is_none() && account.error.is_none();
-            self.recorder.record_detached(account);
-        }
     }
 }
 
@@ -346,18 +391,20 @@ impl LlmProvider for RecordingProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        let mut account = CompletionAccount::new(
+        let mut pending = self.pending(CompletionAccount::new(
             self.inner.as_ref(),
             request.model.as_deref(),
             request.max_tokens,
             false,
-        );
+        ));
         let result = self.inner.complete(request).await;
-        match &result {
-            Ok(response) => account.take_response(response),
-            Err(error) => account.error = Some(error.to_string()),
+        if let Some(account) = pending.account() {
+            match &result {
+                Ok(response) => account.take_response(response),
+                Err(error) => account.error = Some(error.to_string()),
+            }
         }
-        self.recorder.record(account).await;
+        pending.finish();
         result
     }
 
@@ -365,18 +412,20 @@ impl LlmProvider for RecordingProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
-        let mut account = CompletionAccount::new(
+        let mut pending = self.pending(CompletionAccount::new(
             self.inner.as_ref(),
             request.model.as_deref(),
             request.max_tokens,
             false,
-        );
+        ));
         let result = self.inner.complete_with_tools(request).await;
-        match &result {
-            Ok(response) => account.take_tool_response(response),
-            Err(error) => account.error = Some(error.to_string()),
+        if let Some(account) = pending.account() {
+            match &result {
+                Ok(response) => account.take_tool_response(response),
+                Err(error) => account.error = Some(error.to_string()),
+            }
         }
-        self.recorder.record(account).await;
+        pending.finish();
         result
     }
 
@@ -384,16 +433,15 @@ impl LlmProvider for RecordingProvider {
         &self,
         request: CompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
-        let account = CompletionAccount::new(
+        let pending = self.pending(CompletionAccount::new(
             self.inner.as_ref(),
             request.model.as_deref(),
             request.max_tokens,
             true,
-        );
+        ));
         Box::pin(RecordingStream {
             inner: self.inner.stream(request),
-            account: Some(account),
-            recorder: self.recorder.clone(),
+            pending,
         })
     }
 }
@@ -407,8 +455,21 @@ mod tests {
         AuditEventFilter, AuditStore, NewTopic, SessionStore, SqliteStorage, TopicStore,
     };
 
-    /// A provider whose every answer is a reply cut off at its length limit.
-    struct CutOffProvider;
+    /// A provider whose every answer is a reply cut off at its length limit,
+    /// the non-streamed one after `delay`.
+    struct CutOffProvider {
+        content: String,
+        delay: std::time::Duration,
+    }
+
+    impl Default for CutOffProvider {
+        fn default() -> Self {
+            Self {
+                content: "a summary that stops mid-".into(),
+                delay: std::time::Duration::ZERO,
+            }
+        }
+    }
 
     #[async_trait]
     impl LlmProvider for CutOffProvider {
@@ -420,8 +481,9 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Result<CompletionResponse, ProviderError> {
+            tokio::time::sleep(self.delay).await;
             Ok(CompletionResponse {
-                content: "a summary that stops mid-".into(),
+                content: self.content.clone(),
                 input_tokens: 40,
                 output_tokens: 8,
                 finish_reason: FinishReason::Length,
@@ -480,9 +542,13 @@ mod tests {
     }
 
     fn recording(storage: &Arc<SqliteStorage>) -> RecordingProvider {
+        recording_with(storage, CutOffProvider::default())
+    }
+
+    fn recording_with(storage: &Arc<SqliteStorage>, provider: CutOffProvider) -> RecordingProvider {
         let storage = Arc::clone(storage) as Arc<dyn Storage>;
         RecordingProvider::new(
-            Arc::new(CutOffProvider),
+            Arc::new(provider),
             Arc::clone(&storage),
             SecretManager::new(storage),
         )
@@ -584,5 +650,69 @@ mod tests {
         let events = completions(&storage, 1).await;
         assert_eq!(events[0].metadata["outcome"], "interrupted");
         assert_eq!(events[0].metadata["content"], "half an ");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_registered_value_returned_inside_json_text_is_masked() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let secret = r#"audit"secret-123"#;
+        unsafe { std::env::set_var("SWAGE_COMPLETION_RECORD_SECRET_TEST", secret) };
+        SecretManager::new(Arc::clone(&storage) as Arc<dyn Storage>)
+            .create_secret(crate::secret::CreateSecretRequest {
+                name: "Completion record key".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "service".into(),
+                backend_kind: "env".into(),
+                scope_kind: "gateway".into(),
+                scope_id: None,
+                metadata: None,
+                value: None,
+                external_reference: Some("SWAGE_COMPLETION_RECORD_SECRET_TEST".into()),
+            })
+            .await
+            .unwrap();
+        let content = json!({ "token": secret }).to_string();
+        assert!(!content.contains(secret), "the reply carries it escaped");
+        recording_with(
+            &storage,
+            CutOffProvider {
+                content,
+                ..Default::default()
+            },
+        )
+        .complete(request(None))
+        .await
+        .unwrap();
+
+        let recorded = completions(&storage, 1).await[0].metadata["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            recorded,
+            json!({ "token": "[REDACTED_SECRET]" }).to_string()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_completion_its_caller_stops_waiting_for_is_recorded_as_interrupted() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let provider = recording_with(
+            &storage,
+            CutOffProvider {
+                delay: std::time::Duration::from_secs(30),
+                ..Default::default()
+            },
+        );
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            provider.complete(request(Some(8))),
+        )
+        .await;
+        assert!(waited.is_err(), "the caller stopped waiting");
+
+        let events = completions(&storage, 1).await;
+        assert_eq!(events[0].metadata["outcome"], "interrupted");
+        assert_eq!(events[0].metadata["max_tokens"], 8);
     }
 }
