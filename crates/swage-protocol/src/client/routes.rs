@@ -1262,7 +1262,7 @@ pub fn routes() -> Vec<Route> {
             path: "/api/pair/codes",
             path_parameters: vec![],
             query_parameters: vec![],
-            summary: "Issue a one-time pairing code; loopback only.",
+            summary: "Issue a one-time pairing code; from the gateway's own machine only, over loopback or from its bound address.",
             request_optional: true,
 
             request: None,
@@ -1277,7 +1277,7 @@ pub fn routes() -> Vec<Route> {
             path: "/api/pair",
             path_parameters: vec![],
             query_parameters: vec![],
-            summary: "Redeem a pairing code for the gateway's token, set as the browser's cookie.",
+            summary: "Redeem a pairing code for the gateway's token, set as the browser's cookie; a few wrong codes spend every outstanding code.",
             request_optional: false,
 
             request: schema::<PairClientRequest>(),

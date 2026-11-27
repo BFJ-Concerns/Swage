@@ -58,6 +58,7 @@
     // The memory page a notice link names, opened on the memory tab.
     memoryPage?: MemoryPageAddress | null;
     onSettingsSaved?: () => void | Promise<void>;
+    onNavigate?: (path: string) => void;
   }
 
   let {
@@ -66,6 +67,7 @@
     topics = [],
     memoryPage = null,
     onSettingsSaved,
+    onNavigate,
   }: Props = $props();
 
   // settings is the working copy — bind:value mutates it freely. saveSettings
@@ -281,8 +283,13 @@
       normaliseDefaultModel();
       submittedFingerprint = settingsFingerprint();
       providerSaveInFlight = providerEditsPending;
-      // The sandbox and approval-gated tools are saved from the Security tab.
-      const { sandbox: _sandbox, tool_permissions, ...general } = settings;
+      // The sandbox and approval-gated tools are saved from the Security tab,
+      // and the restart flags are the server's to report: the request carries
+      // neither, and the gateway refuses a field it does not take.
+      const {
+        sandbox: _sandbox, tool_permissions, restart_required: _restartRequired, can_restart: _canRestart,
+        ...general
+      } = settings;
       const { require_approval: _approvals, ...grants } = tool_permissions;
       const submitted = JSON.parse(JSON.stringify({ ...general, tool_permissions: grants, tool_runtime: toolRuntimeForSave(settings.tool_runtime) })) as SettingsPayload;
       const saved = await saveSettings(submitted);
@@ -332,6 +339,24 @@
       isPersisting = false;
       if (leaving && !error && settingsFingerprint() !== lastPersistedSettingsFingerprint) void persist();
     }
+  }
+
+  // A Security save changes the sandbox and the approval list and nothing
+  // else: take those from the server and leave every other edit as it is,
+  // still unsaved where it was unsaved.
+  async function securitySaved(): Promise<void> {
+    const fresh = await fetchSettings();
+    if (settings) {
+      settings.sandbox = fresh.sandbox;
+      settings.tool_permissions.require_approval = fresh.tool_permissions.require_approval;
+      if (lastPersistedSettingsFingerprint) {
+        const persisted = JSON.parse(lastPersistedSettingsFingerprint) as Pick<SettingsResponse, "sandbox" | "tool_permissions">;
+        persisted.sandbox = fresh.sandbox;
+        persisted.tool_permissions.require_approval = fresh.tool_permissions.require_approval;
+        lastPersistedSettingsFingerprint = JSON.stringify(persisted);
+      }
+    }
+    await onSettingsSaved?.();
   }
 
   async function restart(): Promise<void> {
@@ -501,11 +526,7 @@
 
     <div class="settings-content">
       {#if tab === "security"}
-        <SecuritySettingsPanel onSaved={async () => {
-          settings = await fetchSettings();
-          lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
-          await onSettingsSaved?.();
-        }} />
+        <SecuritySettingsPanel onSaved={securitySaved} />
       {:else if tab === "agents"}
         <AgentDefinitionsPanel {topicId} />
       {:else if tab === "commands"}
@@ -605,6 +626,7 @@
           </div>
           <AutomationSettingsPanel
             bind:settings
+            {onNavigate}
             {archiveDelayError}
             onValidation={(bundlesInvalid) => {
               hasInvalidBundlesJson = bundlesInvalid;

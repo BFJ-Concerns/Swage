@@ -23692,6 +23692,83 @@ async fn approval_scope_deadline_race(
 }
 
 #[tokio::test]
+async fn a_topic_approval_in_a_session_without_a_topic_is_refused_and_stays_pending() {
+    use crate::error::{Json, Path};
+    use axum::extract::State;
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(MockProvider::new(vec![])),
+        storage.clone(),
+        Some(root.path().to_path_buf()),
+    )
+    .await;
+    let thread = storage.list_by_session(session_id).await.unwrap()[0].clone();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::AwaitingApproval,
+            user_input: None,
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let approval = storage
+        .create_approval(NewApprovalRequest {
+            turn_id: turn.id,
+            agent_id: "gateway".into(),
+            kind: swage_storage::ApprovalKind::Tool,
+            tool_name: Some("shell".into()),
+            tool_arguments: None,
+            hook_name: None,
+            prompt: "Allow shell?".into(),
+            context: None,
+            timeout_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+        })
+        .await
+        .unwrap();
+    let (sender, _receiver) = tokio::sync::oneshot::channel();
+    state
+        .approval_channels
+        .lock()
+        .unwrap()
+        .insert(approval.id, sender.into());
+
+    let Err(refused) = crate::handlers::decide_approval(
+        State(state.clone()),
+        Path(approval.id),
+        Json(crate::handlers::ApprovalDecisionRequest {
+            decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+            scope: swage_agent::approval::ApprovalDecisionScope::Permanent,
+            reason: None,
+        }),
+    )
+    .await
+    else {
+        panic!("a topic approval in a general session was accepted");
+    };
+    assert!(
+        refused.message().contains("no topic"),
+        "{}",
+        refused.message()
+    );
+    assert_eq!(
+        storage
+            .get_approval(approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ApprovalState::Pending
+    );
+    assert!(state.session_approval_grants.lock().unwrap().is_empty());
+    assert!(!root.path().join("general").join("config.toml").exists());
+}
+
+#[tokio::test]
 async fn approval_scope_deadline_race_refuses_rest_session_grant() {
     tokio::time::timeout(
         Duration::from_secs(20),
