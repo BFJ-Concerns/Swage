@@ -39,6 +39,49 @@ pub(crate) fn effort_capability_for_model(
         .unwrap_or(swage_core::EffortCapability::None)
 }
 
+/// The effort control a Codex-protocol model accepts: the catalogue's own
+/// declaration when the entry carries one, otherwise the app-server's account
+/// of the model, otherwise no control at all.
+fn codex_effort_capability(
+    config: &swage_config::ResolvedConfig,
+    model_name: &str,
+) -> swage_core::EffortCapability {
+    config
+        .models
+        .entries
+        .get(&config.models.default)
+        .and_then(|model| model.capabilities.effort.clone())
+        .or_else(|| crate::codex::effort_capability(model_name))
+        .unwrap_or(swage_core::EffortCapability::None)
+}
+
+/// The effort control `config`'s selected model accepts, as the runtime that
+/// would serve a turn on it declares it — the same capability the turn's
+/// launch resolves against, so a check made before a turn starts agrees with
+/// the turn.
+pub(crate) async fn served_effort_capability(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+) -> swage_core::EffortCapability {
+    let declared = config
+        .models
+        .entries
+        .get(&config.models.default)
+        .and_then(|model| model.capabilities.effort.clone());
+    match declared {
+        Some(declared) => declared,
+        None if config.default_provider_protocol() == swage_config::Protocol::Codex => {
+            codex_effort_capability(config, config.default_model_id())
+        }
+        // Only a model the catalogue declares nothing for needs the adapter
+        // that would serve it asked.
+        None => {
+            let provider = crate::startup::selected_model_provider(state, config).await;
+            effort_capability_for_model(config, &config.models.default, provider.as_ref())
+        }
+    }
+}
+
 /// The output limit a turn's request carries: the caller's own value (a
 /// generation preset's `max_tokens`), else the catalogue entry's declaration,
 /// else the provider adapter's account of the documented limit for the
@@ -148,14 +191,7 @@ pub(super) async fn launch_turn_runtime(
     } = launch;
     let handle = if is_codex_turn {
         let effort = requested_effort.map(|requested| {
-            let capability = config
-                .models
-                .entries
-                .get(&config.models.default)
-                .and_then(|model| model.capabilities.effort.clone())
-                .or_else(|| crate::codex::effort_capability(model_name))
-                .unwrap_or(swage_core::EffortCapability::None);
-            swage_core::resolve_effort(requested, &capability)
+            swage_core::resolve_effort(requested, &codex_effort_capability(config, model_name))
         });
         if let Some(resolved) = effort.as_ref() {
             record_effort_snapshot(report_json, resolved);

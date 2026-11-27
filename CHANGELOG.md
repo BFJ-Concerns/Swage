@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- A `model_list` tool lists the models the catalogue serves to the session: each id with its aliases, the provider's name for it, its vendor family (`claude`, `gpt` or `gemini`) where the name shows one, and the effort levels it serves without clamping, so an agent writing a workflow can name a model of another family without being told the ids.
 - A provider whose credential would travel in plain `http://` to an address off this machine is recorded once in the audit trail (`provider_credential_exposure`) and still sent to; its `plaintext_credentials` setting (`warn`, `refuse` or `allow`, set in `config.toml` or through the settings API) refuses such requests instead or sends them without the record. Model discovery follows the same setting, and the record keeps only the base URL's scheme, host and port. Loopback addresses are never affected.
 - Agents can create and edit agent definitions through conversation, making them available in Settings and the new-session picker; each change records the previous and new definition in configuration history.
 - Delegation chains stop at a configurable depth, including cycles (default: four child levels). Settings → Automation edits `sessions.max_delegation_depth`; a refused delegation records its depth reason and returns it to the delegating model.

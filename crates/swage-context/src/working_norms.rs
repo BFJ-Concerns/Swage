@@ -17,13 +17,15 @@ use swage_core::{ChatMessage, Role};
 use crate::element::{ContextElement, built_in_first_sentence_preview};
 use crate::tokeniser::Tokeniser;
 
-/// The model families whose bare-proxy sessions get family-specific norms.
-/// Detection is deliberately conservative: a name that matches no known
-/// family gets the common norms alone.
+/// The vendor family a configured model belongs to, read from its id. Claude
+/// and GPT sessions get family-specific norms; a Gemini model and a name that
+/// matches no known family get the common norms alone. Detection is
+/// deliberately conservative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelFamily {
     Claude,
     Gpt,
+    Gemini,
     Unknown,
 }
 
@@ -39,8 +41,21 @@ impl ModelFamily {
             Self::Claude
         } else if id.contains("gpt") || o_series {
             Self::Gpt
+        } else if id.contains("gemini") {
+            Self::Gemini
         } else {
             Self::Unknown
+        }
+    }
+
+    /// The family's name as a reader would write it, lower-case; `None` for a
+    /// model no known family matches.
+    pub fn name(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some("claude"),
+            Self::Gpt => Some("gpt"),
+            Self::Gemini => Some("gemini"),
+            Self::Unknown => None,
         }
     }
 }
@@ -394,7 +409,7 @@ impl WorkingNormsElement {
         match self.family {
             ModelFamily::Claude => format!("{COMMON_NORMS}\n\n{CLAUDE_NORMS}"),
             ModelFamily::Gpt => format!("{COMMON_NORMS}\n\n{GPT_NORMS}"),
-            ModelFamily::Unknown => COMMON_NORMS.to_string(),
+            ModelFamily::Gemini | ModelFamily::Unknown => COMMON_NORMS.to_string(),
         }
     }
 }
@@ -438,7 +453,7 @@ impl ContextElement for WorkingNormsElement {
         match self.family {
             ModelFamily::Claude => "built-in working norms (Claude family)".into(),
             ModelFamily::Gpt => "built-in working norms (GPT family)".into(),
-            ModelFamily::Unknown => "built-in working norms".into(),
+            ModelFamily::Gemini | ModelFamily::Unknown => "built-in working norms".into(),
         }
     }
 
@@ -461,7 +476,7 @@ mod tests {
         assert_eq!(ModelFamily::from_model_id("o4-mini"), ModelFamily::Gpt);
         assert_eq!(
             ModelFamily::from_model_id("gemini-2.5-pro"),
-            ModelFamily::Unknown
+            ModelFamily::Gemini
         );
         assert_eq!(ModelFamily::from_model_id(""), ModelFamily::Unknown);
         // "ollama" must not read as an o-series id.

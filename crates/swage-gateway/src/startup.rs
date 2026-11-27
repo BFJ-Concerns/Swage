@@ -801,6 +801,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(SurfaceReadTool),
         Arc::new(SurfaceWriteTool),
         Arc::new(SurfaceLibraryTool),
+        Arc::new(crate::tool::model_list::ModelListTool),
         Arc::new(crate::tool::workflow_list::WorkflowListTool),
         Arc::new(crate::tool::workflow_run::WorkflowRunTool),
         Arc::new(crate::tool::workflow_run_account::WorkflowRunAccountTool),
