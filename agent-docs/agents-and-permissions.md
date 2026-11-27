@@ -677,7 +677,8 @@ forced_variant = "family-fallback"
 Restart the gateway after changing either key.
 
 Location ids are application-defined strings. The shipped locations are
-`context.assembly`, `context.working_norms`, `task.prompt`,
+`context.assembly`, `context.working_norms`,
+`context.material_quoting` (how much reference material a turn quotes whole), `task.prompt`,
 `prompts.memory_curator`, and `prompts.succession_summary` (the instruction a
 conversation summary is written under, selected when a session first needs a
 summary).
@@ -739,7 +740,7 @@ which stay out. If the final composition ends up genuinely empty (every
 baseline element was declared omitted and the script added nothing else),
 the assembly also falls back to the default.
 
-The other shipped locations (`context.working_norms`, `task.prompt`,
+The other shipped locations (`context.working_norms`, `context.material_quoting`, `task.prompt`,
 `prompts.memory_curator`, `prompts.succession_summary`) have their alternatives defined in the gateway
 source and cannot be extended through configuration. For
 `context.working_norms` the registered variants are `authored-v1` (the

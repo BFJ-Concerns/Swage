@@ -787,8 +787,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         docs_read::DocsReadTool, hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
         knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
         knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
-        knowledge::KnowledgeSearchTool, memory::MemoryReadTool, memory::MemoryWriteTool,
-        plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        knowledge::KnowledgeSearchTool, material::MaterialReadTool, memory::MemoryReadTool,
+        memory::MemoryWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
         run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
         session_variable::SessionVariableTool, surface::SurfaceLibraryTool,
         surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
@@ -848,6 +848,9 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(KnowledgeCiteTool),
         Arc::new(KnowledgeOrientTool),
         Arc::new(KnowledgeCurateOrientationTool),
+        Arc::new(MaterialReadTool {
+            max_output_bytes: max_output,
+        }),
     ]);
 
     let base_tools = if let Some(browser_host) = browser_host {
