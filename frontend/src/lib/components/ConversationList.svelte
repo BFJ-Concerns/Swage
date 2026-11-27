@@ -1,9 +1,7 @@
 <!--
   Sidebar conversation list — shows all conversations, supports create and delete.
-  The list reloads the store on mount and when the gateway announces a change.
 -->
 <script lang="ts">
-  import { watchSessionList } from "../session-list-updates";
   import type { ConversationStore } from "../stores/conversations";
   import { relativeTime } from "../utils/relative-time";
   import { sessionOutcomeLabel } from "../session-outcome";
@@ -17,14 +15,6 @@
   }
 
   let { store, onNewConversation }: Props = $props();
-
-  $effect(() => {
-    const current = store;
-    if (!current?.refreshConversations) return;
-    const stop = watchSessionList(() => current.refreshConversations!());
-    void current.refreshConversations();
-    return stop;
-  });
 
   // Track which conversation is awaiting inline delete confirmation.
   // Only one can be pending at a time — clicking another collapses any open one.
@@ -74,7 +64,7 @@
         {#each store.conversations as conversation (conversation.id)}
           {@const isActive = store.activeConversation?.id === conversation.id}
           {@const isPendingDelete = pendingDelete === conversation.id}
-          {@const preview = messagePreview(conversation.message_preview ?? "New conversation")}
+          {@const preview = messagePreview(conversation.opening_message ?? "New conversation")}
           {@const outcome = sessionOutcomeLabel(conversation.latest_turn_state)}
 
           <li
@@ -86,7 +76,7 @@
               onclick={() => selectConversation(conversation.id)}
             >
               <div class="item-header">
-                <!-- Preview: the last message, or a label for new conversations. -->
+                <!-- The opening message labels the conversation. -->
                 <span class="preview">
                   {preview}
                 </span>
@@ -143,6 +133,7 @@
   .conversation-list {
     flex: 1;
     overflow-y: auto;
+    padding-inline: 12px;
     display: flex;
     flex-direction: column;
   }
@@ -223,13 +214,11 @@
   }
 
   .conversation-item.active {
-    /* Pull the row to the section edges so the ink fill reads as a band, then
-       overlay the translucent orange offset. The 22px matches the nav padding
-       in AppLayout.svelte. */
+    /* The active fill extends into the sidebar padding. */
     background: var(--ink);
     color: var(--paper);
-    margin: 0 -22px;
-    padding: 9px 22px;
+    margin: 0 -12px;
+    padding: 9px 12px;
   }
 
   .conversation-item.active::before {

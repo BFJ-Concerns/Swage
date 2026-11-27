@@ -32,6 +32,7 @@ import type {
   ConnectionStatus,
   ConversationDetail,
   ConversationResponse,
+  ConversationSummary,
   OperatorOverview,
   Topic,
   ServerEvent,
@@ -511,6 +512,71 @@ describe("App", () => {
     );
   });
 
+  it("records the agent chosen on the front door after switching to a topic", async () => {
+    const topic = makeTopic();
+    const agent = makeAgentDefinition({ id: "topic-reviewer", display_name: "Topic reviewer" });
+    let finishLoadingSessions!: (sessions: ConversationSummary[]) => void;
+    const sessions = new Promise<ConversationSummary[]>((resolve) => {
+      finishLoadingSessions = resolve;
+    });
+    vi.mocked(topicsApi.listTopics).mockResolvedValue([topic]);
+    vi.mocked(conversationsApi.listConversations).mockReturnValue(sessions);
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockImplementation(
+      async (topicId) => topicId === topic.id ? [agent] : [],
+    );
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce({
+      id: "conv-topic-reviewer",
+      topic_id: topic.id,
+      agent_id: agent.id,
+      agent_display_name: agent.display_name,
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    });
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    const start = document.querySelector('[aria-label="Start a session"]')!;
+    const topicPicker = start.querySelector<HTMLSelectElement>(".topic-choice select")!;
+    flushSync(() => {
+      topicPicker.value = topic.id;
+      topicPicker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await waitForText(agent.display_name);
+
+    const agentPicker = start.querySelector<HTMLSelectElement>('select[aria-label="Agent"]')!;
+    expect(Array.from(agentPicker.options, (option) => option.value)).toContain(agent.id);
+    flushSync(() => {
+      agentPicker.value = agent.id;
+      agentPicker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const startButton = Array.from(start.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Start",
+    )!;
+    flushSync(() => startButton.click());
+    await settleUi();
+
+    const composerAgent = () => document.querySelector<HTMLSelectElement>(
+      '[aria-label="Conversation"] select[aria-label="Agent"]',
+    )?.value;
+    expect(conversationsApi.listConversations).toHaveBeenCalledWith(topic.id);
+    expect(conversationsApi.createConversation).not.toHaveBeenCalled();
+    expect(composerAgent()).toBe(agent.id);
+
+    finishLoadingSessions([]);
+    await settleUi();
+    expect(composerAgent()).toBe(agent.id);
+
+    sendDraft();
+    await settleUi();
+
+    expect(conversationsApi.createConversation).toHaveBeenCalledExactlyOnceWith(
+      topic.id, null, agent.id, null,
+    );
+    expect(window.location.pathname).toBe("/conversations/conv-topic-reviewer");
+    expect(document.querySelector('[aria-label="Session agent"]')?.textContent).toBe(agent.display_name);
+  });
+
   it("keeps a session created for one scope out of the scope the user moved to meanwhile", async () => {
     const topic = makeTopic();
     let resolveCreation: (value: ConversationResponse) => void = () => {};
@@ -688,7 +754,7 @@ describe("App", () => {
     const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({
       id: "conv-linked",
-      message_preview: "Deep-linked conversation",
+      opening_message: "Deep-linked conversation",
     });
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
@@ -726,6 +792,14 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
     expect(window.location.pathname).toBe("/conversations/conv-linked");
 
+    const activePreview = document.querySelector(
+      ".conversation-item.active .preview",
+    );
+    expect(activePreview?.textContent).toContain("Deep-linked conversation");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Restored from URL",
+    );
+
     const popped = new Promise<void>((resolve) => {
       window.addEventListener("popstate", () => resolve(), { once: true });
     });
@@ -737,13 +811,8 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/");
     expect(window.history.length).toBe(historyLength);
 
-    const activePreview = document.querySelector(
-      ".conversation-item.active .preview",
-    );
-    expect(activePreview?.textContent).toContain("Deep-linked conversation");
-    expect(document.querySelector(".message-display")?.textContent).toContain(
-      "Restored from URL",
-    );
+    expect(document.querySelector('[aria-label="Start a session"]')).not.toBeNull();
+    expect(document.querySelector(".message-display")).toBeNull();
   });
 
   it.each([false, true])("keeps session agent names across topics and reload when definitions fail: %s", async (failDefinitions) => {
@@ -1054,7 +1123,7 @@ describe("App", () => {
     addEventListenerSpy.mockRestore();
 
     expect(popstateHandler).not.toBeNull();
-    setPath("/");
+    setPath("/settings/providers");
     popstateHandler!(new PopStateEvent("popstate"));
     await settleUi();
     setPath(`/conversations/${activeConversation.id}`);
@@ -1323,8 +1392,17 @@ describe("App", () => {
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(topic.id, "new-model", null, null);
   });
 
-  it("creates and navigates when the sidebar starts a conversation", async () => {
-    const defaultTopic = makeTopic();
+  function sendDraft() {
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea")!;
+    flushSync(() => {
+      textarea.value = "My first message";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+  }
+
+  it("creates and navigates on the first send from a sidebar draft", async () => {
+    const defaultTopic = makeTopic({ effective_default_model: "local:reasoning" });
     const created: ConversationResponse = {
       id: "conv-new",
       agent_id: "gateway",
@@ -1365,12 +1443,12 @@ describe("App", () => {
 
     flushSync(() => newButton!.click());
     await settleUi();
+    expect(conversationsApi.createConversation).not.toHaveBeenCalled();
+    sendDraft();
 
+    await settleUi();
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(
-      defaultTopic.id,
-      undefined,
-      undefined,
-      undefined,
+      defaultTopic.id, "local:reasoning", null, null,
     );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
@@ -1378,7 +1456,7 @@ describe("App", () => {
     expect(document.querySelector(".message-display")).not.toBeNull();
   });
 
-  it("uses the active creation picker for both New controls", async () => {
+  it("offers the agent choice in the draft opened by either New control", async () => {
     const defaultTopic = makeTopic();
     const existing = makeConversationSummary({ id: "conv-existing" });
     const createdFromChannel: ConversationResponse = {
@@ -1427,48 +1505,26 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await settleUi();
 
-    const picker = document.querySelector<HTMLSelectElement>(
-      'select[aria-label="Agent"]',
-    );
-    expect(picker).not.toBeNull();
-    flushSync(() => {
-      picker!.value = "picker-witness";
-      picker!.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-
-    flushSync(() =>
-      (document.querySelector(".new-session") as HTMLButtonElement).click(),
-    );
-    await settleUi();
-
-    expect(conversationsApi.createConversation).toHaveBeenCalledTimes(1);
-    expect(conversationsApi.createConversation).toHaveBeenLastCalledWith(
-      defaultTopic.id,
-      undefined,
-      "picker-witness",
-      undefined,
-    );
-    expect(window.location.pathname).toBe(
-      `/conversations/${createdFromChannel.id}`,
-    );
-    expect(document.querySelectorAll(".conversation-item")).toHaveLength(2);
-
-    flushSync(() =>
-      (document.querySelector(".new-btn") as HTMLButtonElement).click(),
-    );
-    await settleUi();
-
-    expect(conversationsApi.createConversation).toHaveBeenCalledTimes(2);
-    expect(conversationsApi.createConversation).toHaveBeenLastCalledWith(
-      defaultTopic.id,
-      undefined,
-      "picker-witness",
-      undefined,
-    );
-    expect(window.location.pathname).toBe(
-      `/conversations/${createdFromSidebar.id}`,
-    );
-    expect(document.querySelectorAll(".conversation-item")).toHaveLength(3);
+    expect(document.querySelector('select[aria-label="Agent"]')).toBeNull();
+    for (const [index, button] of [".new-session", ".new-btn"].entries()) {
+      flushSync(() => document.querySelector<HTMLButtonElement>(button)!.click());
+      await settleUi();
+      expect(conversationsApi.createConversation).toHaveBeenCalledTimes(index);
+      const picker = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]')!;
+      flushSync(() => {
+        picker.value = "picker-witness";
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      sendDraft();
+      await settleUi();
+      expect(conversationsApi.createConversation).toHaveBeenCalledTimes(index + 1);
+      expect(conversationsApi.createConversation).toHaveBeenLastCalledWith(
+        defaultTopic.id, null, "picker-witness", null,
+      );
+      expect(window.location.pathname).toBe(
+        `/conversations/${[createdFromChannel, createdFromSidebar][index]!.id}`,
+      );
+    }
   });
 
   it("connects exactly once when the composer auto-creates a conversation", async () => {

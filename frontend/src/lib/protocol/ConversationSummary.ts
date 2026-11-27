@@ -5,4 +5,8 @@ export type ConversationSummary = { id: string,
 /**
  * The agent definition the session runs under.
  */
-agent_id: string, selected_model_id?: string | null, created_at: string, last_activity: string, message_preview?: string | null, has_interrupted_turn: boolean, latest_turn_state?: TurnState | null, };
+agent_id: string, selected_model_id?: string | null, created_at: string, last_activity: string, message_preview?: string | null,
+/**
+ * The first non-empty message the person sent, for labelling the conversation.
+ */
+opening_message?: string | null, has_interrupted_turn: boolean, latest_turn_state?: TurnState | null, };

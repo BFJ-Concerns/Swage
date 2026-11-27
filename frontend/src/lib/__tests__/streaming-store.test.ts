@@ -128,6 +128,37 @@ describe("reconnect reconciliation", () => {
     expect(store.streamedContent).toBe("");
   });
 
+  it("keeps a sent request visible when recovery reads before the gateway records it", () => {
+    let messages: MessageView[] = [{
+      role: "assistant", content: "Previous completed reply",
+      timestamp: "2026-10-04T19:00:00Z", turn_state: "completed", turn_id: "previous",
+    }];
+    const appendOptimisticUserMessage = vi.fn();
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() { return { id: "conv-1", messages }; },
+        appendOptimisticUserMessage,
+        appendAssistantMessage: () => {},
+      },
+    });
+    store.startTurn("Sent while the socket was opening");
+    const generation = store.activeTurnGeneration;
+
+    store.reconcileAfterReconnect(generation, "conv-1", messages, [], false);
+    expect(store.isStreaming).toBe(true);
+    expect(appendOptimisticUserMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ content: "Sent while the socket was opening" }), "conv-1",
+    );
+    expect(appendOptimisticUserMessage.mock.lastCall?.[0]).not.toHaveProperty("failure_message");
+
+    messages = [{
+      role: "user", content: "Sent while the socket was opening",
+      timestamp: "2026-10-04T20:00:00Z", turn_state: "completed", turn_id: "recorded",
+    }];
+    store.reconcileAfterReconnect(generation, "conv-1", messages, [], false);
+    expect(store.isStreaming).toBe(false);
+  });
+
   it("does not let a delayed old refresh stop a newer stream", () => {
     const messages = [{
       role: "assistant" as const,

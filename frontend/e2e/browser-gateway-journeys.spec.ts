@@ -156,7 +156,7 @@ test("refreshes open agent pickers and uses the preferred model on the first tur
   await openComposer(page);
   await sendNewConversation(page, "Create a preferred agent");
   await expect(page.getByLabel("Assistant message").getByText("Definition tool returned to the provider.")).toBeVisible();
-  await expect(page.getByRole("combobox", { name: "Agent" }).getByRole("option", { name: "Preferred agent" })).toHaveCount(1);
+  await expect(page.getByLabel("Session agent")).toBeVisible();
   await expect(frontAgent.getByRole("option", { name: "Preferred agent" })).toHaveCount(1);
 
   await sendNewConversation(page, "Set an unknown preferred model");
@@ -181,7 +181,7 @@ test("refreshes open agent pickers and uses the preferred model on the first tur
     await expect.poll(async () => {
       const requests = await providerRequests();
       return requests.find((request) => request.prompt === prompt)?.model;
-    }).toBe(override ?? "preferred-model");
+    }).toBe(override === "e2e-model" ? "claude-opus-4-6" : "preferred-model");
   }
 
   await sendWithAgent("First turn on the agent preference");
@@ -193,6 +193,186 @@ const effortJourneyPrompts = [
   "second high effort conversation",
   "default effort after switch",
 ] as const;
+
+test("hides the old conversation while opening a destination and ignores an overtaken load", async ({ page }) => {
+  const prompts = ["Which route is current?", "What is the slower route?", "Where did this visit start?"];
+  const paths: string[] = [];
+  for (const prompt of prompts) {
+    await send(page, prompt);
+    await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+    paths.push(new URL(page.url()).pathname);
+  }
+
+  let releaseSlowRead!: () => void;
+  let markSlowReadStarted!: () => void;
+  const slowRead = new Promise<void>((resolve) => { releaseSlowRead = resolve; });
+  const slowReadStarted = new Promise<void>((resolve) => { markSlowReadStarted = resolve; });
+  const slowEndpoint = `/api${paths[1]}`;
+  // Use the session switcher to make consecutive history entries in the SPA.
+  const switcher = page.getByRole("combobox", { name: "Active conversation" });
+  // The setup navigated between documents. First select the two destinations
+  // in this document, then exercise Back twice through those entries.
+  await switcher.selectOption(paths[0].split("/").at(-1)!);
+  await expect(page.getByLabel("Your message").getByText(prompts[0], { exact: true })).toBeVisible();
+  await switcher.selectOption(paths[1].split("/").at(-1)!);
+  await expect(page.getByLabel("Your message").getByText(prompts[1], { exact: true })).toBeVisible();
+  await switcher.selectOption(paths[2].split("/").at(-1)!);
+  await expect(page.getByLabel("Your message").getByText(prompts[2], { exact: true })).toBeVisible();
+  await page.route((url) => url.pathname === slowEndpoint, async (route) => {
+    const response = await route.fetch();
+    markSlowReadStarted();
+    await slowRead;
+    await route.fulfill({ response });
+  });
+
+  try {
+    await page.goBack();
+    await slowReadStarted;
+    await expect(page.getByText("Opening conversation…")).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Message" })).toBeHidden();
+    await expect(page.getByLabel("Your message")).toHaveCount(0);
+
+    await page.goBack();
+    await expect(page.getByLabel("Your message").getByText(prompts[0], { exact: true })).toBeVisible();
+    const response = page.waitForResponse((result) => new URL(result.url()).pathname === slowEndpoint);
+    releaseSlowRead();
+    await response;
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect(page).toHaveURL(paths[0]);
+    await expect(page.getByLabel("Your message").getByText(prompts[0], { exact: true })).toBeVisible();
+  } finally {
+    releaseSlowRead();
+  }
+});
+
+test("opens the remaining session and then the front door when deleting active conversations", async ({ page }) => {
+  const response = await page.request.post("/api/topics", { data: { name: "Delete active conversation" } });
+  expect(response.ok()).toBe(true);
+  const topic = await response.json();
+  await page.goto("/");
+  await page.getByRole("combobox", { name: "Topic", exact: true }).selectOption(topic.id);
+  await openComposer(page);
+  const first = "First session in the deletion topic";
+  await sendNewConversation(page, first);
+  const firstPath = new URL(page.url()).pathname;
+  await page.getByRole("button", { name: "+ New conversation", exact: true }).click();
+  const second = "Second session in the deletion topic";
+  await sendNewConversation(page, second);
+
+  async function deleteFromSidebar(label: string) {
+    await page.getByRole("button", { name: `Delete conversation: ${label}`, exact: true }).click();
+    await page.getByRole("button", { name: "Delete", exact: true }).click();
+  }
+
+  await deleteFromSidebar(second);
+  await expect(page).toHaveURL(firstPath);
+  await expect(page.getByLabel("Your message").getByText(first, { exact: true })).toBeVisible();
+  await sendNewConversation(page, "Still able to reply after deleting the other session");
+
+  await deleteFromSidebar(first);
+  await expect(page).toHaveURL("/");
+  await expect(page.getByRole("region", { name: "Start a session" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeHidden();
+});
+
+test("restores the front door on Back from the first message of a new conversation", async ({ page }) => {
+  await send(page, "Session before starting a draft");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "+ New conversation", exact: true }).click();
+  await expect(page).toHaveURL("/");
+  const first = "First message sent from the draft";
+  await sendNewConversation(page, first);
+  const sessionPath = new URL(page.url()).pathname;
+
+  await page.goBack();
+  await expect(page).toHaveURL("/");
+  await expect(page.getByRole("region", { name: "Start a session" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeHidden();
+
+  await page.goForward();
+  await expect(page).toHaveURL(sessionPath);
+  await expect(page.getByLabel("Your message").getByText(first, { exact: true })).toBeVisible();
+});
+
+test("keeps the opening message as a switcher label for a session begun on Surfaces", async ({ page }) => {
+  await send(page, "Session before working on Surfaces");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  const previousId = new URL(page.url()).pathname.split("/").at(-1)!;
+  await page.getByRole("button", { name: "Surfaces", exact: true }).click();
+  await page.getByRole("button", { name: "New conversation", exact: true }).click();
+  const first = "First message sent on Surfaces";
+  await sendNewConversation(page, first);
+  const newId = new URL(page.url()).pathname.split("/").at(-1)!;
+  const switcher = page.getByRole("combobox", { name: "Active conversation" });
+  await expect(switcher.locator("option:checked")).toHaveText(first);
+
+  await switcher.selectOption(previousId);
+  await expect(page.getByLabel("Your message").getByText("Session before working on Surfaces")).toBeVisible();
+  await expect(switcher.locator(`option[value="${newId}"]`)).toHaveText(first);
+});
+
+test("keeps the first question as the label and follows a send from earlier in the transcript", async ({ page }) => {
+  const opening = "Where should we start?";
+  await page.setViewportSize({ width: 900, height: 660 });
+  await send(page, opening);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  for (let index = 0; index < 3; index++) {
+    await sendNewConversation(page, `Follow-up ${index}. ${"Further reading. ".repeat(90).trim()}`);
+  }
+  await page.reload();
+  const channel = page.getByRole("region", { name: "Conversation" });
+  const messages = channel.getByRole("region", { name: "Conversation messages" });
+  await expect(channel.getByRole("combobox", { name: "Active conversation" }).locator("option:checked")).toHaveText(opening);
+  await expect(page.getByRole("complementary").getByRole("button", { name: /^Where should we start/ })).toBeVisible();
+  await expect.poll(() => messages.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(50);
+  await messages.hover();
+  await page.mouse.wheel(0, -1600);
+  await expect.poll(() => messages.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeGreaterThan(100);
+  await sendNewConversation(page, "Follow this send");
+  await expect.poll(() => messages.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(50);
+
+  await page.setViewportSize({ width: 390, height: 760 });
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("approve a tool");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const approval = page.getByRole("dialog", { name: "Approval required" });
+  await expect(approval.getByRole("button", { name: "Allow once", exact: true })).toBeInViewport();
+  await expect(messages.getByText("Waiting for your approval", { exact: true })).toHaveAttribute("aria-live", "polite");
+  await page.getByRole("button", { name: "Surfaces", exact: true }).click();
+  await expect(approval.getByRole("button", { name: "Allow once", exact: true })).toBeInViewport();
+  await approval.getByRole("button", { name: "Allow once", exact: true }).click();
+  await expect(page.getByLabel("Assistant message").getByText("Approval completed through the gateway.")).toBeVisible();
+});
+
+test("keeps model discovery results for the latest query", async ({ page }) => {
+  await page.goto("/settings/providers");
+  let releaseOld!: () => void;
+  let markOldStarted!: () => void;
+  const oldQuery = new Promise<void>((resolve) => { releaseOld = resolve; });
+  const oldStarted = new Promise<void>((resolve) => { markOldStarted = resolve; });
+  await page.route(/\/api\/settings\/providers\/[^/]+\/models/, async (route) => {
+    const query = new URL(route.request().url()).searchParams.get("q");
+    if (query === "earlier") {
+      markOldStarted();
+      await oldQuery;
+    }
+    await route.fulfill({ json: { models: query ? [{ id: query, name: `${query} result` }] : [] } });
+  });
+
+  try {
+    const search = page.getByPlaceholder("Search models");
+    await search.fill("earlier");
+    await oldStarted;
+    await search.fill("current");
+    await expect(page.getByRole("button", { name: /current result/ })).toBeVisible();
+    const response = page.waitForResponse((result) => new URL(result.url()).searchParams.get("q") === "earlier");
+    releaseOld();
+    await response;
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect(page.getByRole("button", { name: /current result/ })).toBeVisible();
+  } finally {
+    releaseOld();
+  }
+});
 
 test("resolves light-theme tokens before runtime theme application", async ({ page }) => {
   await page.addInitScript(() => {
@@ -228,14 +408,14 @@ test("cancels an active turn from the rendered conversation", async ({ page }) =
     "Partial response before cancellation.",
   );
   await page.getByRole("button", { name: "Stop" }).click();
-  await expect(page.getByText("Response interrupted")).toBeVisible();
+  await expect(page.getByText("Response cancelled")).toBeVisible();
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
   await page.waitForTimeout(8_100);
   await expect(page.locator("body")).not.toContainText(
     "This tail must never render.",
   );
   await page.reload();
-  await expect(page.getByText("Response interrupted")).toBeVisible();
+  await expect(page.getByText("Response cancelled")).toBeVisible();
   await expect(page.locator("body")).not.toContainText(
     "This tail must never render.",
   );
@@ -373,6 +553,69 @@ test("stops generating when reconnect recovers an output-limited reply", async (
   await expect(reply).toContainText("Response incomplete");
 });
 
+for (const ending of ["reply", "failure"] as const) {
+  test(`recovers a queued turn that settles with a ${ending} across a disconnect`, async ({ page }) => {
+    let disconnected = false;
+    await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
+      const gateway = socket.connectToServer();
+      let runningQueuedTurn = false;
+      gateway.onMessage((message) => {
+        const event = JSON.parse(String(message));
+        if (event.type === "queue_drained") runningQueuedTurn = true;
+        if (runningQueuedTurn && !disconnected && (event.type === "turn_complete" || event.type === "error")) {
+          disconnected = true;
+          void socket.close({ code: 4000 });
+        } else {
+          socket.send(message);
+        }
+      });
+    });
+    await send(page, "hold for the batch");
+    await expect(page.getByLabel("Assistant message")).toContainText("Holding the current request.");
+    const input = ending === "reply" ? "What comes after this queued request?" : "failed batch second";
+    const composer = page.getByRole("textbox", { name: "Message", exact: true });
+    await composer.fill(input);
+    await composer.press("Enter");
+    await expect(page.getByLabel("Queued message").getByText(input, { exact: true })).toBeVisible();
+    await expect(page.getByText("Reconnecting")).toBeVisible();
+    await expect(page.getByLabel("Your message").getByText(input, { exact: true })).toBeVisible();
+    if (ending === "reply") {
+      await expect(page.getByLabel("Assistant message").getByText("Streamed response reached the browser.")).toBeVisible();
+    } else {
+      await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+    }
+    await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeHidden();
+  });
+}
+
+test("settles a reconnected turn while another conversation is open", async ({ page }) => {
+  await send(page, "Which conversation stays in view?");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  const other = new URL(page.url()).pathname;
+  let interruptedSocket: WebSocketRoute | undefined;
+  await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
+    socket.connectToServer();
+    interruptedSocket ??= socket;
+  });
+  await send(page, "finish an off-screen turn");
+  const running = new URL(page.url()).pathname;
+  await expect(page.getByLabel("Assistant message")).toContainText("The turn began.");
+  const switcher = page.getByRole("combobox", { name: "Active conversation" });
+  await switcher.selectOption(other.split("/").at(-1)!);
+  await expect(page).toHaveURL(other);
+  await expect(page.getByLabel("Your message").getByText("Which conversation stays in view?", { exact: true })).toBeVisible();
+  await interruptedSocket!.close({ code: 4000 });
+  // Wait on the gateway's completed transcript while the other session is in view.
+  await expect.poll(async () => {
+    const response = await page.request.get(`/api${running}`);
+    const detail = await response.json();
+    return detail.messages.some((message: { content: string }) => message.content.includes("The off-screen turn finished."));
+  }).toBe(true);
+  await switcher.selectOption(running.split("/").at(-1)!);
+  await expect(page.getByLabel("Assistant message").getByText(/The off-screen turn finished/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeHidden();
+});
+
 test("clears a stopped approval and keeps the tool under its partial reply", async ({ page, context }) => {
   await send(page, "partial then approval");
   const approval = page.getByRole("dialog", { name: "Approval required" });
@@ -473,13 +716,12 @@ test("clears effort after switching conversations before the following new-conve
   await page.goto("/");
   await openComposer(page);
   await sendNewConversation(page, effortJourneyPrompts[0], "high");
+  const firstId = new URL(page.url()).pathname.split("/").at(-1)!;
   await page.getByRole("button", { name: "+ New conversation" }).click();
   await sendNewConversation(page, effortJourneyPrompts[1], "high");
 
-  // Newly created conversations are prepended, so the prior one is index one
-  // even when earlier suite journeys already populated the shared gateway.
-  await page.locator(".conversation-select-btn").nth(1).click();
-  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  await page.getByRole("combobox", { name: "Active conversation" }).selectOption(firstId);
+  await expect(page.getByLabel("Your message").getByText(effortJourneyPrompts[0], { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "+ New conversation" }).click();
   await expect(page.getByRole("combobox", { name: "Effort" })).toHaveValue("");
   await sendNewConversation(page, effortJourneyPrompts[2]);
@@ -496,13 +738,12 @@ test("clears effort after switching conversations before the following new-conve
 });
 
 test("renders the dark-theme status badge and controlled provider error", async ({ page }) => {
-  await page.goto("/");
-  await openComposer(page);
+  await send(page, "Keep a session connected while viewing the fleet");
   await page.getByRole("button", { name: "Dark theme" }).click();
   await expect(page.locator("body")).toHaveClass(/theme-cyanotype/);
 
   await page.getByRole("button", { name: "Operator" }).click();
-  const connectedBadge = page.locator(".badge", { hasText: "connected" });
+  const connectedBadge = page.getByText("connected", { exact: true });
   await expect(connectedBadge).toBeVisible();
   await expect(connectedBadge).toHaveCSS("background-color", "rgb(255, 248, 238)");
 
@@ -675,3 +916,31 @@ for (const width of [1280, 1600]) {
     await page.screenshot({ path: testInfo.outputPath("surface-seventh-module.png") });
   });
 }
+
+
+test("shows the available model after Settings removes the session’s selected model", async ({ page }) => {
+  const stack = await startIsolatedStack();
+  try {
+    await page.goto(stack.baseUrl);
+    await openComposer(page);
+    await sendNewConversation(page, "Which model remains after removing the selected one?");
+    const model = page.getByRole("combobox", { name: "Model", exact: true });
+    await expect(model).toHaveValue("e2e-model");
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const configuredModels = page.locator(".model-row");
+    const replacement = configuredModels.filter({ hasText: "preferred-model" });
+    await replacement.getByRole("button", { name: "Use", exact: true }).click();
+    const saved = page.waitForResponse(async (response) => {
+      if (response.request().method() !== "PUT" || !response.url().endsWith("/api/settings") || !response.ok()) return false;
+      const settings = await response.json();
+      return settings.default_model === "preferred-model" && !settings.models["e2e-model"];
+    });
+    await configuredModels.filter({ hasText: "e2e-model" }).getByRole("button", { name: "Remove", exact: true }).click();
+    await saved;
+    await page.getByRole("button", { name: "Close settings", exact: true }).click();
+    await expect(model).toHaveValue("preferred-model");
+  } finally {
+    await stopStack(stack.child);
+    await rm(stack.root, { recursive: true, force: true });
+  }
+});

@@ -23,7 +23,7 @@ export interface ConversationStore {
   readonly isLoading: boolean;
   loadConversations(topicId: string | null): Promise<void>;
   refreshConversations?(): Promise<void>;
-  selectConversation(id: string): Promise<void>;
+  selectConversation(id: string, shouldInstall?: () => boolean): Promise<void>;
   // topicId is required by the underlying store but optional here so that
   // the router-aware proxy in App.svelte can satisfy this interface without
   // threading topicId through every intermediate component. `shouldInstall`
@@ -124,22 +124,26 @@ export function createConversationStore(): ConversationStore {
   const conversationsStore = writable<ConversationSummary[]>([]);
   const activeConversationStore = writable<ConversationDetail | null>(null);
   const isLoadingStore = writable(false);
+  const isSelectingStore = writable(false);
+  let selectionRequest = 0;
   const activeThreadIdStore = writable<string | null>(null);
   const branchesStore = writable<ConversationBranch[]>([]);
 
   const conversationsState = fromStore(conversationsStore);
   const activeConversationState = fromStore(activeConversationStore);
   const isLoadingState = fromStore(isLoadingStore);
+  const isSelectingState = fromStore(isSelectingStore);
   const activeThreadIdState = fromStore(activeThreadIdStore);
   const branchesState = fromStore(branchesStore);
 
   // Load a conversation's root view and its branches together, so the
   // thread switcher never shows a stale set beside a fresh history.
-  async function loadConversationDetail(id: string): Promise<void> {
+  async function loadConversationDetail(id: string, shouldInstall?: () => boolean): Promise<void> {
     const [detail, branches] = await Promise.all([
       api.getConversation(id),
       api.listBranches(id),
     ]);
+    if (shouldInstall && !shouldInstall()) return;
     activeConversationStore.set(detail);
     activeThreadIdStore.set(null);
     branchesStore.set(branches);
@@ -248,6 +252,12 @@ export function createConversationStore(): ConversationStore {
     });
   }
 
+  function clearActiveConversation(): void {
+    activeConversationStore.set(null);
+    activeThreadIdStore.set(null);
+    branchesStore.set([]);
+  }
+
   let listGeneration = 0;
   let currentScope: { topicId: string | null; initial: Promise<void> } | undefined;
 
@@ -271,7 +281,7 @@ export function createConversationStore(): ConversationStore {
     },
 
     get isLoading() {
-      return isLoadingState.current;
+      return isLoadingState.current || isSelectingState.current;
     },
 
     get activeThreadId() {
@@ -310,13 +320,13 @@ export function createConversationStore(): ConversationStore {
       }
     },
 
-    async selectConversation(id) {
-      isLoadingStore.set(true);
+    async selectConversation(id, shouldInstall) {
+      const request = ++selectionRequest;
+      isSelectingStore.set(true);
       try {
-        // Read off-screen conversations from the gateway when selected.
-        await loadConversationDetail(id);
+        await loadConversationDetail(id, () => request === selectionRequest && (shouldInstall?.() ?? true));
       } finally {
-        isLoadingStore.set(false);
+        if (request === selectionRequest) isSelectingStore.set(false);
       }
     },
 
@@ -363,28 +373,11 @@ export function createConversationStore(): ConversationStore {
     async deleteConversation(id) {
       await api.deleteConversation(id);
 
-      const remaining = get(conversationsStore).filter((c) => c.id !== id);
-      conversationsStore.set(remaining);
-
-      // If the deleted conversation was active, select the next most recent.
-      // The list is already sorted by last_activity desc, so index 0 is best.
-      const activeConversation = get(activeConversationStore);
-      if (activeConversation?.id === id) {
-        if (remaining.length > 0) {
-          await loadConversationDetail(remaining[0].id);
-        } else {
-          activeConversationStore.set(null);
-          activeThreadIdStore.set(null);
-          branchesStore.set([]);
-        }
-      }
+      conversationsStore.update((conversations) => conversations.filter((conversation) => conversation.id !== id));
+      if (get(activeConversationStore)?.id === id) clearActiveConversation();
     },
 
-    clearActiveConversation() {
-      activeConversationStore.set(null);
-      activeThreadIdStore.set(null);
-      branchesStore.set([]);
-    },
+    clearActiveConversation,
 
     appendOptimisticUserMessage(message, conversationId) {
       appendMessage({

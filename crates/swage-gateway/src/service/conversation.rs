@@ -870,6 +870,7 @@ fn conversation_summary(activity: SessionActivity) -> ConversationSummary {
         created_at: session.created_at,
         last_activity: activity.last_activity,
         message_preview: activity.latest_message,
+        opening_message: activity.opening_message,
         has_interrupted_turn: activity.has_interrupted_turn,
         latest_turn_state: activity
             .latest_turn

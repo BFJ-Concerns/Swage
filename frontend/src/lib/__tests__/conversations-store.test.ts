@@ -311,7 +311,7 @@ describe("deleteConversation", () => {
     expect(store.conversations.map((c) => c.id)).toEqual(["conv-1"]);
   });
 
-  it("selects the next most recent conversation when active is deleted", async () => {
+  it("clears the deleted conversation and keeps the remaining entries", async () => {
     const store = createConversationStore();
     // List sorted newest-first after loadConversations.
     vi.mocked(api.listConversations).mockResolvedValueOnce([
@@ -324,10 +324,10 @@ describe("deleteConversation", () => {
     await store.selectConversation("conv-1");
 
     vi.mocked(api.deleteConversation).mockResolvedValueOnce(undefined);
-    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-2"));
     await store.deleteConversation("conv-1");
 
-    expect(store.activeConversation?.id).toBe("conv-2");
+    expect(store.activeConversation).toBeNull();
+    expect(store.conversations.map((conversation) => conversation.id)).toEqual(["conv-2"]);
   });
 
   it("sets active to null when the only conversation is deleted", async () => {

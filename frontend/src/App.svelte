@@ -24,6 +24,7 @@
   import { listEffectiveAgentDefinitions } from "./lib/api/agent-definitions";
   import type { EffectiveAgentDefinitionResponse } from "./lib/protocol/EffectiveAgentDefinitionResponse";
   import type { ConversationStore } from "./lib/stores/conversations";
+  import type { ConversationDetail } from "./lib/types";
   import { ApiError } from "./lib/api/error";
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
@@ -35,6 +36,7 @@
   } from "./lib/stores/streaming";
   import { createTopicStore } from "./lib/stores/topics";
   import { watchOpenConversation } from "./lib/open-conversation-updates";
+  import { watchSessionList } from "./lib/session-list-updates";
   import { conversationPath, createRouter } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
@@ -56,56 +58,78 @@
   // A turn can outlive the socket it began on. While recovering it, follow
   // the gateway's session updates as well as the new socket.
   let streamingStore: StreamingStore;
-  const recoveringTurns = new Map<string, number>();
+  const recoveringTurns = new Map<string, { generation: number; reportMissingRequest: boolean }>();
 
-  function recoveringGeneration(conversationId: string): number | undefined {
-    const generation = recoveringTurns.get(conversationId);
+  function recoveringTurn(conversationId: string) {
+    const recovery = recoveringTurns.get(conversationId);
     const stream = streamingStore.streamFor?.(conversationId);
-    if (generation !== undefined && stream?.isStreaming && stream.activeTurnGeneration === generation) {
-      return generation;
+    if (recovery && stream?.isStreaming && stream.activeTurnGeneration === recovery.generation) {
+      return recovery;
     }
     recoveringTurns.delete(conversationId);
     return undefined;
   }
 
+  function streamIsInView(conversation: ConversationDetail, streamThreadId: string | null | undefined): boolean {
+    const activeThreadId = conversationStore.activeThreadId ?? null;
+    if (!streamThreadId || streamThreadId === conversation.root_thread_id) return activeThreadId === null;
+    return streamThreadId === activeThreadId;
+  }
+
   async function refreshOpenConversation(): Promise<void> {
     const conversationId = conversationStore.activeConversation?.id;
     if (!conversationId) return;
-    const generation = recoveringGeneration(conversationId);
+    const recovery = recoveringTurn(conversationId);
     await conversationStore.refreshActiveConversation();
-    if (generation !== undefined && conversationStore.activeConversation?.id === conversationId &&
-        (streamingStore.streamFor?.(conversationId).threadId ?? null) === (conversationStore.activeThreadId ?? null)) {
-      streamingStore.reconcileAfterReconnect(generation, conversationId);
-      recoveringGeneration(conversationId);
+    const refreshed = conversationStore.activeConversation;
+    if (recovery && recoveringTurn(conversationId) === recovery && refreshed?.id === conversationId &&
+        streamIsInView(refreshed, streamingStore.streamFor?.(conversationId).threadId)) {
+      streamingStore.reconcileAfterReconnect(
+        recovery.generation, conversationId, refreshed.messages, refreshed.queued, recovery.reportMissingRequest,
+      );
+      recoveringTurn(conversationId);
+    }
+  }
+
+  async function refreshRecoveringConversation(conversationId: string): Promise<void> {
+    const recovery = recoveringTurn(conversationId);
+    try {
+      const recovered = await getConversation(conversationId);
+      const threadId = streamingStore.streamFor?.(conversationId).threadId;
+      const root = !threadId || threadId === recovered.root_thread_id;
+      const messages = root ? recovered.messages : (await getThread(threadId)).messages;
+      if (recovery && recoveringTurn(conversationId) !== recovery) return;
+      if (root && streamIsInView(recovered, threadId)) {
+        conversationStore.replaceActiveConversationIfCurrent?.(recovered);
+      }
+      if (recovery) {
+        streamingStore.reconcileAfterReconnect(
+          recovery.generation, conversationId, messages, recovered.queued, recovery.reportMissingRequest,
+        );
+        recoveringTurn(conversationId);
+      }
+    } catch {
+      // A failed read leaves the local stream visible for the next update.
     }
   }
 
   const connectionStore = createConnectionStore({
-    onReconnect: async (conversationId) => {
+    onReconnect: async (conversationId, sentPendingMessages) => {
       streamingStore.clearConnectionError(conversationId);
       const stream = streamingStore.streamFor?.(conversationId);
-      const generation = stream?.isStreaming ? stream.activeTurnGeneration : undefined;
-      if (generation !== undefined) recoveringTurns.set(conversationId, generation);
-      if (conversationStore.activeConversation?.id === conversationId &&
-          (stream?.threadId ?? null) === (conversationStore.activeThreadId ?? null)) {
+      if (stream?.isStreaming) {
+        recoveringTurns.set(conversationId, {
+          generation: stream.activeTurnGeneration,
+          // A frame sent on this socket may still be on its way when the
+          // HTTP read completes. Wait for the gateway to account for it.
+          reportMissingRequest: !sentPendingMessages,
+        });
+      }
+      const active = conversationStore.activeConversation;
+      if (active?.id === conversationId && streamIsInView(active, stream?.threadId)) {
         await refreshOpenConversation().catch(() => {});
       } else {
-        try {
-          const recoveredConversation = await getConversation(conversationId);
-          const messages = stream?.threadId
-            ? (await getThread(stream.threadId)).messages
-            : recoveredConversation.messages;
-          if (!stream?.threadId && (conversationStore.activeThreadId ?? null) === null &&
-              (generation === undefined || recoveringGeneration(conversationId) === generation)) {
-            conversationStore.replaceActiveConversationIfCurrent?.(recoveredConversation);
-          }
-          if (generation !== undefined && recoveringGeneration(conversationId) === generation) {
-            streamingStore.reconcileAfterReconnect(generation, conversationId, messages, recoveredConversation.queued);
-            recoveringGeneration(conversationId);
-          }
-        } catch {
-          // A failed read leaves the local stream visible.
-        }
+        await refreshRecoveringConversation(conversationId);
       }
     },
   });
@@ -141,30 +165,22 @@
     if (activeSurface === "operator") activeSurface = "conversation";
   }
 
-  async function selectAndNavigateOrThrow(id: string): Promise<void> {
+  async function openConversation(id: string, isCurrent: () => boolean): Promise<void> {
     actionError = null;
     scopeGeneration += 1;
-    await conversationStore.selectConversation(id);
-    keepSurfaceForConversation();
-    // The selected detail is already visible. Connect it before loading its
-    // sidebar so a list failure cannot leave that conversation disconnected.
+    await conversationStore.selectConversation(id, isCurrent);
+    if (!isCurrent()) return;
+    if (currentRoute.surfaceId) activeSurface = "surfaces";
+    else keepSurfaceForConversation();
     pendingStart = null;
     connectionStore.connectTo(id);
 
-    // A deep-linked conversation may belong to a topic other than the one
-    // currently in scope (or none, on first load). Bring the topic into
-    // scope so the navigation and conversation list reflect it. A
-    // conversation without a topic runs in the general scope and moves no
-    // topic into scope.
-    const conv = conversationStore.activeConversation;
-    if (conv) await bringScopeIntoView(conv.topic_id ?? null);
-
-    // router is declared below but will be initialised before this is called.
-    // The URL may already name one of this session's surfaces (a deep link
-    // or a browser Back): keep it, so the surface opens.
-    const surfaceId =
-      currentRoute.conversationId === id ? currentRoute.surfaceId : null;
-    router.navigate(conversationPath(id, surfaceId));
+    const conversation = conversationStore.activeConversation;
+    if (conversation) {
+      await bringScopeIntoView(conversation.topic_id ?? null).catch((error) => {
+        if (isCurrent()) actionError = describeActionError("Could not load session scope", error);
+      });
+    }
   }
 
   // The sidebar and agent list follow the session's scope: its topic, or
@@ -206,14 +222,6 @@
   // The scope whose sidebar and agent list are loaded; null for the general
   // scope, undefined before any load.
   let scopeLoadedFor: string | null | undefined = undefined;
-
-  async function selectAndNavigate(id: string): Promise<void> {
-    try {
-      await selectAndNavigateOrThrow(id);
-    } catch (err) {
-      actionError = describeActionError("Could not open conversation", err);
-    }
-  }
 
   // Creates a conversation in the scope in view, connects, and navigates to
   // it. Returns the new conversation's id, or null when creation failed —
@@ -262,12 +270,26 @@
   // tell it has been overtaken.
   let scopeGeneration = 0;
 
-  function startNewConversation(agentId?: string): void {
-    void createAndNavigate(undefined, agentId);
+  function startNewConversation(): void {
+    void startSession({ topicId: topicStore.currentTopic?.id ?? null, agentId: null }, activeSurface);
   }
 
-  // Proxy that implements ConversationStore but overrides the two navigation-
-  // bearing actions. All other methods delegate straight to the base store.
+  async function deleteAndNavigate(id: string): Promise<void> {
+    actionError = null;
+    try {
+      await conversationStore.deleteConversation(id);
+    } catch (error) {
+      actionError = describeActionError("Could not delete conversation", error);
+      return;
+    }
+    if (currentRoute.conversationId !== id) return;
+
+    connectionStore.deselect?.();
+    const next = conversationStore.conversations[0];
+    await router.navigate(next ? conversationPath(next.id) : "/", { replace: true });
+  }
+
+  // Child components use the same navigation path as conversation links.
   const routerAwareStore: ConversationStore = {
     get conversations() {
       return conversationStore.conversations;
@@ -287,13 +309,13 @@
     loadConversations: (topicId) =>
       conversationStore.loadConversations(topicId),
     refreshConversations: () => conversationStore.refreshConversations!(),
-    selectConversation: selectAndNavigate,
+    selectConversation: (id) => router.navigate(conversationPath(id), { keepPreviousOnMissing: true }),
     // The proxy captures topicId from topicStore at call time so child
     // components don't need to know about topics.
     createConversation: async (_topicId, selectedModelId, agentId, effort) => {
       await createAndNavigate(selectedModelId, agentId, effort);
     },
-    deleteConversation: (id) => conversationStore.deleteConversation(id),
+    deleteConversation: deleteAndNavigate,
     clearActiveConversation: () => conversationStore.clearActiveConversation(),
     appendOptimisticUserMessage: (msg) =>
       conversationStore.appendOptimisticUserMessage(msg),
@@ -325,17 +347,16 @@
   // ---------------------------------------------------------------------------
   // Router
   // ---------------------------------------------------------------------------
-  // selectAndNavigate is passed so router.init() can activate the right
-  // conversation when the surface loads with a deep URL like /conversations/:id.
+  // Links, session selectors and browser history share the same loading path.
 
   function handleRouteChange(route: Route): void {
     currentRoute = route;
     notFound = route.notFound;
     // A URL that names a surface means the work surface: the pane opens the
     // surface once the session is in view.
-    if (route.surfaceId) activeSurface = "surfaces";
-    else if (route.conversationId && activeSurface === "operator") {
-      activeSurface = "conversation";
+    if (route.conversationId && route.conversationId === conversationStore.activeConversation?.id) {
+      if (route.surfaceId) activeSurface = "surfaces";
+      else keepSurfaceForConversation();
     }
     // A conversation the URL named is gone. Someone who was working in a
     // scope stays there with the composer ready, so the next message starts
@@ -354,10 +375,12 @@
         await getConversation(id);
       },
       clearActiveConversation: () => {
+        scopeGeneration += 1;
         connectionStore.deselect?.();
         conversationStore.clearActiveConversation();
+        pendingStart = null;
       },
-      selectConversation: selectAndNavigateOrThrow,
+      selectConversation: openConversation,
     },
     onRouteChange: handleRouteChange,
     onNavigationError: (error) => {
@@ -494,6 +517,9 @@
     };
   });
 
+  // The scoped list feeds the sidebar and the switcher on both surfaces.
+  onMount(() => watchSessionList(() => conversationStore.refreshConversations!()));
+
   // A conversation open in this tab while another tab holds its socket follows
   // the gateway's session signal, so a turn stopped or settled elsewhere — or
   // by this tab's own Stop — shows here too.
@@ -502,7 +528,7 @@
       openConversationId: () => conversationStore.activeConversation?.id ?? null,
       holdsSocket: () => {
         const id = conversationStore.activeConversation?.id;
-        return connectionStore.status === "connected" && (id === undefined || recoveringGeneration(id) === undefined);
+        return connectionStore.status === "connected" && (id === undefined || recoveringTurn(id) === undefined);
       },
       refresh: refreshOpenConversation,
     }),
@@ -545,12 +571,15 @@
   // with the composer open, and the first message creates the conversation
   // there. Nothing is created until then, so an abandoned start leaves no
   // empty session behind.
-  async function startSession(choice: { topicId: string | null; agentId: string | null }): Promise<void> {
+  async function startSession(
+    choice: { topicId: string | null; agentId: string | null },
+    surface: Surface = "conversation",
+  ): Promise<void> {
     try {
       scopeGeneration += 1;
-      connectionStore.disconnect();
+      connectionStore.deselect?.();
       conversationStore.clearActiveConversation();
-      activeSurface = "conversation";
+      activeSurface = surface;
       router.navigate("/");
       const knownDefinitions = startScope === choice.topicId ? startAgentDefinitions : undefined;
       const loading = bringScopeIntoView(choice.topicId, knownDefinitions);
@@ -585,10 +614,23 @@
       if (scopeLoadedFor !== undefined) void loadScopeAgentDefinitions(scopeLoadedFor);
       if (startScope !== undefined) void loadStartAgentDefinitions(startScope);
     }
+    function refreshUnseenRecovery(id: string): void {
+      const active = conversationStore.activeConversation;
+      if (active?.id === id && streamIsInView(active, streamingStore.streamFor?.(id).threadId)) return;
+      if (recoveringTurn(id) !== undefined) void refreshRecoveringConversation(id);
+    }
+    function refreshUnseenRecoveries(): void {
+      for (const id of recoveringTurns.keys()) refreshUnseenRecovery(id);
+    }
     channel.onSignal((event) => {
       if (event.type === "agent_definitions_changed" || event.type === "lagged") refreshPickers();
+      if (event.type === "session_updated") refreshUnseenRecovery(event.session_id);
+      if (event.type === "lagged") refreshUnseenRecoveries();
     });
-    channel.onReconnect(refreshPickers);
+    channel.onReconnect(() => {
+      refreshPickers();
+      refreshUnseenRecoveries();
+    });
     return () => channel.close();
   });
 
@@ -626,8 +668,7 @@
         console.error("Failed to load model settings:", error);
       }
 
-      // 3. Apply the URL. If it points at a conversation, selectAndNavigate
-      //    will bring its scope into view along the way.
+      // 3. Open the session and its scope when the URL names one.
       await router.init();
     } catch {
       // Any failure here means the gateway is unreachable. Show a clear error

@@ -10,7 +10,7 @@
  * with the HTTP and WebSocket boundaries mocked.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mount, unmount } from "svelte";
+import { flushSync, mount, tick, unmount } from "svelte";
 import * as workSurface from "../api/work-surface";
 import type { ServerEvent } from "../types";
 import App from "../../App.svelte";
@@ -26,6 +26,7 @@ const topic = {
   description: "",
   is_default: true,
   slug: "default",
+  effective_default_model: "test-model",
   created_at: "2026-08-29T09:00:00Z",
 };
 
@@ -105,7 +106,7 @@ vi.mock("../api/sessions", () => ({
 }));
 
 vi.mock("../api/settings", () => ({
-  fetchSettings: vi.fn(async () => ({ models: {}, default_model: null })),
+  fetchSettings: vi.fn(async () => ({ models: { "test-model": {} }, default_model: "test-model" })),
 }));
 
 vi.mock("../api/agent-definitions", () => ({
@@ -183,6 +184,35 @@ describe("ambient channel control path", () => {
       .toContain("History of conv-1");
   });
 
+  it("refreshes the scoped conversation labels and outcomes on gateway updates", async () => {
+    const listeners: Array<(event: ServerEvent) => void> = [];
+    vi.spyOn(workSurface, "openSharedWorkSurfaceChannel").mockImplementation(() => ({
+      onSignal: (handler) => { listeners.push(handler); },
+      onReconnect: () => {},
+      close: () => {},
+    }));
+    const initial = { ...summaries[0], opening_message: "Check the launch", latest_turn_state: "failed" as const };
+    const list = vi.mocked(listConversations);
+    list.mockResolvedValueOnce([initial]);
+
+    component = await mountAppOnConversation();
+    expect(document.querySelector("aside .conversation-item")?.textContent).toContain("Last response failed");
+
+    surfaceButton("Surfaces").click();
+    list.mockResolvedValueOnce([{ ...initial, opening_message: "Read the launch plan", latest_turn_state: "completed" }]);
+    for (const listener of listeners) listener({ type: "session_updated", session_id: initial.id });
+    await vi.waitFor(() => expect(document.querySelector('select[aria-label="Active conversation"] option:checked')
+      ?.textContent).toBe("Read the launch plan"));
+    expect(list).toHaveBeenLastCalledWith(topic.id);
+
+    surfaceButton("Conversation").click();
+    await vi.waitFor(() => {
+      const row = document.querySelector("aside .conversation-item");
+      expect(row?.textContent).toContain("Read the launch plan");
+      expect(row?.textContent).not.toContain("Last response failed");
+    });
+  });
+
   it("keeps the selected conversation socket while the operator surface opens", async () => {
     component = await mountAppOnConversation();
     wsClient.connect.mockClear();
@@ -219,6 +249,16 @@ describe("ambient channel control path", () => {
     expect(wsClient.connect).toHaveBeenLastCalledWith("conv-2");
   });
 
+  async function sendDraft(): Promise<void> {
+    await tick();
+    const draft = document.querySelector<HTMLTextAreaElement>("textarea")!;
+    flushSync(() => {
+      draft.value = "First message";
+      draft.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+  }
+
   it("creates a conversation in place, leaving the user on the work surface", async () => {
     component = await mountAppOnConversation();
     surfaceButton("Surfaces").click();
@@ -239,11 +279,12 @@ describe("ambient channel control path", () => {
     (document.querySelector(
       'main.surfaces-surface button.new-session',
     ) as HTMLButtonElement).click();
+    await sendDraft();
 
     await vi.waitFor(() => {
       expect(window.location.pathname).toBe("/conversations/conv-new");
     });
-    expect(createConversation).toHaveBeenCalledWith(topic.id, undefined, undefined, undefined);
+    expect(createConversation).toHaveBeenCalledWith(topic.id, "test-model", null, null);
     expect((document.querySelector(
       'main.surfaces-surface select[aria-label="Active conversation"]',
     ) as HTMLSelectElement).value).toBe("conv-new");
@@ -290,6 +331,7 @@ describe("ambient channel control path", () => {
     let release!: (value: Awaited<ReturnType<typeof createConversation>>) => void;
     vi.mocked(createConversation).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
     (document.querySelector('button.new-session') as HTMLButtonElement).click();
+    await sendDraft();
     await vi.waitFor(() => expect(createConversation).toHaveBeenCalled());
     vi.mocked(getConversation).mockResolvedValueOnce({ ...detail("conv-2"), agent_id: "gateway", agent_display_name: "Swage default", topic_id: other.id });
     const selector = document.querySelector<HTMLSelectElement>('select[aria-label="Active conversation"]')!;
@@ -300,7 +342,7 @@ describe("ambient channel control path", () => {
     await new Promise(resolve => setTimeout(resolve, 20));
     expect(window.location.pathname).toBe("/conversations/conv-2");
     expect(document.body.textContent).toContain("History of conv-2");
-    expect(selector.value).toBe("conv-2");
+    expect(document.querySelector<HTMLSelectElement>('select[aria-label="Active conversation"]')?.value).toBe("conv-2");
     expect(wsClient.connect).not.toHaveBeenCalledWith("late");
   });
 
@@ -308,11 +350,12 @@ describe("ambient channel control path", () => {
     component = await mountAppOnConversation();
     vi.mocked(createConversation).mockRejectedValueOnce(new ApiError(422, "validation_error", "Choose an available agent"));
     (document.querySelector('button.new-session') as HTMLButtonElement).click();
+    await sendDraft();
     await vi.waitFor(() => {
       expect(document.querySelector('[role="alert"]')?.textContent ?? "").toContain("validation_error: Choose an available agent");
     });
-    expect(document.body.textContent).toContain("History of conv-1");
-    expect(window.location.pathname).toBe("/conversations/conv-1");
+    expect(document.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("First message");
+    expect(window.location.pathname).toBe("/");
   });
 
   it("reports a failed selection locally and retains the existing conversation", async () => {

@@ -78,7 +78,7 @@ function mockConversationStoreWithSessions(
   const summaries = previews.map((preview, index) =>
     makeConversationSummary({
       id: `conv-${index + 1}`,
-      message_preview: preview,
+      opening_message: preview,
     }),
   );
   const active = makeConversationDetail({

@@ -1166,6 +1166,13 @@
             "null"
           ]
         },
+        "opening_message": {
+          "description": "The first non-empty message the person sent, for labelling the conversation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "selected_model_id": {
           "type": [
             "string",

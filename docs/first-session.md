@@ -119,10 +119,10 @@ topic entirely.
 ## Start a conversation
 
 The agent picker appears on the front door's **New session** control and,
-once a session has started, in the composer's toolbar until the first
-message is sent. It lists the scope's effective agent definitions — the
-shipped default (**Swage default**) plus any operator-authored definitions
-visible to the topic, or the global ones for a session without a topic.
+in the draft composer's toolbar before the first message is sent. It lists the
+scope's effective agent definitions, including the shipped default
+(**Swage default**) and any operator-authored definitions visible to the
+topic. A session without a topic lists the global definitions.
 Select an agent, type a message, and submit: the gateway creates the
 conversation bound to that agent definition and navigates to it immediately.
 The agent a session runs under is part of every conversation read, so the
@@ -132,8 +132,9 @@ If only the shipped default is available (a fresh install with no
 operator-authored definitions), the picker has one entry and the choice is
 automatic.
 
-**+ New** in the conversation list or the channel's session bar starts
-another session in the same scope with the agent currently picked.
+**+ New** in the conversation list or the channel's session bar opens a draft
+in the same scope. Choose the agent in the draft before sending the first
+message.
 
 [Agents and permissions](agents-and-permissions.md#what-agents-are-available)
 covers what the registry contains and how topic-scoped definitions shadow

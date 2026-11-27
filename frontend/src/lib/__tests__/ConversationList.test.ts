@@ -7,24 +7,13 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
-import * as api from "../api/conversations";
-import { createConversationStore } from "../stores/conversations";
 import ConversationList from "../components/ConversationList.svelte";
 import type { ConversationStore } from "../stores/conversations";
-import type { ConversationSummary, ConversationDetail, ServerEvent } from "../types";
+import type { ConversationSummary, ConversationDetail } from "../types";
 import {
   makeConversationDetail,
   makeConversationSummary,
 } from "./fixtures/conversations";
-
-let sessionSignal: ((event: ServerEvent) => void) | undefined;
-vi.mock("../api/work-surface", () => ({
-  openSharedWorkSurfaceChannel: () => ({
-    onSignal(handler: (event: ServerEvent) => void) { sessionSignal = handler; },
-    onReconnect() {},
-    close() { sessionSignal = undefined; },
-  }),
-}));
 
 type MountedComponent = ReturnType<typeof mount>;
 
@@ -73,9 +62,9 @@ describe("ConversationList", () => {
 
   it("labels failed and interrupted latest responses without marking recovered conversations", () => {
     const store = makeStore([
-      makeConversationSummary({ id: "failed", message_preview: "Failed reply", latest_turn_state: "failed" }),
-      makeConversationSummary({ id: "interrupted", message_preview: "Interrupted reply", latest_turn_state: "interrupted" }),
-      makeConversationSummary({ id: "recovered", message_preview: "Recovered reply", latest_turn_state: "completed", has_interrupted_turn: true }),
+      makeConversationSummary({ id: "failed", opening_message: "Failed reply", latest_turn_state: "failed" }),
+      makeConversationSummary({ id: "interrupted", opening_message: "Interrupted reply", latest_turn_state: "interrupted" }),
+      makeConversationSummary({ id: "recovered", opening_message: "Recovered reply", latest_turn_state: "completed", has_interrupted_turn: true }),
     ]);
     component = mount(ConversationList, { target: document.body, props: { store } });
     flushSync();
@@ -99,51 +88,6 @@ describe("ConversationList", () => {
     expect(recovered!.textContent).not.toContain("⚠");
     expect(recovered!.textContent).not.toContain("Last response failed");
     expect(recovered!.textContent).not.toContain("Interrupted");
-  });
-
-  it("reconciles the existing sidebar rows from the selected scope on a signal", async () => {
-    const summary = makeConversationSummary({ id: "existing", message_preview: "Check the launch", latest_turn_state: "failed" });
-    const list = vi.spyOn(api, "listConversations").mockResolvedValue([summary]);
-    try {
-      const store = createConversationStore();
-      await store.loadConversations("research");
-      component = mount(ConversationList, { target: document.body, props: { store } });
-      flushSync();
-      const row = document.querySelector(".conversation-item");
-      expect(row?.textContent).toContain("Last response failed");
-
-      list.mockResolvedValue([{ ...summary, latest_turn_state: "completed" }]);
-      expect(sessionSignal).toBeDefined();
-      sessionSignal?.({ type: "session_updated", session_id: summary.id });
-      await vi.waitFor(() => expect(row?.textContent).not.toContain("Last response failed"));
-      expect(document.querySelector(".conversation-item")).toBe(row);
-      expect(list).toHaveBeenLastCalledWith("research");
-    } finally {
-      list.mockRestore();
-    }
-  });
-
-  it("reads the latest sidebar rows on return without a new socket signal", async () => {
-    const summary = makeConversationSummary({ id: "existing", message_preview: "Previous request", latest_turn_state: "failed" });
-    const list = vi.spyOn(api, "listConversations").mockResolvedValue([summary]);
-    try {
-      const store = createConversationStore();
-      await store.loadConversations("research");
-      component = mount(ConversationList, { target: document.body, props: { store } });
-      await vi.waitFor(() => expect(document.querySelector(".conversation-item")?.textContent)
-        .toContain("Last response failed"));
-      await unmount(component);
-      component = undefined;
-
-      list.mockResolvedValue([{ ...summary, message_preview: "New reply", latest_turn_state: "completed" }]);
-      component = mount(ConversationList, { target: document.body, props: { store } });
-      await vi.waitFor(() => expect(document.querySelector(".conversation-item")?.textContent)
-        .toContain("New reply"));
-      expect(document.querySelector(".conversation-item")?.textContent).not.toContain("Last response failed");
-      expect(list).toHaveBeenLastCalledWith("research");
-    } finally {
-      list.mockRestore();
-    }
   });
 
   // --- Empty state ---
@@ -182,9 +126,9 @@ describe("ConversationList", () => {
     expect(entries).toHaveLength(3);
   });
 
-  it("shows the message preview when available", () => {
+  it("shows the opening message when available", () => {
     const store = makeStore([
-      makeConversationSummary({ message_preview: "Hello there" }),
+      makeConversationSummary({ opening_message: "Hello there" }),
     ]);
     component = mount(ConversationList, {
       target: document.body,
@@ -195,9 +139,9 @@ describe("ConversationList", () => {
     expect(el!.textContent).toContain("Hello there");
   });
 
-  it("shows a fallback label when the preview is null", () => {
+  it("shows a fallback label when the opening message is null", () => {
     const store = makeStore([
-      makeConversationSummary({ message_preview: null }),
+      makeConversationSummary({ opening_message: null }),
     ]);
     component = mount(ConversationList, {
       target: document.body,
@@ -403,7 +347,7 @@ describe("ConversationList session previews", () => {
   it("renders the sidebar message as plain text", () => {
     component = mount(ConversationList, {
       target: document.body,
-      props: { store: makeStore([makeConversationSummary({ message_preview: "**Amber Cabinet** - **Size:** `120 × 60 cm`" })]) },
+      props: { store: makeStore([makeConversationSummary({ opening_message: "**Amber Cabinet** - **Size:** `120 × 60 cm`" })]) },
     });
     expect(document.querySelector(".preview")?.textContent?.trim()).toBe("Amber Cabinet - Size: 120 × 60 cm");
   });
@@ -411,7 +355,7 @@ describe("ConversationList session previews", () => {
   it("names the delete control by the plain link label", () => {
     component = mount(ConversationList, {
       target: document.body,
-      props: { store: makeStore([makeConversationSummary({ message_preview: "[Open child](swage://session/child-id)" })]) },
+      props: { store: makeStore([makeConversationSummary({ opening_message: "[Open child](swage://session/child-id)" })]) },
     });
     expect(document.querySelector(".delete-btn")?.getAttribute("aria-label")).toBe("Delete conversation: Open child");
   });

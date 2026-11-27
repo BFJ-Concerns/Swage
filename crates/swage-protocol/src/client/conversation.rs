@@ -147,6 +147,9 @@ pub struct ConversationSummary {
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub message_preview: Option<String>,
+    /// The first non-empty message the person sent, for labelling the conversation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opening_message: Option<String>,
     pub has_interrupted_turn: bool,
     pub latest_turn_state: Option<TurnState>,
 }

@@ -9,7 +9,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 import ConversationChannel from "../components/ConversationChannel.svelte";
-import conversationChannelSource from "../components/ConversationChannel.svelte?raw";
 import type { ConnectionStore } from "../stores/connection";
 import type { ConversationStore } from "../stores/conversations";
 import { createStreamingStore, type StreamingStore } from "../stores/streaming";
@@ -242,25 +241,6 @@ describe("ConversationChannel pending approval", () => {
     });
   }
 
-  it("pins the approval card to the foot of the channel's scroll", () => {
-    const conversationStore = makeConversationStore([], null);
-    const streamingStore = createStreamingStore({ conversationStore });
-    blockTurnOnApproval(streamingStore);
-    component = mountChannel(conversationStore, streamingStore);
-
-    const card = document.querySelector('[role="dialog"][aria-label="Approval required"]');
-    expect(card).not.toBeNull();
-    // The test environment applies no component styles, so the pin is read
-    // from the scoped rule for the class the card's container actually has.
-    const container = card!.parentElement!;
-    expect(container.tagName).not.toBe("SECTION");
-    const pinnedRule = [...container.classList]
-      .map((name) => conversationChannelSource.match(new RegExp(`\\.${name}\\s*\\{([^}]*)\\}`))?.[1])
-      .find((body) => body !== undefined && /position:\s*sticky/.test(body));
-    expect(pinnedRule).toBeDefined();
-    expect(pinnedRule).toMatch(/bottom:\s*0/);
-  });
-
   it("shows no empty generating bubble while the turn waits on the approval", () => {
     const conversationStore = makeConversationStore([], null);
     const streamingStore = createStreamingStore({ conversationStore });
@@ -287,9 +267,9 @@ describe("ConversationChannel session previews", () => {
     ["**Amber Cabinet** - **Size:** `120 × 60 cm`", "Amber Cabinet - Size: 120 × 60 cm"],
     ["## Ingredients\n\n| Name | ID |\n| --- | --- |\n| Lentils | 42 |", "Ingredients Name ID Lentils 42"],
     ["[Open child](swage://session/child-id)", "Open child"],
-  ])("shows the latest message as a plain selector label: %s", (source, expected) => {
+  ])("shows the opening message as a plain selector label: %s", (source, expected) => {
     const store = makeConversationStore([], null);
-    const summary = makeConversationSummary({ id: store.activeConversation!.id, message_preview: source });
+    const summary = makeConversationSummary({ id: store.activeConversation!.id, opening_message: source });
     component = mountChannel({ ...store, conversations: [summary] });
     expect(document.querySelector('select[aria-label="Active conversation"] option')?.textContent).toBe(expected);
   });

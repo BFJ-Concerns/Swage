@@ -16,7 +16,11 @@ import { getConversation } from "./conversations";
 import { ApiError } from "./error";
 
 export type ServerEventHandler = (event: ServerEvent) => void;
-export type StatusChangeHandler = (status: ConnectionStatus, message?: string) => void;
+export type StatusChangeHandler = (
+  status: ConnectionStatus,
+  message?: string,
+  sentPendingMessages?: boolean,
+) => void;
 
 export interface WebSocketClient {
   connect(conversationId: string): void;
@@ -98,8 +102,8 @@ export function createWebSocketClient(
     return `${protocol}//${window.location.host}`;
   }
 
-  function emitStatus(status: ConnectionStatus, message?: string): void {
-    for (const handler of statusHandlers) handler(status, message);
+  function emitStatus(status: ConnectionStatus, message?: string, sentPendingMessages?: boolean): void {
+    for (const handler of statusHandlers) handler(status, message, sentPendingMessages);
   }
 
   // A frame could not be delivered and will not be retried. Surfaced as a
@@ -145,14 +149,13 @@ export function createWebSocketClient(
       // explicitly calls connect() again. Keeping it growing means repeated
       // open+drop cycles (e.g. a flapping connection) back off progressively
       // rather than hammering the server at the base rate on every recovery.
-      emitStatus("connected");
-
       // Subscribe to the live observability channels the conversation surface
       // renders inline: tools for call cards, retry for provider retry chips.
       socket.send(JSON.stringify({ type: "subscribe", channels: ["tools", "retry"] }));
 
       // Deliver anything queued while the handshake was in flight.
       for (const frame of pendingFrames) socket.send(JSON.stringify(frame));
+      emitStatus("connected", undefined, pendingFrames.some((frame) => frame.type === "send_message"));
     };
 
     socket.onmessage = (event: MessageEvent) => {

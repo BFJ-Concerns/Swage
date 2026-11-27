@@ -202,18 +202,35 @@
     userScrolledUp = gap > 50;
   }
 
-  // Scroll to the bottom whenever the message list or streamed content grows.
-  // requestAnimationFrame lets the DOM paint the new content first.
-  $effect(() => {
-    // These accesses establish reactive tracking once the stores use $state.
-    void (store?.activeConversation?.messages?.length ?? 0);
-    void streamedContent.length;
+  let previousView = "";
+  let previousInput: string | undefined;
+  let previousQueuedInput: string | undefined;
 
-    if (!userScrolledUp && scrollEl) {
-      requestAnimationFrame(() => {
-        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
-      });
-    }
+  $effect(() => {
+    const element = scrollEl;
+    const view = `${store?.activeConversation?.id ?? ""}/${store?.activeThreadId ?? ""}`;
+    const lastInput = messages.findLast(isPersonsMessage)?.client_id;
+    const lastQueuedInput = queued.at(-1)?.client_id;
+    const opened = view !== previousView;
+    const sent = (lastInput && lastInput !== previousInput) ||
+      (lastQueuedInput && lastQueuedInput !== previousQueuedInput);
+    previousView = view;
+    previousInput = lastInput ?? undefined;
+    previousQueuedInput = lastQueuedInput ?? undefined;
+    void messages.length;
+    void streamedContent.length;
+    void awaitingApproval;
+
+    if (!element) return;
+    if (opened || sent) userScrolledUp = false;
+    if (userScrolledUp) return;
+
+    const frame = requestAnimationFrame(() => {
+      const target = opened && element.querySelector(":target");
+      if (target) target.scrollIntoView({ block: "start" });
+      else element.scrollTop = element.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
   });
 
   // ---- Derived display state ------------------------------------------------
@@ -351,15 +368,17 @@
   // coarse flags. These flags only change on turn boundaries, so the dedicated
   // live region below updates a handful of times per turn, not per token.
   const streamingStatus = $derived(
-    turnError
-      ? errorSummary(turnError.message, undefined, liveInterruption)
-      : providerRetry
-        ? `Retrying provider: attempt ${providerRetry.attempt} of ${providerRetry.max_retries}`
-        : isStreaming
-          ? "Generating response"
-          : streamedContent
-            ? "Response complete"
-            : "",
+    awaitingApproval
+      ? "Waiting for your approval"
+      : turnError
+        ? errorSummary(turnError.message, undefined, liveInterruption)
+        : providerRetry
+          ? `Retrying provider: attempt ${providerRetry.attempt} of ${providerRetry.max_retries}`
+          : isStreaming
+            ? "Generating response"
+            : streamedContent
+              ? "Response complete"
+              : "",
   );
 </script>
 

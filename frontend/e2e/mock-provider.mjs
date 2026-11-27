@@ -83,6 +83,8 @@ async function handle(request, response) {
     block.type === "tool_result" && ["create-e2e-agent", "refuse-e2e-agent"].includes(block.tool_use_id));
   if (lastText === "accepted before disconnect") {
     await textResponse(response, ["The accepted request finished."], 3500);
+  } else if (lastText === "finish an off-screen turn") {
+    await textResponse(response, ["The turn began. ", "The off-screen turn finished."], 2_500);
   } else if (lastText === "hold for the batch") {
     await textResponse(response, ["Holding the current request."], 5000);
   } else if (lastText === "limit this turn") {

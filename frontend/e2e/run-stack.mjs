@@ -43,7 +43,7 @@ default = "e2e-model"
 
 [models.entries.e2e-model]
 provider_id = "e2e"
-model_id = "e2e-model"
+model_id = "claude-opus-4-6"
 
 [models.entries.preferred-model]
 provider_id = "e2e"
