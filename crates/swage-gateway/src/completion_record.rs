@@ -254,8 +254,9 @@ impl CompletionAccount {
     }
 }
 
-/// Mask every registered value in each string, in its plain form and in the
-/// escaped form it takes inside JSON text, which a completion may return.
+/// Mask every registered value in each string and each object key, in its
+/// plain form and in the escaped form it takes inside JSON text, which a
+/// completion may return.
 fn mask_registered_values(value: &mut Value, secret_values: &[String]) {
     match value {
         Value::String(text) => {
@@ -267,9 +268,14 @@ fn mask_registered_values(value: &mut Value, secret_values: &[String]) {
             }
         }
         Value::Object(values) => {
-            for value in values.values_mut() {
-                mask_registered_values(value, secret_values);
-            }
+            *values = std::mem::take(values)
+                .into_iter()
+                .map(|(mut key, mut value)| {
+                    crate::turn::redact_serialised_text(&mut key, secret_values);
+                    mask_registered_values(&mut value, secret_values);
+                    (key, value)
+                })
+                .collect();
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
@@ -714,5 +720,23 @@ mod tests {
         let events = completions(&storage, 1).await;
         assert_eq!(events[0].metadata["outcome"], "interrupted");
         assert_eq!(events[0].metadata["max_tokens"], 8);
+    }
+
+    #[test]
+    fn a_registered_value_is_masked_in_object_keys_as_well_as_values() {
+        let secret = r#"audit"secret-123"#.to_owned();
+        let mut returned = json!({
+            "tool_calls": [{ "arguments": { "command": "printf probe", secret.clone(): secret.clone() } }],
+        });
+        mask_registered_values(&mut returned, std::slice::from_ref(&secret));
+        assert_eq!(
+            returned,
+            json!({
+                "tool_calls": [{ "arguments": {
+                    "command": "printf probe",
+                    "[REDACTED_SECRET]": "[REDACTED_SECRET]",
+                } }],
+            })
+        );
     }
 }
