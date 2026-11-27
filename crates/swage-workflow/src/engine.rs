@@ -10,8 +10,9 @@ use crate::WorkflowHost;
 use crate::host_calls::WorkflowHostCalls;
 
 pub(crate) fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 19] = [
+    const NAMES: [(&str, &str); 20] = [
         ("AgentCallError", "AgentCallError"),
+        ("EffortFloorError", "EffortFloorError"),
         ("AgentCallTimeoutError", "AgentCallTimeoutError"),
         ("BudgetExceededError", "BudgetExceededError"),
         ("BudgetWindDownError", "BudgetWindDownError"),
@@ -696,8 +697,8 @@ const HOST_SHIM: &str = r#"
                         const buildAgentRequest = (options) => {
                             const merged = mergeDefaults(options);
                             const knownOptions = new Set([
-                                "agent", "task", "tools", "skills", "model", "fallbackModel", "effort", "timeoutMs",
-                                "cwd", "isolation", "schema", "maxAttempts", "label", "phase", "identity",
+                                "agent", "task", "tools", "skills", "model", "fallbackModel", "effort", "minEffort",
+                                "timeoutMs", "cwd", "isolation", "schema", "maxAttempts", "label", "phase", "identity",
                                 "session", "worker", "elements", "variables", "assembly",
                             ]);
                             for (const key of Object.keys(merged)) {
@@ -754,6 +755,9 @@ const HOST_SHIM: &str = r#"
                                 ...(merged.effort === undefined || merged.effort === null
                                     ? {}
                                     : { effort: String(merged.effort) }),
+                                ...(merged.minEffort === undefined || merged.minEffort === null
+                                    ? {}
+                                    : { min_effort: String(merged.minEffort) }),
                                 ...(merged.timeoutMs === undefined || merged.timeoutMs === null
                                     ? {}
                                     : { timeout_ms: merged.timeoutMs }),
@@ -3117,7 +3121,7 @@ mod tests {
         let host = Arc::new(SurfaceHost::new());
         WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
-                r#"await agent("bounded work", { effort: "high", timeoutMs: 75, tools: ["web_search", "url_fetch"] }); return null;"#,
+                r#"await agent("bounded work", { effort: "high", minEffort: "medium", timeoutMs: 75, tools: ["web_search", "url_fetch"] }); return null;"#,
                 "null",
                 CancellationToken::new(),
                 Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
@@ -3128,6 +3132,7 @@ mod tests {
         let requests = host.agent_requests.lock().unwrap();
         let serialised = serde_json::to_value(&requests[0]).expect("serialise request");
         assert_eq!(serialised["effort"], "high");
+        assert_eq!(serialised["min_effort"], "medium");
         assert_eq!(serialised["timeout_ms"], 75);
         assert_eq!(
             serialised["tools"],

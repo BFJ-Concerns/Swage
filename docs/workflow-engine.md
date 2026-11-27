@@ -156,6 +156,20 @@ actually served the call. Continuation calls ignore `fallbackModel` and never
 make a fallback attempt; they use the worker's persisted model selection,
 including a fallback selected at creation.
 
+### Effort floor
+
+`agent()` and `agentStart()` accept `minEffort`, the least effort the call
+accepts being served at, in the same vocabulary as `effort`. The gateway
+resolves the call's effort against the model it would run on before any worker
+starts, and refuses the call with an `EffortFloorError` naming the shortfall
+where that model would serve it below the floor: the requested level is one
+the model lacks and clamps to a lower one, the call sets no effort and its
+model has no default, or the model takes no effort setting at all. The refusal
+is journalled with the call, and no provider request is made. The
+`model_list` tool gives each catalogue model's `effort_levels`, the levels it
+serves as asked. A declared `fallbackModel` that serves the call is not
+checked against the floor.
+
 ### Composition
 
 `workflow(name, args)` calls a child workflow. It is only available when the
