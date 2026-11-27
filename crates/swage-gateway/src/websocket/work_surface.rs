@@ -36,8 +36,8 @@ use super::ServerEvent;
 /// running work that a run started, parked or ended. A run's start and end
 /// travel on the broadcast with the whole run, so this channel sends them on
 /// as `WorkflowRunUpdated` carrying the run's id alone: the socket takes no
-/// identity, and listeners refetch rather than read a payload. `Shutdown`
-/// tells a listener the gateway is going away. Everything else on the
+/// identity, and listeners refetch rather than read a payload. `AgentDefinitionsChanged` tells
+/// agent pickers to refresh. `Shutdown` tells a listener the gateway is going away. Everything else on the
 /// broadcast channel belongs to a conversation or to observability.
 pub(crate) fn work_surface_signal(event: &ServerEvent) -> Option<ServerEvent> {
     match event {
@@ -51,6 +51,7 @@ pub(crate) fn work_surface_signal(event: &ServerEvent) -> Option<ServerEvent> {
         | ServerEvent::LibraryUpdated { .. }
         | ServerEvent::SessionUpdated { .. }
         | ServerEvent::WorkflowRunUpdated { .. }
+        | ServerEvent::AgentDefinitionsChanged
         | ServerEvent::Lagged { .. }
         | ServerEvent::Shutdown { .. } => Some(event.clone()),
         _ => None,

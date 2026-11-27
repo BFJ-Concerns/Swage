@@ -23,7 +23,9 @@ a Svelte 5 web UI and an Electron desktop shell.
 >   starting from a fresh data directory.
 > - **Single operator, Linux only.** One person's gateway on their own
 >   machine, by design. Sandboxing relies on Linux (bubblewrap, Landlock).
-> - **No authentication.** Run it on loopback or a network you fully trust.
+> - **Private networks only.** Beyond loopback the gateway serves only
+>   clients paired with its token; that is not authentication fit for the
+>   public internet.
 
 ## Why Swage
 

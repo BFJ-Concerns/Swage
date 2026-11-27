@@ -203,7 +203,7 @@ pub async fn upsert_agent_definition(
         .map_err(GatewayError::from)?;
     let new_state = snapshot_definition(state, &agent_id, topic_id).await?;
 
-    record_config_change(
+    let recorded = record_config_change(
         state,
         ConfigChange {
             entity_kind: "agent_definition",
@@ -216,7 +216,11 @@ pub async fn upsert_agent_definition(
             new_state,
         },
     )
-    .await?;
+    .await;
+    let _ = state
+        .broadcast
+        .send(swage_protocol::client::websocket::ServerEvent::AgentDefinitionsChanged);
+    recorded?;
 
     Ok(AgentDefinitionChange {
         agent_id,
@@ -252,7 +256,7 @@ pub async fn delete_agent_definition(
     }
     let summary = format!("deleted agent definition '{agent_id}'");
 
-    record_config_change(
+    let recorded = record_config_change(
         state,
         ConfigChange {
             entity_kind: "agent_definition",
@@ -265,7 +269,11 @@ pub async fn delete_agent_definition(
             new_state: None,
         },
     )
-    .await?;
+    .await;
+    let _ = state
+        .broadcast
+        .send(swage_protocol::client::websocket::ServerEvent::AgentDefinitionsChanged);
+    recorded?;
 
     Ok(AgentDefinitionChange {
         agent_id: agent_id.to_owned(),
@@ -349,7 +357,7 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
 /// model quietly runs on another; refusing here, with the ids that would
 /// be accepted, keeps the preference honest at every authoring surface.
 fn require_configured_model(state: &AppState, model_id: Option<&str>) -> Result<(), GatewayError> {
-    let Some(model_id) = model_id.map(str::trim).filter(|id| !id.is_empty()) else {
+    let Some(model_id) = model_id else {
         return Ok(());
     };
     let catalogue = state.active_config().models;

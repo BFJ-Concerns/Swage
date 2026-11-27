@@ -12,6 +12,7 @@
   import "./settings/controls.css";
   import { onDestroy, onMount, untrack } from "svelte";
   import { fetchSettings, restartGateway, saveSettings } from "../api/settings";
+  import SecuritySettingsPanel from "./settings/SecuritySettingsPanel.svelte";
   import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
   import AutomationSettingsPanel from "./settings/AutomationSettingsPanel.svelte";
   import AgentDefinitionsPanel from "./AgentDefinitionsPanel.svelte";
@@ -36,6 +37,7 @@
     | "commands"
     | "skills"
     | "generation"
+    | "security"
     | "automation"
     | "plugins"
     | "channels"
@@ -101,7 +103,6 @@
 
   let lastSavedSearch: SettingsResponse["tool_runtime"]["search"] = null;
   let hasInvalidBundlesJson = $state(false);
-  let hasInvalidApprovalJson = $state(false);
   let lastSavedArchiveDelay = $state(7);
   const archiveDelayError = $derived(
     settings && (nullableNumber(settings.sessions.archive_after_days) == null || settings.sessions.archive_after_days < 1)
@@ -149,9 +150,8 @@
     if (tab !== "automation") {
       // The panel discards invalid editor text when it unmounts. Its guard
       // must describe the valid settings that remain, not the lost draft.
-      if (hasInvalidApprovalJson || error === AUTOMATION_JSON_SAVE_ERROR) error = null;
+      if (error === AUTOMATION_JSON_SAVE_ERROR) error = null;
       hasInvalidBundlesJson = false;
-      hasInvalidApprovalJson = false;
     }
   });
   const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
@@ -255,7 +255,7 @@
     const archiveDelayChanged = settings.sessions.archive_after_days !== lastSavedArchiveDelay;
     const holdSearchDraft = searchIsIncomplete(settings.tool_runtime.search);
     const submittedSearchDraft = JSON.stringify(settings.tool_runtime.search);
-    if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
+    if (hasInvalidBundlesJson) {
       error = AUTOMATION_JSON_SAVE_ERROR;
       return false;
     }
@@ -277,7 +277,10 @@
       normaliseDefaultModel();
       submittedFingerprint = settingsFingerprint();
       providerSaveInFlight = providerEditsPending;
-      const submitted = JSON.parse(JSON.stringify({ ...settings, tool_runtime: toolRuntimeForSave(settings.tool_runtime) })) as SettingsPayload;
+      // The sandbox and approval-gated tools are saved from the Security tab.
+      const { sandbox: _sandbox, tool_permissions, ...general } = settings;
+      const { require_approval: _approvals, ...grants } = tool_permissions;
+      const submitted = JSON.parse(JSON.stringify({ ...general, tool_permissions: grants, tool_runtime: toolRuntimeForSave(settings.tool_runtime) })) as SettingsPayload;
       const saved = await saveSettings(submitted);
       const editedDuringSave = settingsFingerprint() !== submittedFingerprint
         || JSON.stringify(settings.tool_runtime.search) !== submittedSearchDraft;
@@ -358,6 +361,7 @@
       title: "Generation",
       sub: "Reusable parameter sets for sampling — temperature, max tokens, stop sequences. Each model can pick a preset or fall back to the provider default.",
     },
+    security: { title: "Security", sub: "Security checks for the install. Saved changes apply to the next turn." },
     automation: {
       title: "Automation",
       sub: "Schedules become active when created, without a gateway restart. Manage scheduled work and runtime settings here.",
@@ -399,6 +403,7 @@
   // Pages rendered in the compact settings-shell layout. Some are fully wired
   // frontend surfaces; the non-functional subset gets an explicit banner.
   const SHELL_LAYOUT_TABS: ReadonlySet<SettingsTabId> = new Set([
+    "security",
     "agents",
     "commands",
     "skills",
@@ -487,7 +492,13 @@
     {/if}
 
     <div class="settings-content">
-      {#if tab === "agents"}
+      {#if tab === "security"}
+        <SecuritySettingsPanel onSaved={async () => {
+          settings = await fetchSettings();
+          lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+          await onSettingsSaved?.();
+        }} />
+      {:else if tab === "agents"}
         <AgentDefinitionsPanel {topicId} />
       {:else if tab === "commands"}
         <CommandsPanel {topicId} />
@@ -588,11 +599,10 @@
           <AutomationSettingsPanel
             bind:settings
             {archiveDelayError}
-            onValidation={(bundlesInvalid, approvalsInvalid, message) => {
+            onValidation={(bundlesInvalid) => {
               hasInvalidBundlesJson = bundlesInvalid;
               if (bundlesInvalid) status = "";
-              hasInvalidApprovalJson = approvalsInvalid;
-              error = message;
+              error = null;
             }}
           />
         </section>

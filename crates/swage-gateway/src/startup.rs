@@ -130,6 +130,16 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
     state.browser_host = browser_host_slot;
     state.replace_voice_provider(voice_provider);
     state.telegram = telegram;
+    // The token gate for this binding: a loopback binding is never gated; a
+    // private-network binding asks every request from beyond loopback for the
+    // token in the data root, generated now if absent.
+    state.access_gate = Arc::new(
+        crate::access_gate::AccessGate::for_binding(&state.config_root, &config.server.host)
+            .unwrap_or_else(|error| {
+                eprintln!("Failed to read or create the gateway token: {error}");
+                std::process::exit(1);
+            }),
+    );
 
     // Step 8: Requeue channel messages claimed by a crashed gateway before
     // interrupting the orphaned turns they were attached to. A running process

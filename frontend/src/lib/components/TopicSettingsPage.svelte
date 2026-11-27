@@ -24,6 +24,7 @@
     removeTopicDefaultSurface,
   } from "../api/surfaces";
   import type { LibraryEntrySummary } from "../protocol/LibraryEntrySummary";
+  import SecuritySettingsPanel from "./settings/SecuritySettingsPanel.svelte";
   import type { TopicSettingsTab } from "../router";
   import type { Topic, ConversationSummary, WorkspaceAttachment } from "../types";
 
@@ -43,6 +44,7 @@
     { id: "workspaces", label: "Workspaces" },
     { id: "surfaces", label: "Surfaces" },
     { id: "sessions", label: "Sessions" },
+    { id: "security", label: "Security" },
   ];
 
   function openTab(next: TopicSettingsTab): void {
@@ -463,6 +465,8 @@
           {/each}
         </div>
       </section>
+    {:else if tab === "security"}
+      {#key topic.id}<SecuritySettingsPanel topicId={topic.id} />{/key}
     {:else if tab === "surfaces"}
       <section class="shell-section">
         <h2 class="shell-section-title">Default surfaces</h2>
