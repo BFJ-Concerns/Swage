@@ -767,6 +767,11 @@
           "const": "superseded",
           "description": "A newer revision of the plugin was installed.",
           "type": "string"
+        },
+        {
+          "const": "boundary_changed",
+          "description": "The session's turns now place processes under another boundary — a\nsandbox switched on or off, or a different filesystem policy — so\nthe process is started again under the new one.",
+          "type": "string"
         }
       ]
     },

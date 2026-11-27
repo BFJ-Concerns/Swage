@@ -102,6 +102,10 @@ pub enum PluginProcessStopReason {
     GatewayStopping,
     /// A newer revision of the plugin was installed.
     Superseded,
+    /// The session's turns now place processes under another boundary — a
+    /// sandbox switched on or off, or a different filesystem policy — so
+    /// the process is started again under the new one.
+    BoundaryChanged,
 }
 
 /// A host call's refusal or failure, by name and message.

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_plugin::{
     HostCallFailure, HostGrant, InvocationContext, PlainLauncher, PluginError, PluginHost,
-    ProcessObserver, ProcessPlugin, ProcessSpec, SilentObserver,
+    ProcessLauncher, ProcessObserver, ProcessPlugin, ProcessSpec, SilentObserver,
 };
 use swage_protocol::plugin::PluginProcessStopReason;
 
@@ -309,6 +309,77 @@ async fn a_process_that_dies_mid_call_fails_the_call_and_the_next_call_starts_af
             .iter()
             .any(|event| event.starts_with("exited fixture s ")),
         "{events:?}"
+    );
+    plugin
+        .stop_all(PluginProcessStopReason::GatewayStopping)
+        .await;
+}
+
+/// A launcher that starts processes as they are, under a boundary it names.
+struct NamedBoundary(&'static str);
+
+impl ProcessLauncher for NamedBoundary {
+    fn command(
+        &self,
+        spec: &ProcessSpec,
+        socket: &std::path::Path,
+    ) -> Result<tokio::process::Command, PluginError> {
+        PlainLauncher.command(spec, socket)
+    }
+
+    fn boundary(&self) -> String {
+        self.0.to_owned()
+    }
+}
+
+/// A session's process is reused only under the boundary it was started
+/// under: a call placed under another stops it, the stop is recorded, and
+/// the call is served by a process started under the new boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_process_is_started_again_when_the_session_s_boundary_changes() {
+    let events = Arc::new(Events::default());
+    let plugin = ProcessPlugin::new(
+        spec(vec![], vec![], Duration::from_secs(60)),
+        Arc::clone(&events) as Arc<dyn ProcessObserver>,
+    );
+    let host = Arc::new(RecordingHost::default()) as Arc<dyn PluginHost>;
+    let call = |boundary: &'static str| {
+        let plugin = Arc::clone(&plugin);
+        let host = Arc::clone(&host);
+        async move {
+            plugin
+                .invoke_tool(
+                    "count",
+                    &json!({}),
+                    &context("s"),
+                    host,
+                    &NamedBoundary(boundary),
+                )
+                .await
+                .expect("serves")
+        }
+    };
+    let unsandboxed = call("plain").await;
+    let again = call("plain").await;
+    assert_eq!(
+        again["pid"], unsandboxed["pid"],
+        "the same boundary reuses the process"
+    );
+    let sandboxed = call("sandboxed").await;
+    assert_ne!(sandboxed["pid"], unsandboxed["pid"]);
+    assert_eq!(
+        sandboxed["count"], 1,
+        "a fresh process serves the new boundary"
+    );
+    assert!(
+        events
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.contains("BoundaryChanged")),
+        "{:?}",
+        events.0.lock().unwrap()
     );
     plugin
         .stop_all(PluginProcessStopReason::GatewayStopping)

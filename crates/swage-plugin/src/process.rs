@@ -96,6 +96,12 @@ pub trait ProcessLauncher: Send + Sync {
         spec: &ProcessSpec,
         socket: &Path,
     ) -> Result<tokio::process::Command, PluginError>;
+
+    /// The boundary a process this launcher starts runs under, as a value
+    /// two launchers share only when their boundaries are the same. A
+    /// session's process started under one boundary is not reused under
+    /// another.
+    fn boundary(&self) -> String;
 }
 
 /// Runs the command as it is, from the install directory, with no boundary
@@ -123,6 +129,10 @@ impl ProcessLauncher for PlainLauncher {
         command.stdin(std::process::Stdio::null());
         command.stdout(std::process::Stdio::null());
         Ok(command)
+    }
+
+    fn boundary(&self) -> String {
+        "plain".to_owned()
     }
 }
 
@@ -436,6 +446,22 @@ impl ProcessPlugin {
         launcher: &dyn ProcessLauncher,
     ) -> Result<Value, PluginError> {
         let session = context.session_id.clone();
+        // A process started under another boundary than this call's turn
+        // places processes under — the sandbox switched on since, say — is
+        // stopped, and this call starts one under the turn's own.
+        if let Some(serving) = self.keeper.current(&session).await
+            && serving.boundary != launcher.boundary()
+            && self
+                .keeper
+                .stop(&session, PluginProcessStopReason::BoundaryChanged)
+                .await
+        {
+            self.observer.stopped(
+                &self.spec.plugin,
+                &session,
+                PluginProcessStopReason::BoundaryChanged,
+            );
+        }
         let process = self
             .keeper
             .get_or_start(
@@ -514,6 +540,8 @@ type Pending = HashMap<String, oneshot::Sender<Result<Value, PluginError>>>;
 /// One running plugin process and the socket to it.
 pub struct ServingProcess {
     pid: u32,
+    /// The boundary the process was started under ([`ProcessLauncher::boundary`]).
+    boundary: String,
     child: AsyncMutex<ChildProcessManager>,
     writer: AsyncMutex<OwnedWriteHalf>,
     /// Invocations awaiting their result, by id.
@@ -621,6 +649,7 @@ impl ServingProcess {
         }
         let process = Arc::new(Self {
             pid,
+            boundary: launcher.boundary(),
             child: AsyncMutex::new(child),
             writer: AsyncMutex::new(write_half),
             pending: Mutex::new(HashMap::new()),

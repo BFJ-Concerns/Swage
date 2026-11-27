@@ -105,6 +105,20 @@ impl ProcessLauncher for GatewayProcessLauncher {
             ProcessPlacement::Plain => PlainLauncher.command(spec, socket),
         }
     }
+
+    fn boundary(&self) -> String {
+        let policy = |kind: &str, config: &SandboxConfig| {
+            format!(
+                "{kind} {}",
+                serde_json::to_string(config).unwrap_or_default()
+            )
+        };
+        match &*self.placement {
+            ProcessPlacement::Sandboxed(config) => policy("sandboxed", config),
+            ProcessPlacement::Fallback(config) => policy("fallback", config),
+            ProcessPlacement::Plain => "plain".to_owned(),
+        }
+    }
 }
 
 /// Records each process's start, stop and exit as an audit event on the
