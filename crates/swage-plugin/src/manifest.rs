@@ -387,6 +387,16 @@ impl PluginManifest {
                 "limits.heap_mib is larger than this host can address".into(),
             ));
         }
+        if self
+            .limits
+            .heap_bytes()
+            .is_some_and(|bytes| bytes < swage_isolate::MIN_HEAP_BYTES)
+        {
+            return Err(ManifestError::Invalid(format!(
+                "limits.heap_mib must be at least {}: the engine cannot start in less",
+                swage_isolate::MIN_HEAP_BYTES / (1024 * 1024)
+            )));
+        }
         let mut seen = std::collections::HashSet::new();
         for tool in &self.provides.tools {
             validate_tool_name(&tool.name)?;
@@ -634,6 +644,7 @@ mod tests {
                 "JSON Schema object",
             ),
             (r#"heap_mib = 8"#, r#"heap_mib = 0"#, "positive"),
+            (r#"heap_mib = 8"#, r#"heap_mib = 1"#, "at least 4"),
         ];
         for (from, to, expected) in cases {
             let error = PluginManifest::parse(&ECHO.replace(from, to)).expect_err(expected);

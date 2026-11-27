@@ -64,6 +64,11 @@ pub fn engine_version() -> String {
     format!("v8-{}", v8::VERSION_STRING)
 }
 
+/// The least heap a program may be given: below it the engine cannot finish
+/// booting, and a heap limit of 1 MiB aborts the whole process rather than
+/// failing the one program. 4 MiB is the smallest size seen to start.
+pub const MIN_HEAP_BYTES: usize = 4 * 1024 * 1024;
+
 /// The two ceilings every program runs under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IsolateLimits {
@@ -423,6 +428,12 @@ impl Program {
         host: Option<SharedHostCalls>,
         cancellation: Option<CancellationToken>,
     ) -> Result<Self, IsolateError> {
+        if limits.heap_bytes < MIN_HEAP_BYTES {
+            return Err(IsolateError::Engine(format!(
+                "a heap limit of {} bytes is below the {MIN_HEAP_BYTES} the engine needs to start",
+                limits.heap_bytes
+            )));
+        }
         static PLATFORM: Once = Once::new();
         PLATFORM.call_once(|| JsRuntime::init_platform(None));
 
@@ -886,6 +897,24 @@ mod tests {
             .execute("test", "throw 'plain text';".to_owned())
             .expect_err("throws");
         assert_eq!(thrown_value.to_string(), "Error: plain text");
+    }
+
+    #[test]
+    fn a_heap_too_small_for_the_engine_is_refused_and_the_process_survives() {
+        let error = Program::new(
+            IsolateLimits {
+                heap_bytes: 1024 * 1024,
+                continuous_execution: Duration::from_secs(1),
+            },
+            None,
+            None,
+        )
+        .err()
+        .expect("refused");
+        assert!(
+            matches!(error, IsolateError::Engine(ref message) if message.contains("needs to start")),
+            "{error}"
+        );
     }
 
     #[test]
