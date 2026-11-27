@@ -64,10 +64,10 @@ fn provider_response_witness_is_appended_without_content_fields() {
             request_id: Some("req-123".into()),
             terminal_event: Some("message_stop".into()),
             stop_reason: Some("end_turn".into()),
-            usage: swage_core::TokenUsage {
+            usage: Some(swage_core::TokenUsage {
                 input_tokens: 9,
                 output_tokens: 0,
-            },
+            }),
             content_blocks: vec![swage_core::ProviderContentBlockWitness {
                 block_type: "thinking".into(),
                 count: 1,
@@ -136,10 +136,10 @@ async fn ordinary_and_delegated_snapshot_paths_record_provider_events_identicall
         request_id: Some("request-3".into()),
         terminal_event: Some("message_stop".into()),
         stop_reason: Some("end_turn".into()),
-        usage: swage_core::TokenUsage {
+        usage: Some(swage_core::TokenUsage {
             input_tokens: 11,
             output_tokens: 7,
-        },
+        }),
         content_blocks: vec![swage_core::ProviderContentBlockWitness {
             block_type: "text".into(),
             count: 1,
@@ -379,10 +379,10 @@ fn provider_witness_chunks() -> Vec<StreamChunk> {
             request_id: Some("req-123".into()),
             terminal_event: Some("message_stop".into()),
             stop_reason: Some("end_turn".into()),
-            usage: swage_core::TokenUsage {
+            usage: Some(swage_core::TokenUsage {
                 input_tokens: 9,
                 output_tokens: 2,
-            },
+            }),
             content_blocks: vec![swage_core::ProviderContentBlockWitness {
                 block_type: "text".into(),
                 count: 1,
@@ -671,9 +671,14 @@ async fn token_threshold_triggers_succession_for_a_turn() {
     let mut config = swage_config::ResolvedConfig::default();
     config.context.compaction_threshold =
         Some(swage_protocol::client::settings::CompactionThresholdConfig::Tokens(600));
-    let (state, session_id) =
+    let (mut state, session_id) =
         make_state_with_config_and_storage(provider_witness_chunks(), config, Arc::clone(&storage))
             .await;
+    state.provider = Arc::new(crate::completion_record::RecordingProvider::new(
+        Arc::clone(&state.provider),
+        Arc::clone(&state.storage),
+        (*state.secret_manager).clone(),
+    ));
     seed_history(&storage, session_id, 90).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -687,6 +692,30 @@ async fn token_threshold_triggers_succession_for_a_turn() {
     )
     .await
     .expect("turn completes after token-triggered succession");
+    let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+    let turn_id = storage.list_turns_by_thread(thread.id).await.unwrap()[0].id;
+    let summary = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(event) = storage
+                .db
+                .lock()
+                .await
+                .audit_events
+                .iter()
+                .find(|event| {
+                    event.event_kind == "completion" && event.metadata["streamed"] == false
+                })
+                .cloned()
+            {
+                break event;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("summary should have a completion in the audit record");
+    assert_eq!(summary.session_id, Some(session_id));
+    assert_eq!(summary.metadata["turn_id"], turn_id.to_string());
     let db = storage.db.lock().await;
     let (report_json, _) = db.snapshots.values().next().expect("context snapshot");
     let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
@@ -12199,10 +12228,10 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
                 request_id: Some("delegated-diagnostics".into()),
                 terminal_event: Some("message_stop".into()),
                 stop_reason: Some("end_turn".into()),
-                usage: swage_core::TokenUsage {
+                usage: Some(swage_core::TokenUsage {
                     input_tokens: 9,
                     output_tokens: 2,
-                },
+                }),
                 content_blocks: vec![swage_core::ProviderContentBlockWitness {
                     block_type: "text".into(),
                     count: 1,

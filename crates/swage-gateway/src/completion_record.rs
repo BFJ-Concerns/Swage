@@ -13,9 +13,9 @@
 //! it is written.
 //!
 //! A completion made inside a turn names the turn's session and the turn, read
-//! from the attribution the agent sets around each turn it runs
-//! (`swage_provider::attribution`); one made anywhere else is recorded with no
-//! session. The record is reconstructive:
+//! from the attribution set by the gateway during context preparation and
+//! by the agent during execution (`swage_provider::attribution`). A call
+//! outside a session is recorded without a session. The record is reconstructive:
 //! a failed write is logged and never fails the completion.
 
 use std::pin::Pin;
@@ -94,9 +94,7 @@ struct CompletionAccount {
     error: Option<String>,
     interrupted: bool,
     /// The provider's own account of the response: its raw stop reason,
-    /// usage and the size of each kind of content block. It names a
-    /// response that ran out of tokens while reasoning even where the
-    /// adapter reports it as empty rather than as cut off.
+    /// usage and the size of each kind of content block.
     provider_witness: Option<swage_core::ProviderResponseWitness>,
 }
 
@@ -171,10 +169,12 @@ impl CompletionAccount {
                 // The witness carries the provider's own totals, where a
                 // stream's usage chunks may report only part (Anthropic's
                 // carry no input count): take the larger of each, never both.
-                let input = self.input_tokens.get_or_insert(0);
-                *input = (*input).max(witness.usage.input_tokens);
-                let output = self.output_tokens.get_or_insert(0);
-                *output = (*output).max(witness.usage.output_tokens);
+                if let Some(usage) = &witness.usage {
+                    let input = self.input_tokens.get_or_insert(0);
+                    *input = (*input).max(usage.input_tokens);
+                    let output = self.output_tokens.get_or_insert(0);
+                    *output = (*output).max(usage.output_tokens);
+                }
                 self.provider_witness = Some(witness.clone());
             }
             StreamChunk::ProviderAttempt(_)
@@ -210,7 +210,7 @@ impl CompletionAccount {
             .collect();
     }
 
-    fn event(self, secret_values: Option<&[String]>) -> NewAuditEvent {
+    fn event(self, secret_values: Option<&[String]>, duration_ms: u64) -> NewAuditEvent {
         let outcome = self.outcome();
         let id = Uuid::new_v4();
         let mut returned = json!({
@@ -240,8 +240,12 @@ impl CompletionAccount {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cost_usd": self.cost,
-            "duration_ms": u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "duration_ms": duration_ms,
         });
+        if self.input_tokens.is_none() && self.output_tokens.is_none() {
+            metadata["usage_unavailable_reason"] =
+                json!("The provider did not report token usage.");
+        }
         if content_omitted {
             metadata["content_omitted"] = json!(
                 "what the completion returned is not recorded: secret redaction was unavailable"
@@ -290,14 +294,14 @@ fn mask_registered_values(value: &mut Value, secret_values: &[String]) {
 }
 
 impl CompletionRecorder {
-    async fn record(&self, account: CompletionAccount) {
+    async fn record(&self, account: CompletionAccount, duration_ms: u64) {
         let secret_values = crate::turn::registered_secret_values(&self.secret_manager)
             .await
             .inspect_err(|error| {
                 tracing::warn!(%error, "completion recorded without its content: secret redaction unavailable");
             })
             .ok();
-        let event = account.event(secret_values.as_deref());
+        let event = account.event(secret_values.as_deref(), duration_ms);
         if let Err(error) = self.storage.create_audit_event(event).await {
             tracing::warn!(%error, "failed to record a completion in the audit record");
         }
@@ -308,8 +312,10 @@ impl CompletionRecorder {
     fn record_detached(&self, account: CompletionAccount) {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
+                let duration_ms =
+                    u64::try_from(account.started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let recorder = self.clone();
-                handle.spawn(async move { recorder.record(account).await });
+                handle.spawn(async move { recorder.record(account, duration_ms).await });
             }
             Err(_) => tracing::warn!(
                 model = %account.model,
@@ -367,6 +373,9 @@ impl Stream for RecordingStream {
             Poll::Ready(Some(chunk)) => {
                 if let Some(account) = this.pending.account() {
                     account.take_chunk(chunk);
+                    if account.error.is_some() {
+                        this.pending.finish();
+                    }
                 }
             }
             Poll::Ready(None) => this.pending.finish(),
@@ -794,6 +803,57 @@ mod tests {
         assert_eq!(events[0].metadata["turn_id"], turn_id.to_string());
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stream_failure_is_recorded_during_backoff_with_usage_unavailable() {
+        use std::time::Duration;
+        use swage_provider::retry::{RetryConfig, RetryProvider};
+
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let backend = Arc::clone(&storage) as Arc<dyn Storage>;
+        let provider = RecordingProvider::new(
+            Arc::new(crate::turn::tests::MockProvider::new(vec![
+                StreamChunk::ProviderResponseWitness(swage_core::ProviderResponseWitness {
+                    http_status: 200,
+                    terminal_event: Some("error".into()),
+                    ..Default::default()
+                }),
+                StreamChunk::Error {
+                    message: "upstream disconnected".into(),
+                },
+            ])),
+            Arc::clone(&backend),
+            SecretManager::new(backend),
+        );
+        let backoff = Duration::from_secs(30);
+        let retry = RetryProvider::new(
+            provider,
+            RetryConfig {
+                max_retries: 1,
+                initial_backoff: backoff,
+                max_backoff: backoff,
+            },
+        );
+        let mut stream = retry.stream(request(None));
+        let wait_ms = loop {
+            if let StreamChunk::ProviderRetryStarted { wait_ms, .. } =
+                stream.next().await.expect("a retry was scheduled")
+            {
+                break wait_ms;
+            }
+        };
+
+        let events = completions(&storage, 1).await;
+        assert_eq!(events.len(), 1);
+        let metadata = &events[0].metadata;
+        assert_eq!(metadata["outcome"], "failed");
+        assert_eq!(metadata["error"], "upstream disconnected");
+        assert_eq!(metadata["input_tokens"], Value::Null);
+        assert_eq!(metadata["output_tokens"], Value::Null);
+        assert!(metadata["usage_unavailable_reason"].is_string());
+        assert!(metadata["duration_ms"].as_u64().unwrap() < wait_ms);
+        drop(stream);
+    }
+
     #[test]
     fn a_streams_token_counts_take_the_witness_where_its_usage_chunks_fall_short() {
         let mut account = CompletionAccount::new(&CutOffProvider::default(), None, None, true);
@@ -803,10 +863,10 @@ mod tests {
         }));
         account.take_chunk(&StreamChunk::ProviderResponseWitness(
             swage_core::ProviderResponseWitness {
-                usage: swage_core::TokenUsage {
+                usage: Some(swage_core::TokenUsage {
                     input_tokens: 40,
                     output_tokens: 5,
-                },
+                }),
                 ..Default::default()
             },
         ));

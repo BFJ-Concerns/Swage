@@ -429,8 +429,10 @@ impl AnthropicStreamWitness {
                 if let Ok(payload) = serde_json::from_str::<MessageStartPayload>(&event.data)
                     && let Some(usage) = payload.message.usage
                 {
-                    self.witness.usage.input_tokens = usage.input_tokens;
-                    self.witness.usage.output_tokens = usage.output_tokens;
+                    self.witness.usage = Some(TokenUsage {
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                    });
                 }
             }
             Some("content_block_start") => {
@@ -465,7 +467,10 @@ impl AnthropicStreamWitness {
             Some("message_delta") => {
                 if let Ok(payload) = serde_json::from_str::<MessageDeltaPayload>(&event.data) {
                     if let Some(usage) = payload.usage {
-                        self.witness.usage.output_tokens = usage.output_tokens;
+                        self.witness
+                            .usage
+                            .get_or_insert_with(TokenUsage::default)
+                            .output_tokens = usage.output_tokens;
                     }
                     if let Some(stop_reason) = payload.delta.and_then(|delta| delta.stop_reason) {
                         self.witness.stop_reason = Some(stop_reason);
@@ -500,14 +505,18 @@ impl AnthropicStreamWitness {
 
     fn terminal_chunks(self) -> [StreamChunk; 2] {
         let (witness, empty) = self.finish();
-        let finish_reason = Some(map_stop_reason(witness.stop_reason.as_deref()));
-        let terminal = if empty && witness.stop_reason.as_deref() != Some("refusal") {
+        let finish_reason = map_stop_reason(witness.stop_reason.as_deref());
+        let terminal = if empty
+            && !matches!(finish_reason, FinishReason::Refusal | FinishReason::Length)
+        {
             StreamChunk::ProviderAnomaly {
                 message: "Anthropic stream completed with an empty provider response (no visible text or tool output)"
                     .to_owned(),
             }
         } else {
-            StreamChunk::Done { finish_reason }
+            StreamChunk::Done {
+                finish_reason: Some(finish_reason),
+            }
         };
         [StreamChunk::ProviderResponseWitness(witness), terminal]
     }
@@ -838,7 +847,7 @@ impl AnthropicProvider {
                         });
                     }
                 };
-                let output_tokens = payload.usage.map(|u| u.output_tokens).unwrap_or(0);
+                let output_tokens = payload.usage?.output_tokens;
                 // input_tokens are reported in message_start; we default to 0 here
                 // since the full usage summary comes separately.
                 Some(StreamChunk::Usage(TokenUsage {
@@ -1735,7 +1744,7 @@ mod tests {
         assert_eq!(witness.request_id.as_deref(), Some("req_fixture"));
         assert_eq!(witness.terminal_event.as_deref(), Some("message_stop"));
         assert_eq!(witness.stop_reason.as_deref(), Some("end_turn"));
-        assert_eq!(witness.usage.input_tokens, 17);
+        assert_eq!(witness.usage.as_ref().unwrap().input_tokens, 17);
         assert!(witness.content_blocks.is_empty());
         assert!(matches!(
             chunks.last(),
@@ -1788,6 +1797,33 @@ mod tests {
         assert!(matches!(
             chunks.last(),
             Some(StreamChunk::ProviderAnomaly { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_response_can_end_at_the_output_limit() {
+        let chunks = fixture_chunks(vec![
+            event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            ),
+            event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"partial reasoning"}}"#,
+            ),
+            event(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":24}}"#,
+            ),
+            event("message_stop", r#"{"type":"message_stop"}"#),
+        ])
+        .await;
+
+        assert!(matches!(
+            chunks.last(),
+            Some(StreamChunk::Done {
+                finish_reason: Some(FinishReason::Length)
+            })
         ));
     }
 
@@ -1872,7 +1908,7 @@ mod tests {
             witness.terminal_event.as_deref(),
             Some("content_block_delta")
         );
-        assert_eq!(witness.usage.input_tokens, 17);
+        assert_eq!(witness.usage.as_ref().unwrap().input_tokens, 17);
         assert_eq!(
             witness.content_blocks,
             vec![ProviderContentBlockWitness {
