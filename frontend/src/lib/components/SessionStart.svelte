@@ -35,6 +35,7 @@
     onCreateTopic,
   }: Props = $props();
 
+  const topicPickerId = $props.id();
   let topicSearch = $state("");
   const matchingTopics = $derived(topics.filter(topic =>
     topic.id === selectedTopicId || topic.name.toLocaleLowerCase().includes(topicSearch.trim().toLocaleLowerCase()),
@@ -84,16 +85,16 @@
 <section class="session-start" aria-label="Start a session">
   <p class="eyebrow">New session</p>
   <div class="controls">
-    <label class="topic-choice">
-      <span>Topic</span>
+    <div class="topic-choice">
+      <label for={topicPickerId}>Topic</label>
       <input type="search" aria-label="Search start topics" placeholder="Search topics…" bind:value={topicSearch} />
-      <select aria-label="Topic" bind:value={selectedTopicId}>
+      <select id={topicPickerId} bind:value={selectedTopicId}>
         <option value="">No topic — general assistant</option>
         {#each matchingTopics as topic (topic.id)}
           <option value={topic.id}>{topic.name}</option>
         {/each}
       </select>
-    </label>
+    </div>
     <AgentPicker definitions={agentDefinitions} bind:selectedAgentId />
     <button type="button" class="start-btn" onclick={start}>Start</button>
     {#if onCreateTopic}
@@ -167,8 +168,10 @@
 
   .topic-choice {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.4rem;
+    min-width: 0;
     color: var(--ink-soft);
     font-family: var(--font-mono);
     font-size: var(--font-label-sm);
@@ -184,8 +187,12 @@
     padding: 3px 6px;
   }
 
+  .topic-choice input {
+    max-width: 100%;
+  }
+
   .topic-choice select {
-    max-width: min(40vw, 20rem);
+    max-width: min(100%, 20rem);
     cursor: pointer;
   }
 

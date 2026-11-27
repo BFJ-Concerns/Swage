@@ -259,8 +259,8 @@ describe("ambient channel control path", () => {
     vi.mocked(listTopics).mockResolvedValue([topic, empty]);
     component = await mountAppOnConversation();
     (document.querySelector('button.sessions-btn') as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(document.querySelector('select[aria-label="Topic"]')).not.toBeNull());
-    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Topic"]')!;
+    await vi.waitFor(() => expect(document.querySelector('.topic-choice select')).not.toBeNull());
+    const select = document.querySelector<HTMLSelectElement>('.topic-choice select')!;
     select.value = choice.id ?? "";
     select.dispatchEvent(new Event("change", { bubbles: true }));
     let release: ((rows: typeof summaries) => void) | undefined;

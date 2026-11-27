@@ -106,6 +106,18 @@ function buttonNamed(text: string): HTMLButtonElement {
   return button as HTMLButtonElement;
 }
 
+function topicFilter(): HTMLSelectElement {
+  return document.querySelector<HTMLSelectElement>('select[aria-label="Topic filter"]')!;
+}
+
+function filterByTopic(topicId: string): void {
+  const filter = topicFilter();
+  flushSync(() => {
+    filter.value = topicId;
+    filter.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
 describe("RecentSessions", () => {
   let component: MountedComponent | undefined;
 
@@ -192,7 +204,7 @@ describe("RecentSessions", () => {
       await vi.runOnlyPendingTimersAsync();
       expect(document.querySelector(".row.source")?.textContent).toContain("running");
       expect(document.querySelector(".row.source .interrupted")).toBeNull();
-      flushSync(() => buttonNamed("Research").click());
+      filterByTopic("research");
       await vi.runOnlyPendingTimersAsync();
       const disclosure = document.querySelector<HTMLButtonElement>(".group-summary")!;
       flushSync(() => disclosure.click());
@@ -283,15 +295,15 @@ describe("RecentSessions", () => {
     const search = document.querySelector<HTMLInputElement>('input[aria-label="Search topic filters"]');
     expect(search).not.toBeNull();
     flushSync(() => { search!.value = "59"; search!.dispatchEvent(new Event("input", { bubbles: true })); });
-    expect(document.querySelector('[aria-label="Topic filter"]')?.textContent).not.toContain("Topic 58");
-    flushSync(() => buttonNamed("Topic 59").click());
+    expect(Array.from(topicFilter().options, (option) => option.text)).toEqual(["All sessions", "Topic 59"]);
+    filterByTopic("t-59");
     await settle();
     expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith("t-59", false);
-    flushSync(() => buttonNamed("All sessions").click());
+    filterByTopic("");
     await settle();
     expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith(null, false);
     flushSync(() => { search!.value = ""; search!.dispatchEvent(new Event("input", { bubbles: true })); });
-    expect(document.querySelectorAll('.filter')).toHaveLength(61);
+    expect(topicFilter().options).toHaveLength(61);
   });
 
   it("narrows to a topic with the filter and returns to all sessions", async () => {
@@ -307,13 +319,13 @@ describe("RecentSessions", () => {
     await settle();
     expect(document.querySelectorAll(".entry")).toHaveLength(2);
 
-    flushSync(() => buttonNamed("Ops").click());
+    filterByTopic("topic-ops");
     await settle();
     expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith("topic-ops", false);
     expect(document.querySelectorAll(".entry")).toHaveLength(1);
-    expect(buttonNamed("Ops").getAttribute("aria-pressed")).toBe("true");
+    expect(topicFilter().selectedOptions[0]?.text).toBe("Ops");
 
-    flushSync(() => buttonNamed("All sessions").click());
+    filterByTopic("");
     await settle();
     expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith(null, false);
     expect(document.querySelectorAll(".entry")).toHaveLength(2);
