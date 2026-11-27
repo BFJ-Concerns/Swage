@@ -16,6 +16,7 @@ pub mod message;
 pub mod message_rendering;
 pub mod messaging;
 pub mod output_limit;
+pub mod quoted_text;
 pub mod request;
 pub mod runtime;
 pub mod scope;
