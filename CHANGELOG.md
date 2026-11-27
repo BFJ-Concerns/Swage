@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- The audit record holds every tool call that ran, with its arguments and result, and every completion the gateway asked a provider for, with the model, why it stopped (a response cut off at its length limit included), the tokens and what it returned; both are attributed to the session and turn they ran in. The operator history lists them with the rest of the record and shows what each returned.
 - A `model_list` tool lists the models the catalogue serves to the session: each id with its aliases, the provider's name for it, its vendor family (`claude`, `gpt` or `gemini`) where the name shows one, and the effort levels it serves without clamping, so an agent writing a workflow can name a model of another family without being told the ids.
 - A workflow `agent()` or `agentStart()` call may declare `minEffort`, the least effort it accepts. Where its model would serve it below that — a clamp to a lower level, no effort set, or a model with no effort control — the call fails with `EffortFloorError` before any worker starts, and the refusal is journalled with the call.
 

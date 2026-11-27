@@ -1198,6 +1198,115 @@ mod tests {
         assert_eq!(child_tool_calls[0].provider_round, 2);
     }
 
+    /// A branch copies its ancestor's settled tool calls; the copies are not
+    /// calls that ran again, so the audit record gains no tool_call event.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn branching_records_no_tool_call_event_for_copied_calls() {
+        let (storage, _, session_id) = make_session().await;
+        let parent = ThreadStore::create(&storage, new_thread(session_id))
+            .await
+            .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: parent.id,
+                agent_id: "agent-1".into(),
+                state: TurnState::Processing,
+                user_input: Some("use a tool".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .create_tool_call(NewToolCall {
+                execution: None,
+                turn_id: turn.id,
+                agent_id: "agent-1".into(),
+                call_id: "call_1".into(),
+                tool: "shell".into(),
+                arguments: r#"{"cmd":"pwd"}"#.into(),
+                model_arguments: compact_tool_arguments_for_model(
+                    &serde_json::json!({"cmd": "pwd"}),
+                ),
+                result: Some("workspace".into()),
+                model_result: Some(compact_tool_result_for_model("workspace", false)),
+                status: Some("success".into()),
+                duration_ms: Some(12),
+                truncated: false,
+                total_bytes: Some(9),
+                provider_round: 1,
+                position: 0,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .update_turn_state(turn.id, TurnState::Completed)
+            .await
+            .unwrap();
+        for (position, (role, origin)) in [
+            (Role::User, crate::model::MessageOrigin::User),
+            (Role::Assistant, crate::model::MessageOrigin::Assistant),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            storage
+                .create_message(NewMessage {
+                    thread_id: parent.id,
+                    attachments: Vec::new(),
+                    turn_id: Some(turn.id),
+                    role,
+                    origin,
+                    delivered: false,
+                    content: "text".into(),
+                    position: position as i32,
+                    agent_id: "agent-1".into(),
+                })
+                .await
+                .unwrap();
+        }
+        let tool_call_events = || async {
+            crate::AuditStore::list_audit_events_filtered(
+                &storage,
+                crate::AuditEventFilter {
+                    event_kind: Some("tool_call".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .len()
+        };
+        assert_eq!(tool_call_events().await, 1, "the call that ran");
+
+        let assistant = storage
+            .list_messages_by_thread(parent.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|message| message.role == Role::Assistant)
+            .unwrap();
+        let branch = storage
+            .create_branch(parent.id, assistant.id)
+            .await
+            .unwrap();
+        let child_turn = &storage
+            .list_turns_by_thread(branch.child_thread_id)
+            .await
+            .unwrap()[0];
+        assert_eq!(
+            storage
+                .list_tool_calls_by_turn(child_turn.id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the branch carries the call"
+        );
+        assert_eq!(tool_call_events().await, 1, "and records it no second time");
+    }
+
     /// A branch keeps a replay the raw result cannot rebuild: the approval
     /// account before the envelope and the flag that frames a delivered
     /// result for the model.

@@ -227,7 +227,7 @@ pub(crate) fn redact_serialised_text(text: &mut String, secret_values: &[String]
     changed
 }
 
-pub(super) fn redact_secret_values(
+pub(crate) fn redact_secret_values(
     value: &mut serde_json::Value,
     secret_values: &[String],
 ) -> bool {
