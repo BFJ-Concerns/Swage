@@ -194,7 +194,7 @@
     {#if activeBranchAbandoned}
       <p class="thread-notice" role="status">This branch is abandoned — it takes no further messages. Switch to the main thread or another branch to continue.</p>
     {:else if activeStream?.pendingApproval ?? streamingStore.pendingApproval}
-      <ApprovalCard approval={activeStream?.pendingApproval ?? streamingStore.pendingApproval!} />
+      <ApprovalCard approval={activeStream?.pendingApproval ?? streamingStore.pendingApproval!} inTopic={activeConversation?.topic_id != null} />
     {:else}
       <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={composerModel} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
     {/if}

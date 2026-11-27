@@ -8,9 +8,15 @@
 
   interface Props {
     approval: PendingApproval;
+    /** Whether the session runs under a topic. A session in the general
+     *  scope has no topic to allow a tool for, so only the global permanent
+     *  approval is offered there for a tool; a location is kept against the
+     *  scope itself and is offered either way. */
+    inTopic?: boolean;
   }
 
-  let { approval }: Props = $props();
+  let { approval, inTopic = true }: Props = $props();
+  const offerTopicScope = $derived(inTopic || approval.kind === "location");
 
   type ApprovalAction =
     | "allow"
@@ -90,42 +96,54 @@
       {busy === "allow-session" ? "Allowing…" : "Allow for this session"}
     </button>
 
-    <div class="split-action">
+    {#if offerTopicScope}
+      <div class="split-action">
+        <button
+          type="button"
+          class="btn split-main"
+          onclick={() => decide("allow-permanent")}
+          disabled={busy !== null}
+          title="Persist this tool as allowed for this topic"
+        >
+          {busy === "allow-permanent" ? "Allowing…" : "Allow permanently"}
+        </button>
+        <button
+          type="button"
+          class="btn split-caret"
+          onclick={() => (permanentMenuOpen = !permanentMenuOpen)}
+          disabled={busy !== null}
+          aria-haspopup="menu"
+          aria-expanded={permanentMenuOpen}
+          title="More permanent approval scopes"
+        >
+          ▾
+        </button>
+        {#if permanentMenuOpen}
+          <div class="scope-menu" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              class="menu-item"
+              onclick={() => decide("allow-global")}
+            >
+              {busy === "allow-global"
+                ? "Allowing…"
+                : "Allow permanently globally"}
+            </button>
+          </div>
+        {/if}
+      </div>
+    {:else}
       <button
         type="button"
-        class="btn split-main"
-        onclick={() => decide("allow-permanent")}
+        class="btn"
+        onclick={() => decide("allow-global")}
         disabled={busy !== null}
-        title="Persist this tool as allowed for this topic"
+        title="Persist this tool as allowed everywhere"
       >
-        {busy === "allow-permanent" ? "Allowing…" : "Allow permanently"}
+        {busy === "allow-global" ? "Allowing…" : "Allow permanently globally"}
       </button>
-      <button
-        type="button"
-        class="btn split-caret"
-        onclick={() => (permanentMenuOpen = !permanentMenuOpen)}
-        disabled={busy !== null}
-        aria-haspopup="menu"
-        aria-expanded={permanentMenuOpen}
-        title="More permanent approval scopes"
-      >
-        ▾
-      </button>
-      {#if permanentMenuOpen}
-        <div class="scope-menu" role="menu">
-          <button
-            type="button"
-            role="menuitem"
-            class="menu-item"
-            onclick={() => decide("allow-global")}
-          >
-            {busy === "allow-global"
-              ? "Allowing…"
-              : "Allow permanently globally"}
-          </button>
-        </div>
-      {/if}
-    </div>
+    {/if}
 
     <button
       type="button"

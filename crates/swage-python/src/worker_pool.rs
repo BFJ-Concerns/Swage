@@ -89,26 +89,40 @@ impl WorkerPool {
         })
     }
 
-    /// Caller-scoped workers are never taken from the unscoped warm pool.
+    /// A worker for one turn's call. A call with neither a sandbox policy
+    /// nor a recording proxy is what a warm worker already is, so it takes
+    /// one. A scoped call starts its own worker and leaves the warm pool as
+    /// it is, ending a warm worker only for its permit when no other is free.
     pub async fn acquire_for_turn(
         self: &Arc<Self>,
         policy: Option<swage_sandbox::SandboxConfig>,
         egress: Option<swage_sandbox::EgressSetup>,
     ) -> Result<WorkerLease, PythonWorkerError> {
-        if self.warm_target > 0 {
-            // Acquire through the pool so an in-flight warm-up cannot hold
-            // the last permit while a scoped caller waits for it forever.
-            let mut lease = self.acquire().await?;
-            lease.worker_mut().terminate().await;
-            lease.worker = Some(self.runtime.spawn_worker_for_turn(policy, egress).await?);
-            return Ok(lease);
+        if policy.is_none() && egress.is_none() && !self.spawn_sandboxed {
+            return self.acquire().await;
         }
-        let permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| PythonWorkerError::Protocol("worker semaphore closed".into()))?;
+        let permit = match self.semaphore.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            // Every permit is out. Waiting on the pool rather than the
+            // semaphore alone means an idle warm worker, or one still
+            // warming, gives its permit up instead of holding it while
+            // this caller waits for it forever.
+            Err(_) if self.warm_target > 0 => {
+                let mut lease = self.acquire().await?;
+                lease.worker_mut().terminate().await;
+                lease.worker = None;
+                lease
+                    .permit
+                    .take()
+                    .expect("an acquired lease holds a permit")
+            }
+            Err(_) => self
+                .semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| PythonWorkerError::Protocol("worker semaphore closed".into()))?,
+        };
         let worker = self.runtime.spawn_worker_for_turn(policy, egress).await?;
         Ok(WorkerLease {
             pool: Arc::downgrade(self),
@@ -651,5 +665,75 @@ print(urllib.request.urlopen('http://{address}/recorded', timeout=3).read().deco
             1,
             "warm-up should stop retrying after the first persistent spawn failure",
         );
+    }
+
+    /// A turn's call starts one interpreter at most: an unscoped call runs
+    /// on the warm worker, and a scoped one starts its own and leaves the
+    /// warm worker idle.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_turns_call_starts_one_interpreter_at_most() {
+        use swage_sandbox::{
+            EgressConnection, EgressPolicy, EgressRecorder, EgressRequest, EgressSetup,
+            EgressVerdict,
+        };
+        struct Closed;
+        #[async_trait::async_trait]
+        impl EgressPolicy for Closed {
+            async fn decide(&self, _: &EgressRequest) -> EgressVerdict {
+                EgressVerdict::Refused {
+                    reason: "fixture".into(),
+                }
+            }
+        }
+        struct Discard;
+        #[async_trait::async_trait]
+        impl EgressRecorder for Discard {
+            async fn record(&self, _: EgressConnection) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let config = PythonExecuteToolConfig {
+            require_sandbox: false,
+            warm_target: 1,
+            max_workers: 2,
+            ..PythonExecuteToolConfig::default()
+        };
+        let pool = WorkerPool::new(Arc::new(
+            PythonWorkerRuntime::new(config).expect("test runtime should resolve Python"),
+        ))
+        .unwrap();
+        let idle_pid = || async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(idle) = pool.state.lock().await.idle.front() {
+                        return idle.worker.pid();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("a warm worker")
+        };
+
+        let warm = idle_pid().await;
+        let mut lease = pool.acquire_for_turn(None, None).await.unwrap();
+        assert_eq!(lease.worker_mut().pid(), warm, "the warm worker serves");
+        lease.mark_spent().await;
+
+        let warm = idle_pid().await;
+        let mut lease = pool
+            .acquire_for_turn(
+                None,
+                Some(EgressSetup {
+                    policy: Arc::new(Closed),
+                    recorder: Arc::new(Discard),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_ne!(lease.worker_mut().pid(), warm);
+        assert_eq!(idle_pid().await, warm, "the warm worker is left idle");
+        lease.mark_spent().await;
     }
 }

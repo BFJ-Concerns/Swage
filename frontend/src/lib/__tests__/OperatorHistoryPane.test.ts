@@ -188,6 +188,12 @@ describe("OperatorHistoryPane", () => {
       rows: [["Memory curation", "10", "unset"], ["Session archiving", "7", "unset"]],
     },
     {
+      name: "judge model",
+      prior: { judge: { model: "" } },
+      next: { judge: { model: "haiku" } },
+      rows: [["Judge model", '""', '"haiku"']],
+    },
+    {
       name: "image reference schemes",
       prior: { attachments: { accepted_schemes: ["https", "data"] } },
       next: { attachments: { accepted_schemes: ["https"] } },

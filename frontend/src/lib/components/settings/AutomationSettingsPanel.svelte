@@ -1,8 +1,8 @@
 <script lang="ts">
   import { SETTINGS_LABELS } from "../../settings-labels";
   import type { SettingsResponse } from "../../types";
-  interface Props { archiveDelayError?: string | null; settings: SettingsResponse; onValidation?: (bundlesInvalid: boolean) => void; }
-  let { archiveDelayError = null, settings = $bindable(), onValidation }: Props = $props();
+  interface Props { archiveDelayError?: string | null; settings: SettingsResponse; onValidation?: (bundlesInvalid: boolean) => void; onNavigate?: (path: string) => void; }
+  let { archiveDelayError = null, settings = $bindable(), onValidation, onNavigate }: Props = $props();
   const BUNDLES_SHAPE_MESSAGE = "Tool bundles must be a JSON object of string arrays.";
   const id = $props.id();
   let bundlesError = $state<string | null>(null);
@@ -39,7 +39,7 @@
 
 </script>
 
-<div class="field"><div class="key">Judge model<small>The model that answers for a request an unattended session's grants do not cover — a file outside its granted locations — allowing or refusing it with a reason. Name a model from the catalogue; leave empty for no judge, and such requests are refused.</small></div><div class="val"><input type="text" class="text" aria-label="Judge model" bind:value={settings.judge.model} oninput={changed} placeholder="none"/></div></div>
+<div class="field"><div class="key">{SETTINGS_LABELS["judge.model"]}<small>The model that answers for a request an unattended session's grants do not cover — a file outside its granted locations — allowing or refusing it with a reason. Name a model from the catalogue; leave empty for no judge, and such requests are refused.</small></div><div class="val"><input type="text" class="text" aria-label={SETTINGS_LABELS["judge.model"]} bind:value={settings.judge.model} oninput={changed} placeholder="none"/></div></div>
 <div class="field"><div class="key">{SETTINGS_LABELS["attachments.accepted_schemes"]}<small>Allowed URI schemes, one per line without a colon. Defaults: https and data. Saved changes apply to new turns; provider restrictions still apply.</small></div><div class="val"><textarea class="text" rows="3" aria-label="Accepted image reference schemes" value={lines(settings.attachments.accepted_schemes)} oninput={(event) => { settings.attachments.accepted_schemes = parseLines(event.currentTarget.value); changed(); }}></textarea></div></div>
 <div class="field"><div class="key">{SETTINGS_LABELS["memory.curator_idle_minutes"]}<small>Minutes a conversation you are in must have been idle before the curator reads what was said into your memory.</small></div><div class="val"><input type="number" class="text small" aria-label="Curate memory after idle minutes" bind:value={settings.memory.curator_idle_minutes} oninput={changed} min="1" max="10080" placeholder="10"/></div></div>
 <div class="field"><div class="key">Delegation depth<small>Maximum child levels in a delegation chain, including cycles. Changes apply to new chains.</small></div><div class="val"><input type="number" class="text small" aria-label="Maximum delegation depth" bind:value={settings.sessions.max_delegation_depth} oninput={changed} min="1" step="1" placeholder="4"/></div></div>
@@ -60,7 +60,7 @@
 <div class="field"><div class="key"><label for={`${id}-allow`}>{SETTINGS_LABELS["tool_permissions.allow"]}</label><small>One rule per line. Use * for broad availability.</small></div><div class="val"><textarea class="text" rows="4" id={`${id}-allow`} value={lines(settings.tool_permissions.allow)} oninput={(event)=>{settings.tool_permissions.allow=parseLines(event.currentTarget.value);changed();}}></textarea></div></div>
 <div class="field"><div class="key"><label for={`${id}-deny`}>{SETTINGS_LABELS["tool_permissions.deny"]}</label><small>One denied tool name or pattern per line.</small></div><div class="val"><textarea class="text" rows="4" id={`${id}-deny`} value={lines(settings.tool_permissions.deny)} oninput={(event)=>{settings.tool_permissions.deny=parseLines(event.currentTarget.value);changed();}}></textarea></div></div>
 <div class="field"><div class="key"><label for={`${id}-bundles`}>{SETTINGS_LABELS["tool_permissions.bundles"]}</label><small>JSON object mapping bundle names to tool arrays.</small></div><div class="val val-stack"><textarea class="text code" rows="7" id={`${id}-bundles`} value={invalidBundlesDraft ?? JSON.stringify(settings.tool_permissions.bundles,null,2)} spellcheck="false" aria-label={SETTINGS_LABELS["tool_permissions.bundles"]} aria-invalid={bundlesError ? "true" : undefined} aria-describedby={bundlesError ? "tool-bundles-error" : undefined} oninput={(event)=>updateBundles(event.currentTarget.value)}></textarea>{#if bundlesError}<small id="tool-bundles-error" role="alert">{bundlesError}</small>{/if}</div></div>
-<p>Sandbox and approval-gated tools are configured in <a href="/settings/security">Security settings</a>.</p>
+<p>Sandbox and approval-gated tools are configured in <a href="/settings/security" onclick={(event) => { if (!onNavigate || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); onNavigate("/settings/security"); }}>Security settings</a>.</p>
 
 <style>
   .search-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }

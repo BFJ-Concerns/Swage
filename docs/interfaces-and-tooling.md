@@ -67,7 +67,9 @@ once:
 
 1. On the gateway's machine, run `swage gateway pair`. It prints a one-time
    code that expires after ten minutes; codes are issued only to requests
-   from that machine.
+   from that machine. Five wrong codes in a row spend every outstanding
+   code, so a code cannot be found by trying them all; if a code you
+   entered is refused as not found, issue a new one.
 2. Enter the code on the other device:
    - **Web UI** — the page shows a pairing prompt when the gateway refuses
      it. Pairing sets a cookie the browser keeps for 400 days.
@@ -589,8 +591,10 @@ identity, the gateway secret its credential resolves against, and the
 workspace it operates in.
 
 **Pairing** walks through seven steps. Steps 1 and 2 happen on the gateway
-host; steps 3 and 5 are API calls from wherever is convenient; steps 4, 6
-and 7 happen on the device machine.
+host; steps 3 and 5 are API calls made from the gateway host, or, when the
+gateway is bound beyond loopback, from a client paired with it (see
+[Pairing beyond loopback](#pairing-beyond-loopback)); steps 4, 6 and 7
+happen on the device machine.
 
 1. **Create the token file on the gateway host.** Write a plain-text file
    holding only the shared token value (a trailing newline is fine — the

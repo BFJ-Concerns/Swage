@@ -5,14 +5,17 @@
 //! every request from beyond loopback for its token — a bearer header, the
 //! `X-Swage-Token` header, the `swage_token` cookie a paired browser carries,
 //! or a `token` query parameter for a WebSocket a browser cannot add headers
-//! to. A request from loopback is always admitted: the operator's own machine
-//! is where pairing codes are issued and where the CLI runs.
+//! to. A request from the gateway's own machine — over loopback, or from the
+//! one address the gateway is bound to — is always admitted: that machine is
+//! where pairing codes are issued and where the CLI runs.
 //!
 //! The token lives in one file under the data root, generated once when the
 //! gateway first starts without one. A client gets it by redeeming a
-//! one-time pairing code that only a loopback request can issue, and the
-//! gateway sets it as a cookie on pairing so a browser remembers it without
-//! the page keeping it. Relaxing the gate — `warn` admits and logs, `off`
+//! one-time pairing code that only a request from the gateway's own machine
+//! can issue, and the gateway sets it as a cookie on pairing so a browser
+//! remembers it without the page keeping it. A few wrong codes spend every
+//! outstanding code, so a code cannot be found by trying them all; the
+//! person pairing issues a new one. Relaxing the gate — `warn` admits and logs, `off`
 //! admits — is install-wide configuration (`[server] access`), recorded like
 //! any other security relaxation and shown as relaxed.
 
@@ -48,6 +51,9 @@ const TOKEN_COOKIE_MAX_AGE_SECS: u32 = 400 * 24 * 60 * 60;
 pub const TOKEN_HEADER: &str = "x-swage-token";
 /// How long an issued pairing code may wait to be redeemed.
 pub const PAIRING_CODE_LIFETIME: Duration = Duration::minutes(10);
+/// How many wrong codes the pairing route takes before it spends every
+/// outstanding code. Issuing a code starts the count again.
+pub const WRONG_PAIRING_CODES_ALLOWED: u32 = 5;
 /// Routes every client must reach before it is paired: liveness, pairing
 /// itself, and the device link, whose first frame carries the device's
 /// registered shared token and is refused without it — a device client has
@@ -71,7 +77,14 @@ pub struct AccessGate {
     /// a binding to a LAN address alone does not reach over loopback.
     bound_address: Option<IpAddr>,
     token: Option<String>,
-    pairing_codes: Mutex<HashMap<String, DateTime<Utc>>>,
+    pairing: Mutex<PairingCodes>,
+}
+
+/// The outstanding pairing codes and the wrong codes tried against them.
+#[derive(Debug, Default)]
+struct PairingCodes {
+    expiry_by_code: HashMap<String, DateTime<Utc>>,
+    wrong_codes: u32,
 }
 
 impl AccessGate {
@@ -82,7 +95,7 @@ impl AccessGate {
             beyond_loopback: false,
             bound_address: None,
             token: None,
-            pairing_codes: Mutex::new(HashMap::new()),
+            pairing: Mutex::default(),
         }
     }
 
@@ -95,7 +108,7 @@ impl AccessGate {
             beyond_loopback,
             bound_address: specific_address(host),
             token: Some(token),
-            pairing_codes: Mutex::new(HashMap::new()),
+            pairing: Mutex::default(),
         })
     }
 
@@ -105,7 +118,7 @@ impl AccessGate {
             beyond_loopback: !host_is_loopback(host),
             bound_address: specific_address(host),
             token: Some(token.to_owned()),
-            pairing_codes: Mutex::new(HashMap::new()),
+            pairing: Mutex::default(),
         }
     }
 
@@ -144,21 +157,35 @@ impl AccessGate {
     pub fn issue_pairing_code(&self) -> PairingCodeResponse {
         let code = pairing_code();
         let expires_at = Utc::now() + PAIRING_CODE_LIFETIME;
-        let mut codes = self.pairing_codes.lock().unwrap_or_else(|e| e.into_inner());
-        codes.retain(|_, expiry| *expiry > Utc::now());
-        codes.insert(code.clone(), expires_at);
+        let mut pairing = self.pairing.lock().unwrap_or_else(|e| e.into_inner());
+        pairing
+            .expiry_by_code
+            .retain(|_, expiry| *expiry > Utc::now());
+        pairing.expiry_by_code.insert(code.clone(), expires_at);
+        pairing.wrong_codes = 0;
         PairingCodeResponse {
             pairing_code: code,
             expires_at,
         }
     }
 
-    /// Redeem a pairing code for the token; a code is good once.
+    /// Redeem a pairing code for the token; a code is good once, and
+    /// [`WRONG_PAIRING_CODES_ALLOWED`] wrong codes spend every outstanding one.
     pub fn redeem_pairing_code(&self, code: &str) -> Result<String, ApiError> {
-        let mut codes = self.pairing_codes.lock().unwrap_or_else(|e| e.into_inner());
-        let expires_at = codes.remove(code.trim()).ok_or_else(|| {
-            ApiError::validation("pairing code was not found or has already been used".into())
-        })?;
+        let mut pairing = self.pairing.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(expires_at) = pairing.expiry_by_code.remove(code.trim()) else {
+            pairing.wrong_codes += 1;
+            if pairing.wrong_codes >= WRONG_PAIRING_CODES_ALLOWED {
+                pairing.expiry_by_code.clear();
+                pairing.wrong_codes = 0;
+                return Err(ApiError::validation(
+                    "too many wrong pairing codes: every outstanding code is now spent; issue a new one on the gateway's machine with `swage gateway pair`".into(),
+                ));
+            }
+            return Err(ApiError::validation(
+                "pairing code was not found or has already been used".into(),
+            ));
+        };
         if expires_at < Utc::now() {
             return Err(ApiError::validation("pairing code has expired".into()));
         }
@@ -499,6 +526,39 @@ mod tests {
         assert!(again.message().contains("already been used"));
         let unknown = gate.redeem_pairing_code("0000-0000").unwrap_err();
         assert!(unknown.message().contains("not found"));
+    }
+
+    #[test]
+    fn a_few_wrong_codes_spend_every_outstanding_code() {
+        let gate = AccessGate::with_token("0.0.0.0", "secret-token");
+        let issued = gate.issue_pairing_code();
+        let wrong = if issued.pairing_code == "0000-0000" {
+            "0000-0001"
+        } else {
+            "0000-0000"
+        };
+        for _ in 1..WRONG_PAIRING_CODES_ALLOWED {
+            assert!(gate.redeem_pairing_code(wrong).is_err());
+        }
+        let spent = gate.redeem_pairing_code(wrong).unwrap_err();
+        assert!(
+            spent.message().contains("issue a new one"),
+            "{}",
+            spent.message()
+        );
+        assert!(gate.redeem_pairing_code(&issued.pairing_code).is_err());
+
+        // A code issued afterwards starts the count again and redeems.
+        let fresh = gate.issue_pairing_code();
+        for _ in 1..WRONG_PAIRING_CODES_ALLOWED {
+            assert!(gate.redeem_pairing_code(wrong).is_err());
+        }
+        if fresh.pairing_code != wrong {
+            assert_eq!(
+                gate.redeem_pairing_code(&fresh.pairing_code).unwrap(),
+                "secret-token"
+            );
+        }
     }
 
     #[test]

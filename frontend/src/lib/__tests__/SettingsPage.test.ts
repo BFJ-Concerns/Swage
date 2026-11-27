@@ -529,8 +529,50 @@ describe("SettingsPage", () => {
     await waitForSaveCall();
     const body = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0];
     expect(body).not.toHaveProperty("sandbox");
+    expect(body).not.toHaveProperty("restart_required");
+    expect(body).not.toHaveProperty("can_restart");
     expect(body.tool_permissions).not.toHaveProperty("require_approval");
     expect(body.tool_permissions?.bundles).toEqual({ inspect: ["file_read"] });
+  });
+
+  it("leaves an unsaved edit elsewhere on the page as it was when Security saves", async () => {
+    const reading: SecuritySettingsResponse = {
+      available_tools: ["shell"], scope: { kind: "install" as const },
+      effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "token" as const, require_approval: [] },
+      overrides: {}, relaxed: [],
+    };
+    vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);
+    vi.mocked(settingsApi.saveInstallSecuritySettings).mockResolvedValue({
+      ...reading, effective: { ...reading.effective, sandbox_enabled: false }, overrides: { sandbox_enabled: false },
+    });
+    const page = createClassComponent({ component: SettingsPage, target: document.body, props: { tab: "automation" as "automation" | "security" } });
+    await flushUi();
+    try {
+      const depth = document.querySelector<HTMLInputElement>('[aria-label="Maximum delegation depth"]')!;
+      depth.value = "0"; depth.dispatchEvent(new Event("input", { bubbles: true }));
+      await flushUi();
+      page.$set({ tab: "security" }); await flushUi();
+      const unsandboxed = emptySettings();
+      unsandboxed.sandbox.enabled = false;
+      vi.mocked(settingsApi.fetchSettings).mockResolvedValue(unsandboxed);
+      const sandbox = document.querySelector<HTMLSelectElement>('[aria-label="Sandbox for the install"]')!;
+      sandbox.value = "off"; sandbox.dispatchEvent(new Event("change", { bubbles: true }));
+      buttonNamed("Save security settings").click(); await flushUi();
+      page.$set({ tab: "automation" }); await flushUi();
+      expect(document.querySelector<HTMLInputElement>('[aria-label="Maximum delegation depth"]')!.value).toBe("0");
+    } finally { page.$destroy(); }
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("opens Security from the Automation link without leaving the app", async () => {
+    const onNavigate = vi.fn();
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation", onNavigate } });
+    await flushUi();
+    const link = Array.from(document.querySelectorAll("a")).find((a) => a.textContent === "Security settings")!;
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    link.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+    expect(onNavigate).toHaveBeenCalledWith("/settings/security");
   });
 
   it("edits install security through its own reading and saves picker timeouts and removals", async () => {
@@ -580,6 +622,30 @@ describe("SettingsPage", () => {
     await flushUi();
     expect(document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')?.value).toBe("42");
     expect(document.querySelector('[aria-label="Remove file_write approval"]')).toBeNull();
+  });
+
+  it("refuses an approval timeout too large to save instead of saving without it", async () => {
+    const reading: SecuritySettingsResponse = {
+      available_tools: ["shell"], scope: { kind: "install" as const },
+      effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "token" as const, require_approval: [] },
+      overrides: {}, relaxed: [],
+    };
+    vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);
+    vi.mocked(settingsApi.saveInstallSecuritySettings).mockResolvedValue(reading);
+    component = mount(SettingsPage, { target: document.body, props: { tab: "security" } });
+    await flushUi();
+    const approvals = document.querySelector<HTMLSelectElement>('[aria-label="Approval prompts for the install"]')!;
+    approvals.value = "own"; approvals.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    const tool = document.querySelector<HTMLSelectElement>('[aria-label="Tool to require approval"]')!;
+    tool.value = "shell"; tool.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi(); buttonNamed("Add tool").click(); await flushUi();
+    const timeout = document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')!;
+    timeout.value = "9007199254740992"; timeout.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    expect(timeout.validity.rangeOverflow).toBe(true);
+    buttonNamed("Save security settings").click(); await flushUi();
+    expect(settingsApi.saveInstallSecuritySettings).not.toHaveBeenCalled();
   });
 
   it("refuses invalid provider URL drafts before autosave and accepts corrections or clearing", async () => {
