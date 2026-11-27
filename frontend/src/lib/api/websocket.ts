@@ -206,7 +206,9 @@ export function createWebSocketClient(
       if (ws !== socket) return;
       if (pendingFrames.length > 0) {
         pendingFrames = [];
-        emitDeliveryFailure();
+        // After the upgrade the gateway may already have read these frames.
+        // Reconnect to recover their state without reporting failure or resending.
+        if (!opened) emitDeliveryFailure();
       }
       emitStatus("reconnecting");
       if (!opened) {

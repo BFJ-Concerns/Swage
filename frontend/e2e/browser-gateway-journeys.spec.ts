@@ -4,7 +4,7 @@ import { access, readFile, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
 import { makeScratchDir } from "./scratch-root.mjs";
 import { unusedPorts } from "./unused-ports.mjs";
 
@@ -301,11 +301,72 @@ test("reconnects mid-stream and restores the completed conversation", async ({ p
   });
   await expect(page.getByText("Reconnecting")).toBeVisible();
   await expect(page.getByText("Reconnecting")).not.toBeVisible();
-  await expect(page.getByText(
+  await expect(page.getByLabel("Assistant message")).toContainText(
     "First half before disconnect. Second half after reconnect.",
-    { exact: true },
-  )).toBeVisible();
+  );
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+});
+
+test("keeps an accepted message sent across a disconnect before the first server event", async ({ page }) => {
+  const prompt = "accepted before disconnect";
+  let openingSocket: WebSocketRoute | undefined;
+  await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
+    const gateway = socket.connectToServer();
+    if (openingSocket) return;
+    openingSocket = gateway;
+    // The request reaches the gateway, but this connection loses its replies.
+    gateway.onMessage(() => {});
+  });
+  await send(page, prompt);
+  await expect.poll(async () => (await providerRequests()).some((request) => request.prompt === prompt)).toBe(true);
+  await openingSocket!.close({ code: 4000 });
+  await expect(page.getByText("Reconnecting")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Assistant message")).toContainText("The accepted request finished.");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+});
+
+test("stops generating when reconnect recovers an output-limited reply", async ({ page }) => {
+  await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
+    const gateway = socket.connectToServer();
+    gateway.onMessage((message) => {
+      if (JSON.parse(String(message)).type === "turn_complete") {
+        void socket.close({ code: 4000 });
+      } else {
+        socket.send(message);
+      }
+    });
+  });
+  await send(page, "limit this turn");
+  await expect(page.getByText("Reconnecting")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  const reply = page.getByLabel("Assistant message");
+  await expect(reply).toContainText("Partial response at the output limit.");
+  await expect(reply).toContainText("Response incomplete");
+});
+
+test("clears the approval when reconnect recovers a stopped request with no reply", async ({ page, context }) => {
+  let openingSocket: WebSocketRoute | undefined;
+  await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
+    const gateway = socket.connectToServer();
+    openingSocket ??= gateway;
+  });
+  await send(page, "approve a tool");
+  const approval = page.getByRole("dialog", { name: "Approval required" });
+  await expect(approval).toBeVisible();
+
+  const other = await context.newPage();
+  try {
+    await other.goto(page.url());
+    const stop = other.getByRole("button", { name: "Stop", exact: true });
+    await expect(stop).toBeVisible();
+    await openingSocket!.close({ code: 4000 });
+    await stop.click();
+    await expect(page.getByText("Cancelled before a reply")).toBeVisible();
+    await expect(approval).toBeHidden();
+  } finally {
+    await other.close();
+  }
 });
 
 test("approves a pending tool call through the rendered UI", async ({ page }) => {

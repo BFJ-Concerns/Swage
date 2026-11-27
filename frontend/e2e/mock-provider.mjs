@@ -7,7 +7,7 @@ function event(response, type, data) {
   response.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-async function textResponse(response, chunks, pause = 30) {
+async function textResponse(response, chunks, pause = 30, stopReason = "end_turn") {
   event(response, "message_start", { type: "message_start", message: { usage: { input_tokens: 4, output_tokens: 0 } } });
   event(response, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
   for (const text of chunks) {
@@ -15,7 +15,7 @@ async function textResponse(response, chunks, pause = 30) {
     await delay(pause);
   }
   event(response, "content_block_stop", { type: "content_block_stop", index: 0 });
-  event(response, "message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: chunks.length } });
+  event(response, "message_delta", { type: "message_delta", delta: { stop_reason: stopReason }, usage: { output_tokens: chunks.length } });
   event(response, "message_stop", { type: "message_stop" });
   response.end();
 }
@@ -72,7 +72,11 @@ async function handle(request, response) {
     : lastContent?.filter((block) => block.type === "text").map((block) => block.text).join("");
   const definitionResult = Array.isArray(lastContent) && lastContent.find((block) =>
     block.type === "tool_result" && ["create-e2e-agent", "refuse-e2e-agent"].includes(block.tool_use_id));
-  if (definitionResult) {
+  if (lastText === "accepted before disconnect") {
+    await textResponse(response, ["The accepted request finished."], 3500);
+  } else if (lastText === "limit this turn") {
+    await textResponse(response, ["Partial response at the output limit."], 30, "max_tokens");
+  } else if (definitionResult) {
     await textResponse(response, ["Definition tool returned to the provider."]);
   } else if (lastText === "Create a preferred agent") {
     definitionToolResponse(response, "create-e2e-agent", {

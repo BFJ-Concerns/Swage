@@ -686,16 +686,18 @@ export function createStreamingStore(
       const ownerId = conversationId;
       const stream = streams.get(ownerId);
       const lastMessage = recoveredMessages?.at(-1);
+      const approval = stream && get(stream.pendingApprovalStore);
+      const isApprovalTurn = approval && lastMessage?.turn_id === approval.turn_id;
       if (
         !stream ||
         !get(stream.isStreamingStore) ||
         stream.activeTurnGeneration !== recoveredTurnGeneration ||
-        (lastMessage?.role !== "assistant" && lastMessage?.origin !== "platform") ||
-        !["completed", "refused", "failed", "interrupted", "cancelled"].includes(lastMessage?.turn_state ?? "")
+        (lastMessage?.role !== "assistant" && lastMessage?.origin !== "platform" && !isApprovalTurn) ||
+        !["completed", "refused", "incomplete", "failed", "interrupted", "cancelled"].includes(lastMessage?.turn_state ?? "")
       ) return;
 
-      // The HTTP refresh recovered the terminal reply or platform account that the
-      // dropped socket could not deliver. Normal token events intentionally
+      // The HTTP refresh recovered the terminal account the dropped socket
+      // could not deliver. Normal token events intentionally
       // carry no turn ID, so the monotonically increasing local generation
       // fences a later start that races the refresh. The durable conversation
       // is authoritative only for the projection captured before reconnect.
