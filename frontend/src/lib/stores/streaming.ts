@@ -83,7 +83,7 @@ export interface StreamingStore {
     agentId?: string | null,
     effort?: Effort | null,
     attachments?: MessageAttachment[],
-  ): void | Promise<boolean>;
+  ): void | Promise<string | null>;
   /** Resolve or create the session needed to register composer files. */
   ensureConversation?(
     selectedModelId?: string | null,
@@ -856,18 +856,20 @@ export function withConversationAutoCreate(
       agentId?: string | null,
       effort?: Effort | null,
       attachments?: MessageAttachment[],
-    ): void | Promise<boolean> {
+    ): void | Promise<string | null> {
+      // With no conversation in scope, resolves with the session created for
+      // the message, or null when none could be.
       if (options.hasActiveConversation()) {
         base.startTurn(content, selectedModelId, undefined, undefined, attachments);
         return;
       }
-      if (get(isCreatingStore)) return Promise.resolve(false);
+      if (get(isCreatingStore)) return Promise.resolve(null);
 
       return (async () => {
         const id = await ensureConversation(selectedModelId, agentId, effort);
         if (id) {
           base.startTurn(content, selectedModelId, undefined, undefined, attachments);
-          return true;
+          return id;
         }
         const imageCount = attachments?.length ?? 0;
         const unsent = [content, imageCount ? `${imageCount} image${imageCount === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
@@ -876,7 +878,7 @@ export function withConversationAutoCreate(
           code: "conversation_create_failed",
           message: `Could not create a conversation, so this was not sent: ${unsent}`,
         });
-        return false;
+        return null;
       })();
     },
   };

@@ -73,9 +73,15 @@
   // Bumped whenever the composer moves to another session; work begun for
   // the previous one checks it and stops.
   let attachmentGeneration = 0;
-  // Set while this composer is creating the session it stands on: the move
-  // from no session to that one keeps the draft instead of clearing it.
-  let adoptingCreatedSession = false;
+  // A session this composer is creating keeps the draft. While the creation
+  // is outstanding, a move from no session to some session keeps it
+  // provisionally (`provisionalSession`); when the creation settles, the
+  // draft stays only if that session is the one created. A creation that
+  // settles before its session arrives leaves the id it awaits in
+  // `awaitedSession`. Any other move clears the draft.
+  let creatingSession = false;
+  let provisionalSession: string | null = null;
+  let awaitedSession: string | null = null;
 
   // A folder brings in its text files only, and never a whole tree of them.
   const FOLDER_FILE_LIMIT = 500;
@@ -83,18 +89,43 @@
 
   $effect(() => {
     if (attachmentScope === sessionId) return;
-    const adopted = adoptingCreatedSession && !attachmentScope && !!sessionId;
+    const fromNoSession = !attachmentScope && !!sessionId;
     attachmentScope = sessionId;
-    if (!adopted) {
-      attachmentGeneration += 1;
-      images = [];
-      materials = [];
-      attachmentError = null;
-      attachmentNotice = null;
+    if (fromNoSession && sessionId === awaitedSession) {
+      awaitedSession = null;
+    } else if (fromNoSession && creatingSession) {
+      provisionalSession = sessionId;
+    } else {
+      provisionalSession = null;
+      awaitedSession = null;
+      clearDraft();
     }
-    adoptingCreatedSession = false;
     if (sessionId) void loadMaterials(sessionId, attachmentGeneration);
   });
+
+  function clearDraft(): void {
+    attachmentGeneration += 1;
+    images = [];
+    materials = [];
+    attachmentError = null;
+    attachmentNotice = null;
+  }
+
+  // A creation this composer started has settled with `created`, the new
+  // session's id, or null when none was created.
+  function settleCreation(created: string | null): void {
+    creatingSession = false;
+    if (provisionalSession !== null) {
+      const kept = provisionalSession === created;
+      provisionalSession = null;
+      if (!kept) {
+        clearDraft();
+        if (sessionId) void loadMaterials(sessionId, attachmentGeneration);
+      }
+    } else if (created && sessionId !== created) {
+      awaitedSession = created;
+    }
+  }
 
   async function loadMaterials(target: string, generation: number): Promise<void> {
     try {
@@ -137,11 +168,11 @@
   // for them when the composer stands on none.
   async function targetSession(): Promise<string | null> {
     if (sessionId) return sessionId;
-    adoptingCreatedSession = true;
+    creatingSession = true;
     const requestedModel = canSelectAgent && selectedAgentId ? modelOverride : selectedModel;
     const created = await store?.ensureConversation?.(requestedModel || null, selectedAgentId || null, selectedEffort || null) ?? null;
     await tick();
-    if (!created) adoptingCreatedSession = false;
+    settleCreation(created);
     return created;
   }
 
@@ -321,15 +352,16 @@
       textarea?.focus();
     };
     const attachments = images.map(({ url }): MessageAttachment => ({ kind: "image_url", url }));
-    if (!sessionId) adoptingCreatedSession = true;
+    if (!sessionId) creatingSession = true;
     const result = attachments.length
       ? store.startTurn(trimmed, requestedModel || null, selectedAgentId || null, selectedEffort || null, attachments)
       : store.startTurn(trimmed, requestedModel || null, selectedAgentId || null, selectedEffort || null);
     if (result) {
       sending = true;
-      void result.then((sent) => {
-        if (sent) clearSentDraft();
-        else adoptingCreatedSession = false;
+      void result.then(async (sentTo) => {
+        await tick();
+        settleCreation(sentTo);
+        if (sentTo) clearSentDraft();
       }).finally(() => { sending = false; });
     } else {
       clearSentDraft();

@@ -223,6 +223,26 @@ describe("composer attachments", () => {
     expect(sendMessage.mock.calls[0]?.slice(0, 4)).toEqual(["session-created", "read both", "vision-model", [{ kind: "image_url", url }]]);
   });
 
+  it("drops the draft when another session is chosen while the composer creates one", async () => {
+    const { input, conversations, createConversation, sendMessage } = await setup(true);
+    let settle!: (id: string | null) => void;
+    createConversation.mockImplementationOnce(() => new Promise<string | null>((resolve) => { settle = resolve; }));
+    paste();
+    await previews(1);
+    choose([new File(["note"], "note.txt", { type: "text/plain" })]);
+    await vi.waitFor(() => expect(createConversation).toHaveBeenCalledTimes(1));
+    // The person opens an existing session; the overtaken creation then fails.
+    await conversations.selectConversation("session-two");
+    input.$set({ sessionId: "session-two" });
+    flushSync();
+    settle(null);
+    await vi.waitFor(() => expect(document.body.textContent).not.toContain("Attaching…"));
+    expect(document.querySelector(".attached-image")).toBeNull();
+    send("for session two");
+    expect(sendMessage.mock.calls[0]?.slice(0, 1)).toEqual(["session-two"]);
+    expect(sendMessage.mock.calls[0]?.[3]).toBeUndefined();
+  });
+
   it("clears pending images when the composer moves to another session", async () => {
     const { input, sendMessage, conversations } = await setup();
     paste();
