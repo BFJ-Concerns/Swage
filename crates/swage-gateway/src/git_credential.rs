@@ -208,9 +208,12 @@ fn empty_response() -> GitCredentialResponse {
 /// never prompting — the gateway has no terminal, and a helper that would
 /// ask a person answers nothing. Configuration and a repository carried in
 /// the gateway's own environment are not the operator's configuration and
-/// are left out, as the sandboxed git leaves them out. The repository path
-/// goes with the request, and the host's git keeps it for the operator's
-/// helpers only where their `credential.useHttpPath` asks for it.
+/// are left out, as the sandboxed git leaves them out. So is the repository
+/// the gateway was started in: the lookup runs from the root directory, so
+/// git discovers no repository whose configuration a sandboxed command could
+/// have written. The repository path goes with the request, and the host's
+/// git keeps it for the operator's helpers only where their
+/// `credential.useHttpPath` asks for it.
 async fn operator_helper(request: &GitCredentialRequest) -> GitCredentialResponse {
     let fields = [
         ("protocol", Some(request.protocol.as_str())),
@@ -233,6 +236,7 @@ async fn operator_helper(request: &GitCredentialRequest) -> GitCredentialRespons
     input.push('\n');
     let child = tokio::process::Command::new("git")
         .args(["credential", "fill"])
+        .current_dir("/")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "/bin/false")
         .env("SSH_ASKPASS", "/bin/false")

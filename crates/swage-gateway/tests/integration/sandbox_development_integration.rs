@@ -33,6 +33,97 @@ fn operator_helper_config(dir: &std::path::Path, host: &str, token: &str) -> std
     config
 }
 
+/// Marks the child run of [`host_lookup_from_the_current_directory`]: the path
+/// the planted helper would create if it ran.
+const PLANTED_HELPER_MARKER: &str = "SWAGE_TEST_PLANTED_HELPER_MARKER";
+
+/// A repository the gateway was started in, whose configuration a sandboxed
+/// command can write, never supplies a helper the host runs. The lookup runs
+/// in a child test process whose current directory is that repository, since
+/// a test cannot change the shared process's directory.
+#[test]
+fn a_helper_set_in_the_gateways_own_repository_is_never_run() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("started-here");
+    std::fs::create_dir(&repository).unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repository)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    let marker = root.path().join("planted-helper-ran");
+    git(&["init", "-q"]);
+    git(&[
+        "config",
+        "credential.helper",
+        &format!(
+            "!f() {{ touch '{}'; echo password=planted; }}; f",
+            marker.display()
+        ),
+    ]);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "host_lookup_from_the_current_directory",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .current_dir(&repository)
+        .env(PLANTED_HELPER_MARKER, &marker)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && report.contains("1 passed"),
+        "{report}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !marker.exists(),
+        "the host ran a helper from the gateway's own repository"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run by a_helper_set_in_the_gateways_own_repository_is_never_run"]
+async fn host_lookup_from_the_current_directory() {
+    let marker = std::env::var_os(PLANTED_HELPER_MARKER).expect("run from its parent test");
+    let mut env = ProcessEnvGuard::new();
+    env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let server = CredentialServer::start(storage, None, None).unwrap();
+    let mut policy = SandboxConfig::builder()
+        .working_directory(std::env::current_dir().unwrap())
+        .build()
+        .unwrap();
+    server.configure(&mut policy).unwrap();
+    let socket = policy
+        .environment
+        .get(swage_gateway::git_credential::SOCKET_ENV)
+        .unwrap()
+        .clone();
+    let answer = swage_gateway::git_credential::lookup(
+        std::path::Path::new(&socket),
+        &swage_protocol::hosting::GitCredentialRequest {
+            protocol: "https".into(),
+            host: "forge.example".into(),
+            path: None,
+            username: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(answer.password.is_none());
+    assert!(!std::path::Path::new(&marker).exists());
+}
+
 /// A sandboxed git asks the gateway, which answers from the operator's own
 /// helper on the host; a secret registered with the gateway for the same
 /// host is never the answer.
