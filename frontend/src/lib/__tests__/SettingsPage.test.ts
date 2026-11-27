@@ -101,7 +101,6 @@ function clickDiscoveredModel(name: string): void {
   (button as HTMLButtonElement).click();
 }
 
-
 function createdSchedule(topicId: string): Schedule {
   return makeSchedule({
     session: { policy: "fresh", topic_id: topicId, agent_id: "gateway" },

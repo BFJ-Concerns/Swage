@@ -474,7 +474,7 @@ describe("durable local updates", () => {
     await store.selectConversation("conv-1");
     store.appendOptimisticUserMessage({ client_id: "first-send", content: "ping", timestamp: "2026-01-01T00:00:01Z" });
     store.appendOptimisticUserMessage({ client_id: "second-send", content: "ping", timestamp: "2026-01-01T00:00:02Z" });
-    const queued = { id: "q-second", client_id: "second-send", origin: "user" as const, content: "ping", queued_at: "2026-01-01T00:00:03Z" };
+    const queued = { id: "q-second", client_id: "second-send", origin: "user" as const, content: "ping", thread_id: "root-1", queued_at: "2026-01-01T00:00:03Z" };
     store.appendQueuedMessage(queued, "conv-1");
     store.appendQueuedMessage(queued, "conv-1");
     expect({
@@ -487,7 +487,7 @@ describe("durable local updates", () => {
     const store = createConversationStore();
     vi.mocked(api.getConversation).mockResolvedValue(makeDetail("conv-1"));
     await store.selectConversation("conv-1");
-    const queued = { id: "late", origin: "user" as const, content: "already recorded", queued_at: "2026-01-01T00:02:00Z" };
+    const queued = { id: "late", origin: "user" as const, content: "already recorded", thread_id: "root-1", queued_at: "2026-01-01T00:02:00Z" };
     store.clearQueuedMessages("conv-1", [queued.id]);
     store.appendQueuedMessage(queued, "conv-1");
     expect(store.activeConversation!.queued ?? []).toEqual([]);
@@ -509,6 +509,7 @@ describe("durable local updates", () => {
       id: "q-1",
       origin: "user" as const,
       content: "while you were answering…",
+      thread_id: "root-1",
       queued_at: "2026-01-01T00:02:00Z",
     };
     store.appendQueuedMessage(queued, "conv-1");

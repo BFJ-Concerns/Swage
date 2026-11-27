@@ -33,6 +33,11 @@ pub fn child_sandbox_config_from_env() -> Result<Option<crate::config::SandboxCo
         })
 }
 
+/// Apply the Landlock filesystem rules the sandbox config in
+/// `SWAGE_SANDBOX_CONFIG_JSON` describes to this process; nothing when the
+/// variable is unset. The rules persist across `exec`, so a process that
+/// applies them and then execs another program hands that program the
+/// same filesystem the sandboxed agent gets.
 #[cfg(target_os = "linux")]
 fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
     let Some(config) = child_sandbox_config_from_env()? else {
@@ -307,6 +312,10 @@ pub async fn run_agent_loop(tools: Vec<Box<dyn Tool>>) -> Result<(), SandboxErro
 // ---------------------------------------------------------------------------
 
 /// Run a child command under the same Landlock and network bridge as tools.
+/// With no bridge to keep running, the governor becomes the program (its
+/// pid, its signals, its exit), so whoever started the governor holds the
+/// program itself; with one, it waits on the program and answers its exit
+/// code.
 pub async fn run_sandboxed_command(args: Vec<std::ffi::OsString>) -> Result<i32, SandboxError> {
     apply_child_landlock_from_env()?;
     let bridge = crate::egress::start_egress_bridge();
@@ -315,6 +324,13 @@ pub async fn run_sandboxed_command(args: Vec<std::ffi::OsString>) -> Result<i32,
         .ok_or_else(|| SandboxError::SpawnFailed {
             message: "sandbox command is missing".into(),
         })?;
+    if bridge.is_none() {
+        use std::os::unix::process::CommandExt;
+        let error = std::process::Command::new(program).args(arguments).exec();
+        return Err(SandboxError::SpawnFailed {
+            message: format!("failed to exec {}: {error}", program.to_string_lossy()),
+        });
+    }
     let mut command = tokio::process::Command::new(program);
     command.args(arguments);
     if let Some(bridge) = &bridge {

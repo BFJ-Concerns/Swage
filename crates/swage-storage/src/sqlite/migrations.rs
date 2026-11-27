@@ -94,6 +94,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("065_turn_execution_isolation", ADD_TURN_EXECUTION_ISOLATION),
         ("066_turn_failure_message", ADD_TURN_FAILURE_MESSAGE),
         ("067_tool_call_audit", CREATE_TOOL_CALL_AUDIT_TRIGGERS),
+        ("068_plugins", CREATE_PLUGIN_TABLES),
+        ("069_turn_graph", CREATE_TURN_GRAPH_REVISIONS),
     ]
 }
 
@@ -181,9 +183,51 @@ const ADD_TURN_EXECUTION_ISOLATION: &str = "
     ALTER TABLE turns ADD COLUMN isolation_detail TEXT;
 ";
 
+/// Installed plugins: one row per installed revision, at most one active per
+/// plugin, and one enablement row per scope — `install`, or a topic's id.
+const CREATE_PLUGIN_TABLES: &str = "
+    CREATE TABLE plugin_revisions (
+        id             TEXT    NOT NULL PRIMARY KEY,
+        plugin_name    TEXT    NOT NULL,
+        revision       INTEGER NOT NULL,
+        version        TEXT    NOT NULL,
+        description    TEXT    NOT NULL,
+        manifest       TEXT    NOT NULL,
+        installed_from TEXT    NOT NULL,
+        provenance     TEXT    NOT NULL CHECK (provenance IN ('shipped', 'installed')),
+        install_dir    TEXT    NOT NULL,
+        installed_at   TEXT    NOT NULL,
+        active         INTEGER NOT NULL CHECK (active IN (0, 1)),
+        UNIQUE (plugin_name, revision)
+    );
+    CREATE UNIQUE INDEX plugin_revisions_one_active
+        ON plugin_revisions(plugin_name) WHERE active = 1;
+    CREATE TABLE plugin_enablement (
+        plugin_name TEXT    NOT NULL,
+        scope       TEXT    NOT NULL,
+        enabled     INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        changed_at  TEXT    NOT NULL,
+        PRIMARY KEY (plugin_name, scope)
+    );
+";
+
 /// The explanation a turn that ended without a reply carried to the person
 /// (the provider or request error), kept so the conversation shows it after
 /// a reload as it did live.
+/// The turn graph's revisions: the declaration as proposed, one active at a
+/// time, a failed one kept with why.
+const CREATE_TURN_GRAPH_REVISIONS: &str = "
+    CREATE TABLE turn_graph_revisions (
+        revision   INTEGER NOT NULL PRIMARY KEY,
+        graph      TEXT    NOT NULL,
+        activation TEXT    NOT NULL CHECK (activation IN ('active', 'failed', 'superseded')),
+        failure    TEXT,
+        created_at TEXT    NOT NULL
+    );
+    CREATE UNIQUE INDEX turn_graph_revisions_one_active
+        ON turn_graph_revisions(activation) WHERE activation = 'active';
+";
+
 const ADD_TURN_FAILURE_MESSAGE: &str = "
     ALTER TABLE turns ADD COLUMN failure_message TEXT;
 ";
@@ -1009,6 +1053,7 @@ const COMPLETE_SCHEMA: &str = "
         schedule_run_id TEXT REFERENCES schedule_runs(id) ON DELETE CASCADE,
         attended    INTEGER NOT NULL CHECK (attended IN (0, 1)),
         client_id   TEXT,
+        requested_model TEXT,
         UNIQUE (session_id, seq)
     );
     CREATE TABLE turn_queue_channel_messages (

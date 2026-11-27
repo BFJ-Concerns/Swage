@@ -1,0 +1,8 @@
+name = "succession-summariser"
+version = "1.0.0"
+description = "Summarises the conversation so far into a successor when the context is over the threshold."
+script = "plugin.js"
+grants = ["model"]
+
+[[provides.slots]]
+name = "succession"

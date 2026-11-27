@@ -100,7 +100,10 @@ fn build_sandbox_agent_tools(config: Option<&swage_sandbox::SandboxConfig>) -> V
 #[tokio::main]
 async fn main() {
     let args: Vec<_> = std::env::args_os().collect();
-    if args.get(1).is_some_and(|arg| arg == "--sandbox-exec") {
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == swage_sandbox::SANDBOX_EXEC_FLAG)
+    {
         match swage_sandbox::run_sandboxed_command(args[2..].to_vec()).await {
             Ok(code) => std::process::exit(code),
             Err(error) => {

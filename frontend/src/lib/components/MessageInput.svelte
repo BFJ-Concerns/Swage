@@ -197,27 +197,34 @@
     attachmentError = null;
     attachmentNotice = null;
     pendingReads += 1;
+    const errors: string[] = [];
+    let target: string | null = null;
     try {
-      let target: string | null = null;
       for (const file of files) {
-        const image = isImage(file);
-        if (!image && file.type.startsWith("image/")) throw new Error(`${file.name || "That image"} is not a PNG or JPEG image.`);
-        const body = await readFile(file, image);
         if (generation !== attachmentGeneration) return;
-        if (image) {
-          images = [...images, { name: file.name || "Pasted image", url: body }];
-          continue;
+        const name = file.name || "Pasted image";
+        try {
+          const image = isImage(file);
+          if (!image && file.type.startsWith("image/")) throw new Error("Choose a PNG or JPEG image.");
+          if (!file.size) throw new Error("The file is empty.");
+          const body = await readFile(file, image);
+          if (generation !== attachmentGeneration) return;
+          if (image) {
+            images = [...images, { name, url: body }];
+            continue;
+          }
+          if (body.includes("\u0000")) throw new Error("Choose a text file or a PNG or JPEG image.");
+          target ??= await targetSession();
+          if (generation !== attachmentGeneration) return;
+          if (!target) throw new Error("Could not create a session for the file. Please try again.");
+          await register(generation, target, file.name, file.name, file, body);
+        } catch (error) {
+          errors.push(`${name}: ${describe(error, "Could not attach the file.")}`);
         }
-        if (body.includes("\u0000")) throw new Error(`${file.name} is not text: choose a PNG or JPEG image, or a text file.`);
-        target ??= await targetSession();
-        if (!target) throw new Error("Could not create a session for the file. Please try again.");
-        if (generation !== attachmentGeneration) return;
-        await register(generation, target, file.name, file.name, file, body);
       }
-    } catch (error) {
-      if (generation === attachmentGeneration) attachmentError = describe(error, "Could not attach the file.");
     } finally {
       pendingReads -= 1;
+      if (generation === attachmentGeneration && errors.length) attachmentError = errors.join("\n");
     }
   }
 
@@ -272,6 +279,7 @@
   }
 
   function handlePaste(event: ClipboardEvent): void {
+    if (event.clipboardData?.getData("text/plain")) return;
     const files = Array.from(event.clipboardData?.items ?? [])
       .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
       .map((item) => item.getAsFile())
@@ -543,6 +551,7 @@
   }
 
   .attachment-feedback {
+    white-space: pre-line;
     margin: 0;
     padding: 6px 14px;
     font-size: 0.8rem;

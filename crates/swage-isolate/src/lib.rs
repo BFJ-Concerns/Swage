@@ -64,6 +64,11 @@ pub fn engine_version() -> String {
     format!("v8-{}", v8::VERSION_STRING)
 }
 
+/// The least heap a program may be given: below it the engine cannot finish
+/// booting, and a heap limit of 1 MiB aborts the whole process rather than
+/// failing the one program. 4 MiB is the smallest size seen to start.
+pub const MIN_HEAP_BYTES: usize = 4 * 1024 * 1024;
+
 /// The two ceilings every program runs under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IsolateLimits {
@@ -423,6 +428,12 @@ impl Program {
         host: Option<SharedHostCalls>,
         cancellation: Option<CancellationToken>,
     ) -> Result<Self, IsolateError> {
+        if limits.heap_bytes < MIN_HEAP_BYTES {
+            return Err(IsolateError::Engine(format!(
+                "a heap limit of {} bytes is below the {MIN_HEAP_BYTES} the engine needs to start",
+                limits.heap_bytes
+            )));
+        }
         static PLATFORM: Once = Once::new();
         PLATFORM.call_once(|| JsRuntime::init_platform(None));
 
@@ -576,6 +587,44 @@ impl Program {
         }
         let value = self.outcome(outcome)?;
         self.string_of(&value)
+    }
+
+    /// Drive the event loop — host calls included — until nothing is
+    /// pending. Work a settled value left behind (a promise chain the
+    /// script started and did not await) completes here, inside the entry
+    /// that started it, so no later entry into the isolate runs it. A
+    /// failure in that work is this entry's failure. Cancellation ends the
+    /// wait as it does for [`Self::settle_to_string`].
+    pub async fn drain(&mut self) -> Result<(), IsolateError> {
+        let _entered = self.entered();
+        let mut cancelled = self
+            .cancellation
+            .clone()
+            .map(|cancellation| Box::pin(async move { cancellation.cancelled().await }));
+        let options = PollEventLoopOptions::default();
+        let outcome = poll_fn(|cx| {
+            if let Some(cancelled) = cancelled.as_mut()
+                && cancelled.poll_unpin(cx).is_ready()
+            {
+                self.watch.terminate(Termination::Cancelled);
+                return Poll::Ready(Err(CoreErrorKind::ExecutionTerminated.into()));
+            }
+            self.watch.busy();
+            let outcome = self.runtime().poll_event_loop(cx, options);
+            self.watch.idle();
+            outcome
+        })
+        .await;
+        // As in `settle_to_string`: a stop that arrived during the final
+        // poll is still a stop.
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            self.watch.terminate(Termination::Cancelled);
+        }
+        self.outcome(outcome)
     }
 
     /// Why the program was terminated, if it was.
@@ -848,6 +897,24 @@ mod tests {
             .execute("test", "throw 'plain text';".to_owned())
             .expect_err("throws");
         assert_eq!(thrown_value.to_string(), "Error: plain text");
+    }
+
+    #[test]
+    fn a_heap_too_small_for_the_engine_is_refused_and_the_process_survives() {
+        let error = Program::new(
+            IsolateLimits {
+                heap_bytes: 1024 * 1024,
+                continuous_execution: Duration::from_secs(1),
+            },
+            None,
+            None,
+        )
+        .err()
+        .expect("refused");
+        assert!(
+            matches!(error, IsolateError::Engine(ref message) if message.contains("needs to start")),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1178,6 +1245,32 @@ mod tests {
         assert_eq!(
             settled,
             r#"{"asyncReply":{"name":"agent","payload":"[\"hi\",2]"},"syncReply":{"sync":"log","payload":"\"note\""},"deno":"undefined"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_finishes_the_work_a_settled_value_left_behind() {
+        let mut program = Program::new(limits(), Some(Arc::new(Echo)), None).expect("isolate");
+        let pending = program
+            .execute(
+                "test",
+                r#"(async () => {
+                    globalThis.later = "pending";
+                    __swageHost.call("slow", "1").then((reply) => { globalThis.later = JSON.parse(reply).name; });
+                    return "returned first";
+                })()"#
+                    .to_owned(),
+            )
+            .expect("starts");
+        let settled = program.settle_to_string(pending).await.expect("settles");
+        assert_eq!(settled, "returned first");
+        program.drain().await.expect("drains");
+        let later = program
+            .execute_for_string("test", "globalThis.later".to_owned())
+            .expect("reads");
+        assert_eq!(
+            later, "slow",
+            "the chain the script left behind ran inside drain"
         );
     }
 

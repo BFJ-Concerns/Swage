@@ -61,6 +61,10 @@ pub(crate) fn is_openai_reasoning_model(model: &str) -> bool {
         || model.starts_with("o4")
 }
 
+pub(crate) fn model_effort_capability(model: &str) -> Option<EffortCapability> {
+    is_openai_reasoning_model(model).then(openai_effort_capability)
+}
+
 /// The `reasoning_effort` / `reasoning.effort` value for a resolved control.
 /// Expresses the control only — a level here is one the wire accepts.
 pub(crate) fn openai_reasoning_effort(control: EffortControl) -> Option<String> {
@@ -804,7 +808,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
-        is_openai_reasoning_model(model).then(openai_effort_capability)
+        model_effort_capability(model)
     }
 
     fn provider_request_snapshot(

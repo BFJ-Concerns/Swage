@@ -28,16 +28,18 @@ use swage_storage::{
         AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink, DeviceRegistration,
         Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest, NewAttachment,
         NewAuditEvent, NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewMaterial,
-        NewMessage, NewSchedule, NewScheduleRun, NewSession, NewThread, NewToolCall, NewTopic,
-        NewTurn, NewWorkspaceAttachment, Schedule, ScheduleRun, ScheduleRunState,
-        ScheduleRunUpdate, ScheduleStatus, Session, SurfaceAnnotation, Thread, ThreadState,
-        ToolCallRecord, Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
+        NewMessage, NewPluginRevision, NewSchedule, NewScheduleRun, NewSession, NewThread,
+        NewToolCall, NewTopic, NewTurn, NewWorkspaceAttachment, PluginEnablementRecord,
+        PluginRevisionRecord, Schedule, ScheduleRun, ScheduleRunState, ScheduleRunUpdate,
+        ScheduleStatus, Session, SurfaceAnnotation, Thread, ThreadState, ToolCallRecord, Topic,
+        TopicSlug, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
         AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore, AuditStore,
         BackgroundJobStore, ChannelLinkStore, ContextSnapshotStore, DeviceStore, MaterialStore,
-        MessageStore, ScheduleStore, SessionStore, SkillActivationStore, TaskDefinitionStore,
-        ThreadStore, ToolCallStore, TopicStore, TurnStore, WorkspaceAttachmentStore,
+        MessageStore, PluginStore, ScheduleStore, SessionStore, SkillActivationStore,
+        TaskDefinitionStore, ThreadStore, ToolCallStore, TopicStore, TurnGraphStore, TurnStore,
+        WorkspaceAttachmentStore,
     },
 };
 
@@ -544,6 +546,62 @@ async fn continuity_messages_route_summary_produces_succession_instead_of_fallba
     let requests = captured.lock().unwrap();
     assert!(requests.iter().any(|request| request["stream"] != true));
     assert!(requests.iter().any(|request| request["stream"] == true));
+}
+
+/// A revision without the succession step runs no succession pass over
+/// the threshold, and the turn's record says the step was removed.
+#[tokio::test]
+async fn a_revision_without_the_succession_step_runs_no_succession() {
+    use swage_protocol::client::turn_graph::{RevisionActivation, StepFiller, TurnGraph, TurnSlot};
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    let mut graph = TurnGraph::shipped();
+    graph.steps.retain(|step| step.slot != TurnSlot::Succession);
+    for step in &mut graph.steps {
+        step.filler = StepFiller::Builtin;
+    }
+    let revision = state.turn_graph.propose(graph, None).await.unwrap();
+    assert_eq!(
+        revision.activation,
+        RevisionActivation::Active,
+        "{revision:?}"
+    );
+    seed_history_over_threshold(&storage, session_id).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs");
+
+    let db = storage.db.lock().await;
+    let (report_json, _) = db
+        .snapshots
+        .values()
+        .next()
+        .expect("the turn's context snapshot");
+    let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
+    assert_eq!(report["turn_graph"]["revision"], revision.revision);
+    assert_eq!(
+        report["turn_graph"]["succession"]["removed"], true,
+        "{report}"
+    );
+    assert!(
+        !report["compaction_applied"]
+            .as_array()
+            .expect("compaction records")
+            .iter()
+            .any(|record| record["requested_strategy"] == "succession"),
+        "no succession pass ran"
+    );
 }
 
 #[tokio::test]
@@ -5496,6 +5554,61 @@ impl ToolCallStore for MockStorage {
     }
 }
 
+// Stub: no plugin is installed in gateway turn tests.
+#[async_trait]
+impl PluginStore for MockStorage {
+    async fn record_plugin_revision(
+        &self,
+        _revision: NewPluginRevision,
+    ) -> Result<PluginRevisionRecord, StorageError> {
+        Err(StorageError::QueryFailed(
+            "plugin installs are not exercised in turn tests".to_owned(),
+        ))
+    }
+    async fn list_plugin_revisions(&self) -> Result<Vec<PluginRevisionRecord>, StorageError> {
+        Ok(vec![])
+    }
+    async fn set_plugin_enablement(
+        &self,
+        _plugin_name: &str,
+        _topic_id: Option<Uuid>,
+        _enabled: bool,
+    ) -> Result<PluginEnablementRecord, StorageError> {
+        Err(StorageError::QueryFailed(
+            "plugin enablement is not exercised in turn tests".to_owned(),
+        ))
+    }
+    async fn list_plugin_enablement(&self) -> Result<Vec<PluginEnablementRecord>, StorageError> {
+        Ok(vec![])
+    }
+}
+
+#[async_trait]
+impl TurnGraphStore for MockStorage {
+    /// A revision is answered as recorded, so a turn test can run under
+    /// one; nothing is kept for a reload.
+    async fn record_turn_graph_revision(
+        &self,
+        revision: swage_storage::model::NewTurnGraphRevision,
+    ) -> Result<swage_storage::model::TurnGraphRevisionRecord, StorageError> {
+        Ok(swage_storage::model::TurnGraphRevisionRecord {
+            revision: revision.revision,
+            graph: revision.graph,
+            activation: revision.activation,
+            failure: revision.failure,
+            created_at: chrono::Utc::now(),
+        })
+    }
+    async fn list_turn_graph_revisions(
+        &self,
+    ) -> Result<Vec<swage_storage::model::TurnGraphRevisionRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+    async fn activate_turn_graph_revision(&self, _: u32) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
+
 // Stub: skill activation is not exercised in gateway turn tests.
 #[async_trait]
 impl SkillActivationStore for MockStorage {
@@ -5943,6 +6056,7 @@ fn enqueue_mock_turn_input(
         .min()
         .unwrap_or_else(chrono::Utc::now);
     let queued = swage_storage::QueuedTurnInput {
+        requested_model: input.requested_model,
         delivery_targets: input.delivery_targets,
         attended: input.attended,
         client_id: input.client_id,
@@ -6049,11 +6163,18 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
         session_id: Uuid,
         agent_id: &str,
     ) -> Result<Option<swage_storage::DrainedTurnQueue>, StorageError> {
-        let queued = self.list_queued_turn_inputs(session_id).await?;
+        let mut queued = self.list_queued_turn_inputs(session_id).await?;
         let Some(first) = queued.first() else {
             return Ok(None);
         };
         let thread_id = first.thread_id;
+        let group_len = queued
+            .iter()
+            .take_while(|item| {
+                item.thread_id == thread_id && item.requested_model == first.requested_model
+            })
+            .count();
+        queued.truncate(group_len);
         let user_input = queued
             .iter()
             .map(|item| item.content.as_str())
@@ -6102,7 +6223,6 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
                 .await?,
             );
         }
-        let queued_ids = queued.iter().map(|item| item.id).collect();
         // The inbox rows the inputs name are presented by this turn, as the
         // real drain presents them, and their chats are the turn's
         // destinations.
@@ -6132,14 +6252,15 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
                     }
                 }
             }
-            db.turn_queue.retain(|item| item.session_id != session_id);
+            db.turn_queue
+                .retain(|item| !queued.iter().any(|drained| drained.id == item.id));
         }
         Ok(Some(swage_storage::DrainedTurnQueue {
             delivery_targets: attribution.delivery_targets,
             attended: attribution.attended,
             turn,
             messages,
-            queued_ids,
+            inputs: queued,
             schedule_run_ids: Vec::new(),
             channel_origins,
         }))
@@ -17561,7 +17682,7 @@ fn assembly_with_instructions_produces_system_message_first() {
     let config = swage_config::ContextConfig::default();
     let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
-    let output = swage_context::assembly::default_assembly(&elements, &config, &tokeniser);
+    let output = crate::plugin::context_contract::default_assembly(&elements, &config, &tokeniser);
 
     // System message from instructions appears first.
     assert_eq!(
@@ -17612,7 +17733,7 @@ fn assembly_without_instructions_omits_system_message() {
     let config = swage_config::ContextConfig::default();
     let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
-    let output = swage_context::assembly::default_assembly(&elements, &config, &tokeniser);
+    let output = crate::plugin::context_contract::default_assembly(&elements, &config, &tokeniser);
 
     // No system message when instructions are empty.
     assert!(
@@ -19280,8 +19401,10 @@ fn a_workflow_worker_session_does_not_carry_memory_but_every_other_does() {
     );
 }
 
-#[tokio::test]
-async fn named_assembly_composes_the_memory_element_like_any_other() {
+// The shipped context program runs on a runtime of its own here, so the
+// test is not itself on one.
+#[test]
+fn named_assembly_composes_the_memory_element_like_any_other() {
     let memory = MemoryIndexElement::new(
         Some("Important topic context".to_string()),
         Vec::new(),
@@ -19314,13 +19437,25 @@ async fn named_assembly_composes_the_memory_element_like_any_other() {
         "#,
     )
     .unwrap();
-    let output = swage_context::js_assembly::assemble_named(
-        "memory-aware",
-        Some(&assembly_path),
+    let config = swage_config::model::ContextConfig::default();
+    let tokeniser = TiktokenTokeniser::new("gpt-5");
+    let variables = std::collections::BTreeMap::new();
+    let output = crate::plugin::context_contract::assemble(
         &elements,
-        &swage_config::model::ContextConfig::default(),
-        &TiktokenTokeniser::new("gpt-5"),
-        &std::collections::BTreeMap::new(),
+        &config,
+        &tokeniser,
+        &variables,
+        "memory-aware",
+        || {
+            swage_context::js_assembly::assemble_named(
+                "memory-aware",
+                Some(&assembly_path),
+                &elements,
+                &config,
+                &tokeniser,
+                &variables,
+            )
+        },
     );
 
     assert!(
@@ -19997,8 +20132,50 @@ async fn token_usage_remains_null_when_provider_sends_no_usage() {
 // ContextAssembled event and snapshot persistence tests
 // -----------------------------------------------------------------------
 
+/// An ordinary installed shipped package serves report consumers through the
+/// same coordinator as production. Keep the root alive for the entire turn.
+async fn make_state_with_shipped_context(
+    chunks: Vec<StreamChunk>,
+) -> (tempfile::TempDir, AppState, Uuid) {
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage.create_session(new_session(topic.id)).await.unwrap();
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: session.agent_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn swage_storage::store::Storage>,
+        storage as Arc<dyn TopicStore>,
+        Arc::new(MultiRoundMockProvider::new(vec![chunks])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_owned(),
+    );
+    crate::shipped_plugins::regenerate(root.path())
+        .await
+        .unwrap();
+    state
+        .plugins
+        .install_shipped(
+            &crate::shipped_plugins::root(root.path()),
+            &["context-program", "succession-summariser"],
+            &[],
+        )
+        .await;
+    state.turn_graph.load().await.unwrap();
+    (root, state, session.id)
+}
+
 /// ContextAssembled must be the first event before any Token events.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_assembled_precedes_first_token() {
     let chunks = vec![
         StreamChunk::Delta {
@@ -20008,7 +20185,7 @@ async fn context_assembled_precedes_first_token() {
             finish_reason: None,
         },
     ];
-    let (state, session_id) = make_state_with_session(chunks).await;
+    let (_root, state, session_id) = make_state_with_shipped_context(chunks).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
     process_turn(
@@ -20058,6 +20235,12 @@ async fn context_assembled_precedes_first_token() {
             report,
         } => {
             assert_eq!(*event_turn_id, turn_id, "turn_id should match");
+            let value = serde_json::to_value(report).unwrap();
+            assert_eq!(
+                value["turn_graph"]["context_program"]["served"],
+                "plugin context-program"
+            );
+            assert!(value["turn_graph"]["context_program"]["fallback"].is_null());
             // Report should have an "elements" array from the assembly engine.
             assert!(
                 !report.elements.is_empty(),
@@ -20081,7 +20264,7 @@ async fn context_assembled_precedes_first_token() {
 }
 
 /// The assembly report should be persisted as a context snapshot.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn assembly_report_persisted_as_context_snapshot() {
     let chunks = vec![
         StreamChunk::Delta {
@@ -20091,7 +20274,7 @@ async fn assembly_report_persisted_as_context_snapshot() {
             finish_reason: None,
         },
     ];
-    let (state, session_id) = make_state_with_session(chunks).await;
+    let (_root, state, session_id) = make_state_with_shipped_context(chunks).await;
     let (tx, _rx) = mpsc::unbounded_channel();
 
     process_turn(
@@ -20132,6 +20315,11 @@ async fn assembly_report_persisted_as_context_snapshot() {
         parsed.get("elements").is_some(),
         "snapshot should contain elements key"
     );
+    assert_eq!(
+        parsed["turn_graph"]["context_program"]["served"],
+        "plugin context-program"
+    );
+    assert!(parsed["turn_graph"]["context_program"]["fallback"].is_null());
     let expected = state
         .config_root
         .join("scratch/general/sessions")
@@ -26920,6 +27108,562 @@ async fn dispatcher_preserves_arguments_beyond_the_replay_bound() {
     .await;
     assert!(validated.load(Ordering::SeqCst), "validation must run");
     assert!(executed.load(Ordering::SeqCst), "execution must run");
+}
+
+/// A branch from the succession step is a shadow only where the
+/// experimentation seam draws it: off for the location, or off altogether,
+/// the path stays single; forced to the shadow variant, the branch runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shadow_branch_is_absent_where_experimentation_is_off_for_its_location() {
+    use swage_protocol::client::turn_graph::{
+        StepFiller, TurnBranch, TurnGraph, TurnSlot, TurnStep,
+    };
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let topic = storage.general_scope().await.expect("general scope");
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    let root = tempfile::tempdir().expect("gateway root");
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(PendingProvider),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    state.turn_graph.load().await.expect("revision 0");
+    let mut graph = TurnGraph::shipped();
+    // No plugin is installed here: use the kernel's fillers on the live
+    // path, and shadow its summariser in the branch.
+    for step in &mut graph.steps {
+        step.filler = StepFiller::Builtin;
+    }
+    graph.branches.push(TurnBranch {
+        id: "trial".into(),
+        from: TurnSlot::Succession.as_str().into(),
+        steps: vec![TurnStep {
+            id: "trial-succession".into(),
+            slot: TurnSlot::Succession,
+            filler: StepFiller::Builtin,
+        }],
+    });
+    let proposed = state
+        .turn_graph
+        .propose(graph.clone(), None)
+        .await
+        .expect("proposed");
+    assert_eq!(
+        proposed.activation,
+        swage_protocol::client::turn_graph::RevisionActivation::Active
+    );
+    let context = crate::plugin::slot::slot_context(
+        Some(session.id),
+        "agent-a",
+        std::path::Path::new("/work"),
+    );
+
+    let mut off = swage_config::ResolvedConfig::default();
+    off.experimentation.enabled = false;
+    let shadows = super::succession_shadows(
+        &state,
+        &graph,
+        &off,
+        session.id,
+        Uuid::new_v4(),
+        &context,
+        Some(topic.id),
+    )
+    .await;
+    assert!(
+        shadows.is_empty(),
+        "experimentation off keeps the path single"
+    );
+
+    let mut location_off = swage_config::ResolvedConfig::default();
+    location_off.experimentation.locations.insert(
+        "turn_graph.trial".into(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: false,
+            forced_variant: None,
+        },
+    );
+    let shadows = super::succession_shadows(
+        &state,
+        &graph,
+        &location_off,
+        session.id,
+        Uuid::new_v4(),
+        &context,
+        Some(topic.id),
+    )
+    .await;
+    assert!(
+        shadows.is_empty(),
+        "experimentation off for the branch's location keeps the path single"
+    );
+
+    let mut forced = swage_config::ResolvedConfig::default();
+    forced.experimentation.locations.insert(
+        "turn_graph.trial".into(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some("shadow".into()),
+        },
+    );
+    // A fresh session: the draws above recorded "live" for the first one.
+    let second = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("second session");
+    let shadows = super::succession_shadows(
+        &state,
+        &graph,
+        &forced,
+        second.id,
+        Uuid::new_v4(),
+        &context,
+        Some(topic.id),
+    )
+    .await;
+    assert_eq!(shadows.len(), 1, "the forced variant draws the shadow");
+    assert_eq!(shadows[0].branch, "trial");
+}
+
+/// A plugin declaring itself a variant of a slot's function is drawn in
+/// the named filler's place through the experimentation seam: off, the
+/// named filler serves; forced, the variant does; and the draw is recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_installed_variant_of_a_slot_shadows_the_named_filler_through_the_draw() {
+    use swage_protocol::client::turn_graph::StepFiller;
+    let dir = tempfile::tempdir().expect("plugins root");
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let topic = storage.general_scope().await.expect("general scope");
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    // The state's plugin service installs under `<root>/plugins`; the
+    // packages are written beside it.
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(PendingProvider),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        dir.path().to_path_buf(),
+    );
+    let write = |name: &str, variant_of: &str| {
+        let root = dir.path().join("packages").join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("plugin.toml"),
+            format!(
+                "name = \"{name}\"\nversion = \"1\"\ndescription = \"A {name}.\"\nscript = \"plugin.js\"\ngrants = [\"model\"]\n{variant_of}\n[[provides.slots]]\nname = \"succession\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("plugin.js"),
+            format!(r#"swage.provide.slot("succession", (input) => ({{ summary: "{name}" }}));"#),
+        )
+        .unwrap();
+        root
+    };
+    for (name, variant_of) in [("base", ""), ("alt", "variant_of = \"slot.succession\"")] {
+        state
+            .plugins
+            .install(&write(name, variant_of), &[], None)
+            .await
+            .expect("installs");
+        state
+            .plugins
+            .set_enablement(name, None, true, None)
+            .await
+            .expect("enables");
+    }
+    let named = StepFiller::Plugin {
+        name: "base".into(),
+    };
+    let context_for = |session: Uuid| {
+        crate::plugin::slot::slot_context(Some(session), "agent-a", std::path::Path::new("/work"))
+    };
+    let fresh_session = || {
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .create_session(swage_storage::fixtures::new_session(topic.id))
+                .await
+                .expect("session")
+                .id
+        }
+    };
+    let draws_for = |session: Uuid| {
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                    session_id: Some(session),
+                    entity_kind: Some("experiment_location".to_owned()),
+                    entity_id: Some("slot.succession".to_owned()),
+                    event_kind: Some("variant_selected".to_owned()),
+                    ..Default::default()
+                })
+                .await
+                .expect("draws")
+        }
+    };
+    let forcing = |variant: &str| {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.experimentation.locations.insert(
+            "slot.succession".into(),
+            swage_config::model::ExperimentLocationConfig {
+                enabled: true,
+                forced_variant: Some(variant.into()),
+            },
+        );
+        config
+    };
+
+    // Off: the named filler serves, and the decision is on the record.
+    let mut off = swage_config::ResolvedConfig::default();
+    off.experimentation.enabled = false;
+    let (summariser, fallback) = super::summariser_for(
+        &state,
+        &off.experimentation,
+        &named,
+        &context_for(session.id),
+        Some(topic.id),
+        session.id,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(summariser.describe(), "plugin base");
+    assert_eq!(fallback, None);
+    let draws = draws_for(session.id).await;
+    assert_eq!(draws.len(), 1, "off is a recorded decision");
+    assert_eq!(draws[0].metadata["variant"], "base");
+    assert_eq!(draws[0].metadata["reason"], "disabled");
+
+    // Forced: the installed variant shadows the named filler.
+    let forced = forcing("alt");
+    let second = fresh_session().await;
+    let (summariser, fallback) = super::summariser_for(
+        &state,
+        &forced.experimentation,
+        &named,
+        &context_for(second),
+        Some(topic.id),
+        second,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(summariser.describe(), "plugin alt");
+    assert_eq!(fallback, None);
+    assert_eq!(draws_for(second).await[0].metadata["variant"], "alt");
+
+    // The session's recorded choice outlives the variant's enablement: once
+    // the variant is disabled, the named filler serves and the turn says
+    // why.
+    state
+        .plugins
+        .set_enablement("alt", None, false, None)
+        .await
+        .expect("disables");
+    let (summariser, fallback) = super::summariser_for(
+        &state,
+        &forced.experimentation,
+        &named,
+        &context_for(second),
+        Some(topic.id),
+        second,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(summariser.describe(), "plugin base");
+    assert!(
+        fallback
+            .as_deref()
+            .is_some_and(|reason| reason.contains("recorded choice 'alt'")),
+        "{fallback:?}"
+    );
+
+    // A disabled variant is no candidate for the seam: with a second
+    // variant beside it, pinning that one serves it, and pinning the
+    // disabled one is a draw the seam refuses, the named filler serving.
+    state
+        .plugins
+        .install(
+            &write("alt2", "variant_of = \"slot.succession\""),
+            &[],
+            None,
+        )
+        .await
+        .expect("installs");
+    state
+        .plugins
+        .set_enablement("alt2", None, true, None)
+        .await
+        .expect("enables");
+    let third = fresh_session().await;
+    let (summariser, fallback) = super::summariser_for(
+        &state,
+        &forcing("alt2").experimentation,
+        &named,
+        &context_for(third),
+        Some(topic.id),
+        third,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(summariser.describe(), "plugin alt2");
+    assert_eq!(fallback, None);
+    let fourth = fresh_session().await;
+    let (summariser, fallback) = super::summariser_for(
+        &state,
+        &forced.experimentation,
+        &named,
+        &context_for(fourth),
+        Some(topic.id),
+        fourth,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(summariser.describe(), "plugin base");
+    assert!(
+        fallback
+            .as_deref()
+            .is_some_and(|reason| reason.contains("could not be drawn") && reason.contains("alt")),
+        "{fallback:?}"
+    );
+    assert!(
+        draws_for(fourth).await.is_empty(),
+        "a refused draw records no choice; the turn's record carries the refusal"
+    );
+
+    // No candidates at all is a default-only decision, recorded like any
+    // other.
+    state
+        .plugins
+        .set_enablement("alt2", None, false, None)
+        .await
+        .expect("disables");
+    let fifth = fresh_session().await;
+    let (summariser, fallback) = super::summariser_for(
+        &state,
+        &swage_config::ResolvedConfig::default().experimentation,
+        &named,
+        &context_for(fifth),
+        Some(topic.id),
+        fifth,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(summariser.describe(), "plugin base");
+    assert_eq!(fallback, None);
+    let draws = draws_for(fifth).await;
+    assert_eq!(draws.len(), 1);
+    assert_eq!(draws[0].metadata["reason"], "default_only");
+}
+
+/// The summariser is named as having served only on a turn whose
+/// compaction the succession step requested: a degradation diagnosis
+/// produces the same successor shape without it.
+#[test]
+fn the_summariser_served_only_where_the_succession_step_requested_the_compaction() {
+    use swage_protocol::client::context::CompactionRecord;
+    let record = |requested: &str| CompactionRecord {
+        element: "history".into(),
+        requested_strategy: requested.into(),
+        actual_strategy: swage_context::succession::THRESHOLD_STRATEGY.into(),
+        messages_removed: 2,
+        tokens_before: 10,
+        tokens_after: 5,
+        source_message_range: Some((0, 2)),
+        budget: None,
+        failure_reason: None,
+        focus: None,
+        calls: Vec::new(),
+        diagnosis: None,
+    };
+    assert!(!super::succession_ran(&[]));
+    assert!(!super::succession_ran(&[record(
+        swage_context::succession::DEGRADATION_STRATEGY
+    )]));
+    assert!(super::succession_ran(&[record(
+        swage_context::succession::THRESHOLD_STRATEGY
+    )]));
+}
+
+/// The real coordinator resolves the shipped part and its topic variant,
+/// then records both resolution and execution failures as kernel fallback.
+#[tokio::test(flavor = "multi_thread")]
+async fn shipped_context_program_serves_turns_and_topic_variants_with_recorded_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn swage_storage::store::Storage>,
+        storage.clone() as Arc<dyn TopicStore>,
+        Arc::new(MultiRoundMockProvider::new(vec![
+            provider_witness_chunks();
+            4
+        ])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_owned(),
+    );
+    crate::shipped_plugins::regenerate(root.path())
+        .await
+        .unwrap();
+    let packages = crate::shipped_plugins::root(root.path());
+    let names = ["context-program", "succession-summariser"];
+    state.plugins.install_shipped(&packages, &names, &[]).await;
+    let summary = state.plugins.summary("context-program");
+    assert!(
+        summary.is_some(),
+        "startup must install the shipped context program"
+    );
+    let summary = summary.unwrap();
+    assert_eq!(
+        summary.provenance,
+        swage_protocol::client::plugin::PluginProvenance::Shipped
+    );
+    assert!(summary.enabled_for_install);
+    assert!(
+        state
+            .plugins
+            .install_shipped(&packages, &names, &[])
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        state.plugins.summary("context-program").unwrap().revision,
+        1
+    );
+    state.turn_graph.load().await.unwrap();
+    let alternate = root.path().join("alternate");
+    std::fs::create_dir_all(&alternate).unwrap();
+    std::fs::write(alternate.join("plugin.toml"),
+        "name = \"alternate-context\"\nversion = \"1\"\ndescription = \"Composes context.\"\nscript = \"plugin.js\"\ngrants = [\"context\"]\nvariant_of = \"slot.context_program\"\n[[provides.slots]]\nname = \"context_program\"\n").unwrap();
+    std::fs::write(
+        alternate.join("plugin.js"),
+        include_str!("../../../../shipped/plugins/context-program/plugin.js"),
+    )
+    .unwrap();
+    state.plugins.install(&alternate, &[], None).await.unwrap();
+    state
+        .plugins
+        .set_enablement("alternate-context", Some(topic.id), true, None)
+        .await
+        .unwrap();
+    let agent = ScopeLocation::General.agent_dir(root.path(), "gateway");
+    std::fs::create_dir_all(&agent).unwrap();
+    for (mode, served, reason) in [
+        ("shipped", "plugin context-program", None),
+        ("variant", "plugin alternate-context", None),
+        ("disabled", "builtin", Some("context-program")),
+        ("throws", "builtin", Some("composition broke")),
+    ] {
+        state
+            .plugins
+            .set_enablement("alternate-context", Some(topic.id), mode == "variant", None)
+            .await
+            .unwrap();
+        if mode == "variant" {
+            std::fs::write(agent.join("config.toml"),
+                "[experimentation.locations.\"slot.context_program\"]\nforced_variant = \"alternate-context\"\n").unwrap();
+        } else {
+            std::fs::write(agent.join("config.toml"), "").unwrap();
+        }
+        if mode == "disabled" {
+            state
+                .plugins
+                .set_enablement("context-program", None, false, None)
+                .await
+                .unwrap();
+        }
+        if mode == "throws" {
+            state
+                .plugins
+                .set_enablement("context-program", None, true, None)
+                .await
+                .unwrap();
+            let replacement = root.path().join("broken");
+            std::fs::create_dir_all(&replacement).unwrap();
+            std::fs::copy(
+                packages.join("context-program/plugin.toml"),
+                replacement.join("plugin.toml"),
+            )
+            .unwrap();
+            std::fs::write(replacement.join("plugin.js"),
+                "swage.provide.slot('context_program', () => { throw new Error('composition broke'); });").unwrap();
+            state
+                .plugins
+                .install(&replacement, &[], None)
+                .await
+                .unwrap();
+        }
+        // Fresh sessions avoid a prior session's recorded variant choice.
+        let session = storage.create_session(new_session(topic.id)).await.unwrap();
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: session.agent_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session.id,
+            None,
+            TurnInput::from("Hello"),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+        let thread = storage.list_by_session(session.id).await.unwrap()[0].id;
+        let turn = storage.list_turns_by_thread(thread).await.unwrap()[0].id;
+        let report: serde_json::Value =
+            serde_json::from_str(&storage.get_snapshot(turn).await.unwrap().unwrap()).unwrap();
+        let slot = &report["turn_graph"]["context_program"];
+        assert_eq!(slot["served"], served, "{mode}: {slot}");
+        match reason {
+            Some(reason) => assert!(
+                slot["fallback"]
+                    .as_str()
+                    .is_some_and(|s| s.contains(reason)),
+                "{mode}: {slot}"
+            ),
+            None => assert!(slot["fallback"].is_null(), "{mode}: {slot}"),
+        }
+        assert!(
+            report["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["name"] == "history")
+        );
+        let draws = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(session.id),
+                entity_id: Some("slot.context_program".into()),
+                event_kind: Some("variant_selected".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(draws.len(), 1, "the slot draw is recorded for {mode}");
+    }
 }
 
 // -----------------------------------------------------------------------

@@ -1777,18 +1777,14 @@ impl GatewayWorkflowLauncher {
         } else {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        #[cfg(test)]
-        workflow_pause_test_hook::pause("start-snapshot-pending", session.id).await;
-        // State, worker count and observation time share one storage snapshot.
-        let (record, status_as_of) = self
+        let record = self
             .state
             .storage
-            .get_workflow_run_observation(run.id)
+            .get_workflow_run(run.id)
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "workflow run disappeared".to_string())?;
-        #[cfg(test)]
-        workflow_pause_test_hook::pause("start-snapshot-read", session.id).await;
+        let status_as_of = chrono::Utc::now();
         let run = run_wire(record).map_err(|error| error.message().to_owned())?;
         let workers_dispatched = run.terminal_account.as_ref().map(|account| {
             let workers = &account.workers;
@@ -3662,10 +3658,8 @@ fn worker_worktree_completion(entry: &WorkflowJournalRecord) -> Option<WorkflowW
         })
 }
 
-/// One worker's standing for the terminal account. An attempt record the
-/// contract cannot read is an error, as it is for every other reader of the
-/// column: a flag read as `false` from an unreadable record would be a
-/// positive statement the record does not make.
+/// One worker's standing for the terminal account. An unreadable attempt
+/// record fails the account because it cannot tell us whether replay redispatched the worker.
 fn worker_account(
     entry: &WorkflowJournalRecord,
     placements: &HashMap<u64, String>,
@@ -3688,13 +3682,17 @@ fn worker_account(
         placement: worker_placement_of(entry, placements),
         worktree: worker_worktree_completion(entry),
         termination,
-        redispatched_after_interruption: attempts.iter().any(|attempt| {
-            matches!(
-                attempt.cause,
-                WorkflowAttemptCause::AfterInterruption
-                    | WorkflowAttemptCause::AfterProviderFailure { .. }
-            )
-        }),
+        redispatch_causes: attempts
+            .into_iter()
+            .map(|attempt| attempt.cause)
+            .filter(|cause| {
+                matches!(
+                    cause,
+                    WorkflowAttemptCause::AfterInterruption
+                        | WorkflowAttemptCause::AfterProviderFailure { .. }
+                )
+            })
+            .collect(),
     })
 }
 
@@ -6130,6 +6128,11 @@ async fn run_host_commands_inner(
                         continue;
                     }
                 };
+                // The journal intent can reach readers before the hold exists.
+                // Announce the open decision even when the run cannot park.
+                let _ = state
+                    .broadcast
+                    .send(ServerEvent::WorkflowRunUpdated { run_id });
                 match settle_answered_hold(&state, entry_id, hold.id).await {
                     Ok(Some(result)) => {
                         let _ = reply.send(Ok(result));
@@ -8453,6 +8456,94 @@ fn source_hash(source: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Run the saved workflow named `name` in the general scope with `args` and
+/// wait for its result: a turn-graph step filled by a workflow. The run is
+/// an ordinary run — recorded, budgeted, inspectable — whose return value
+/// is the step's output; a run that does not complete within `wait`, or
+/// ends any other way, is the step's failure.
+pub(crate) async fn run_saved_workflow_for_slot(
+    state: AppState,
+    name: &str,
+    args: Value,
+    wait: std::time::Duration,
+    session_id: Option<Uuid>,
+) -> Result<Value, String> {
+    let general = state
+        .topic_store
+        .general_scope()
+        .await
+        .map_err(|error| error.to_string())?;
+    let script = state
+        .storage
+        .list_workflow_scripts(general.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|script| script.name == name)
+        .ok_or_else(|| format!("no saved workflow named '{name}' in the general scope"))?;
+    let workflow = resolve_workflow_by_id(&state, script.id, None)
+        .await?
+        .ok_or_else(|| format!("workflow '{name}' could not be resolved"))?;
+    let run = start_run(
+        state.clone(),
+        workflow.topic_id,
+        session_id,
+        workflow.script_version_id,
+        workflow.inline_identity(),
+        workflow.source.clone(),
+        workflow.argument_schema.clone(),
+        None,
+        args,
+        WorkflowBudget::default(),
+        workflow.delivery_grant.clone(),
+        workflow.carrying_skill.clone(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let started = std::time::Instant::now();
+    loop {
+        let record = state
+            .storage
+            .get_workflow_run(run.id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("run {} vanished", run.id))?;
+        match record.state.as_str() {
+            "running" | "parked" => {}
+            "completed" => return Ok(record.final_output.unwrap_or(Value::Null)),
+            other => {
+                return Err(format!(
+                    "workflow '{name}' ended {other}: {}",
+                    record.error_message.unwrap_or_default()
+                ));
+            }
+        }
+        if started.elapsed() >= wait {
+            // The step has failed; the run does not outlive it — cancelled
+            // so it neither holds a run slot nor delivers to no one later.
+            if let Some(token) = state
+                .active_workflow_runs
+                .lock()
+                .await
+                .get(&run.id)
+                .cloned()
+            {
+                token.cancel();
+            }
+            return Err(format!(
+                "workflow '{name}' did not complete within {}s; the run {} is cancelled",
+                wait.as_secs(),
+                run.id
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 async fn start_run(

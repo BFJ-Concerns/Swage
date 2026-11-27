@@ -568,21 +568,11 @@ impl WorkflowStore for SqliteStorage {
     }
 
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {
-        Ok(self
-            .get_workflow_run_observation(id)
-            .await?
-            .map(|(record, _)| record))
-    }
-
-    async fn get_workflow_run_observation(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<(WorkflowRunRecord, chrono::DateTime<chrono::Utc>)>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
                 &format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"),
                 [id.to_string()],
-                |row| Ok((run_row(row)?, chrono::Utc::now())),
+                run_row,
             )
             .optional()
         })

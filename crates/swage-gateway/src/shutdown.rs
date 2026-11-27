@@ -613,6 +613,7 @@ async fn resume_delegating_parent(
         .enqueue_delegation_continuation(
             parent.id,
             NewQueuedTurnInput {
+                requested_model: None,
                 delivery_targets,
                 client_id: None,
                 attended,
@@ -1328,6 +1329,7 @@ mod tests {
         for (origin, attended, delivery_targets) in inputs {
             storage
                 .enqueue_turn_input(NewQueuedTurnInput {
+                    requested_model: None,
                     delivery_targets: delivery_targets.clone(),
                     client_id: None,
                     attended: *attended,
@@ -1499,6 +1501,7 @@ mod tests {
         ] {
             storage
                 .enqueue_turn_input(NewQueuedTurnInput {
+                    requested_model: None,
                     delivery_targets,
                     client_id: None,
                     attended: false,
@@ -1593,6 +1596,7 @@ mod tests {
             .unwrap();
         let rows = storage.list_pending_channel_messages().await.unwrap();
         let input = NewQueuedTurnInput {
+            requested_model: None,
             delivery_targets: Vec::new(),
             client_id: None,
             attended: false,

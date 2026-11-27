@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rs::TS;
 
-use swage_protocol::{channel, client, device, hosting};
+use swage_protocol::{channel, client, device, hosting, plugin};
 
 #[path = "support/projection_output.rs"]
 mod projection_output;
@@ -28,6 +28,10 @@ fn repo_root() -> PathBuf {
 fn typescript_bindings_are_regenerated() {
     let cfg = ts_rs::Config::new().with_out_dir(repo_root().join("frontend/src/lib/protocol"));
 
+    plugin::ContextCompactionOutput::export_all(&cfg).expect("export context compaction");
+    plugin::ContextOperation::export_all(&cfg).expect("export context operations");
+    plugin::ContextProgramInput::export_all(&cfg).expect("export context input");
+    plugin::ContextProgramOutput::export_all(&cfg).expect("export context output");
     hosting::sandbox::SandboxPolicy::export_all(&cfg).expect("export sandbox policy");
     hosting::GitCredentialRequest::export_all(&cfg).expect("export git credential request");
     hosting::GitCredentialResponse::export_all(&cfg).expect("export git credential response");
@@ -87,6 +91,13 @@ fn typescript_bindings_are_regenerated() {
         .expect("export topic default surface");
     client::topic::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
+    client::plugin::PluginListResponse::export_all(&cfg).expect("export plugin list");
+    client::plugin::InstallPluginRequest::export_all(&cfg).expect("export install plugin");
+    client::plugin::PluginEnablementRequest::export_all(&cfg).expect("export plugin enablement");
+    client::turn_graph::TurnGraphResponse::export_all(&cfg).expect("export turn graph");
+    client::turn_graph::ProposeTurnGraphRequest::export_all(&cfg)
+        .expect("export propose turn graph");
+    client::turn_graph::TurnGraphDiff::export_all(&cfg).expect("export turn graph diff");
     client::topic::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
     client::conversation::ConversationListResponse::export_all(&cfg).expect("export conversations");
     client::conversation::RecentSessionsResponse::export_all(&cfg).expect("export recent sessions");
@@ -442,6 +453,10 @@ fn hosting_schema_is_regenerated() {
     write_schema::<hosting::HostingSurface>("hosting.json");
 }
 
+#[test]
+fn plugin_process_schema_is_regenerated() {
+    write_schema::<plugin::PluginProcessSurface>("plugin-process.json");
+}
 fn write_schema<T: schemars::JsonSchema>(name: &str) {
     let schema = schemars::schema_for!(T);
     write_json_projection(

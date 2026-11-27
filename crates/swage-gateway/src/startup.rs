@@ -84,6 +84,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
     if let Err(error) = crate::shipped_skill_projection::regenerate(&root).await {
         warn!(%error, "failed to regenerate shipped skill resources");
     }
+    if let Err(error) = crate::shipped_plugins::regenerate(&root).await {
+        warn!(%error, "failed to regenerate shipped plugin packages");
+    }
     let db_path = root.join("swage.db");
 
     // Step 4: Open persistent storage.
@@ -110,6 +113,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
         &root,
         &browser_host_slot,
+        Vec::new(),
     );
     let browser_host = browser_host_slot.get().cloned();
 
@@ -140,6 +144,43 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
                 std::process::exit(1);
             }),
     );
+    // Installed plugins come up from their records; their tools join the
+    // dispatcher once their isolates are serving.
+    if let Err(error) = state.plugins.load().await {
+        eprintln!("Failed to load installed plugins: {error}");
+        std::process::exit(1);
+    }
+    // The parts the gateway ships on the plugin contracts install
+    // themselves once per shipped version, through the same path an
+    // operator's package takes, with provenance `shipped`.
+    {
+        let reserved = crate::plugin::built_in_tool_names(&state);
+        let names: Vec<&str> = crate::shipped_plugins::SHIPPED_PLUGINS
+            .iter()
+            .map(|plugin| plugin.name)
+            .collect();
+        for installed in state
+            .plugins
+            .install_shipped(
+                &crate::shipped_plugins::root(&state.config_root),
+                &names,
+                &reserved,
+            )
+            .await
+        {
+            info!(
+                "Installed shipped plugin {} revision {}",
+                installed.name, installed.revision
+            );
+        }
+    }
+    crate::plugin::refresh_tool_dispatcher(&state);
+    // The turn graph's revisions come up from their records; an install
+    // with none starts on the shipped graph.
+    if let Err(error) = state.turn_graph.load().await {
+        eprintln!("Failed to load the turn graph: {error}");
+        std::process::exit(1);
+    }
 
     // Step 8: Requeue channel messages claimed by a crashed gateway before
     // interrupting the orphaned turns they were attached to. A running process
@@ -317,6 +358,24 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
         state.clone(),
         background_shutdown.clone(),
     );
+    // A plugin's brokered process that has sat idle for its manifest's
+    // period is stopped here; session close and gateway stop are the other
+    // two ends.
+    let plugin_idle_handle = {
+        let state = state.clone();
+        crate::background_loop::spawn_periodic_loop(
+            std::time::Duration::from_secs(30),
+            background_shutdown.clone(),
+            "plugin process idle sweep failed",
+            move || {
+                let state = state.clone();
+                async move {
+                    state.plugins.sweep_idle().await;
+                    Ok(())
+                }
+            },
+        )
+    };
     let browser_idle_handle = browser_host.clone().map(|browser_host| {
         crate::background_loop::spawn_periodic_loop(
             std::time::Duration::from_secs(30),
@@ -412,6 +471,10 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
         }
     }
 
+    if let Err(error) = plugin_idle_handle.await {
+        warn!(%error, "background plugin idle loop did not shut down cleanly");
+    }
+    state.plugins.shutdown().await;
     if let Some(browser_host) = browser_host {
         browser_host.shutdown().await;
     }
@@ -764,11 +827,15 @@ pub fn workspace_tools(config: &swage_config::ResolvedConfig) -> Vec<Arc<dyn cra
 }
 
 /// Build the tool dispatch pipeline with all built-in tools from configuration.
+/// Build the tool dispatch pipeline: every built-in tool from configuration,
+/// plus the tools the installed plugins provide (`plugin_tools`, from
+/// `PluginService::tools`).
 pub(crate) fn build_tool_dispatcher(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
     config_root: &std::path::Path,
     browser_host: &std::sync::OnceLock<Arc<crate::browser::BrowserHost>>,
+    plugin_tools: Vec<Arc<dyn crate::tool::Tool>>,
 ) -> crate::tool::ToolDispatcher {
     let browser_host = browser_host.get_or_init(|| {
         crate::browser::BrowserHost::new(crate::browser::BrowserConfig::from_tool_config(
@@ -776,14 +843,19 @@ pub(crate) fn build_tool_dispatcher(
             config_root,
         ))
     });
-    build_tool_dispatcher_with_browser(config, storage, Some(Arc::clone(browser_host)), config_root)
+    build_tool_dispatcher_with_browser(
+        config,
+        storage,
+        Some(Arc::clone(browser_host)),
+        plugin_tools,
+    )
 }
 
 pub(crate) fn build_tool_dispatcher_with_browser(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
     browser_host: Option<Arc<crate::browser::BrowserHost>>,
-    config_root: &std::path::Path,
+    plugin_tools: Vec<Arc<dyn crate::tool::Tool>>,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
         Tool, agent_definition::AgentDefinitionTool, browser::browser_tools,
@@ -791,15 +863,14 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
         knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
         knowledge::KnowledgeSearchTool, material::MaterialReadTool, memory::MemoryReadTool,
-        memory::MemoryWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
-        run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
-        session_variable::SessionVariableTool, surface::SurfaceLibraryTool,
-        surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
-        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        memory::MemoryWriteTool, python_execute::PythonExecuteTool, run_event::RunEventPostTool,
+        schedule::ScheduleTool, schedule::WakeMeLaterTool, session_variable::SessionVariableTool,
+        surface::SurfaceLibraryTool, surface::SurfaceReadTool, surface::SurfaceWriteTool,
+        task_definition::TaskDefinitionTool, tool_result_read::ToolResultReadTool,
+        url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
 
     let max_output = config.tools.max_output_bytes;
-    let shell_timeout = std::time::Duration::from_secs(config.tools.shell_timeout_secs);
 
     let mut base_tools: Vec<Arc<dyn Tool>> = workspace_tools(config);
     base_tools.extend::<Vec<Arc<dyn Tool>>>(vec![
@@ -864,13 +935,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         base_tools
     };
 
-    let plugin_tools = resolve_plugin_directory(config, config_root)
-        .map(|plugin_directory| discover_plugin_tools(&plugin_directory, shell_timeout))
-        .unwrap_or_else(|| (vec![], vec![]));
-    for warning in &plugin_tools.1 {
-        warn!("{warning}");
-    }
-
+    // A plugin's tools join the registry beside the built-ins; which scopes
+    // see them is decided at each turn (`PluginService::withheld_tool_names`).
     // A plugin's tool is not built in, so it enters through
     // `ToolRegistry::register`, which refuses a built-in's name, whether or
     // not this host registered that built-in, and a name already taken.
@@ -879,7 +945,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         let _ = names.register_builtin(Arc::clone(tool));
     }
     let mut non_python_tools = base_tools;
-    for tool in plugin_tools.0 {
+    for tool in plugin_tools {
         match names.register(Arc::clone(&tool)) {
             Ok(()) => non_python_tools.push(tool),
             Err(error) => warn!("plugin tool was not registered: {error}"),
@@ -927,19 +993,6 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     );
 
     crate::tool::ToolDispatcher::allow_all(all_tools)
-}
-
-fn resolve_plugin_directory(
-    config: &swage_config::ResolvedConfig,
-    config_root: &std::path::Path,
-) -> Option<PathBuf> {
-    let directory = config.tools.plugin_directory.as_ref()?;
-    let path = PathBuf::from(directory);
-    if path.is_absolute() {
-        Some(path)
-    } else {
-        Some(config_root.join(path))
-    }
 }
 
 fn ensure_managed_secret_key(root: &std::path::Path) -> Result<PathBuf, String> {
@@ -2920,6 +2973,7 @@ mod tests {
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
             &std::sync::OnceLock::new(),
+            Vec::new(),
         );
 
         assert!(
@@ -2944,6 +2998,7 @@ mod tests {
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
             &std::sync::OnceLock::new(),
+            Vec::new(),
         );
         let registry = dispatcher.registry();
 
@@ -2969,6 +3024,7 @@ mod tests {
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
             &std::sync::OnceLock::new(),
+            Vec::new(),
         );
         let registry = dispatcher.registry();
         let offered = registry.offered(registry.list().into_iter().map(str::to_string).collect());
@@ -3039,6 +3095,7 @@ mod tests {
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
             &std::sync::OnceLock::new(),
+            Vec::new(),
         );
 
         assert!(
@@ -3062,6 +3119,7 @@ mod tests {
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
             &std::sync::OnceLock::new(),
+            Vec::new(),
         );
 
         assert!(dispatcher.registry().get("python_execute").is_none());
@@ -3076,6 +3134,7 @@ mod tests {
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
             &std::sync::OnceLock::new(),
+            Vec::new(),
         );
 
         assert!(
@@ -3093,6 +3152,7 @@ mod tests {
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
             &std::sync::OnceLock::new(),
+            Vec::new(),
         );
 
         assert!(
@@ -3109,91 +3169,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_tool_dispatcher_registers_plugin_tools_from_configured_directory() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let plugin_dir = temp_dir.path().join("plugins").join("echo-plugin");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("capability.json"),
-            serde_json::json!({
-                "description": "Echo plugin",
-                "tool": {
-                    "name": "echo_plugin",
-                    "description": "Echo plugin",
-                    "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
-                    "executable": "run.py"
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            plugin_dir.join("run.py"),
-            "#!/usr/bin/env python3\nprint('{}')\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(plugin_dir.join("run.py"))
-                .unwrap()
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(plugin_dir.join("run.py"), perms).unwrap();
-        }
-
-        let storage =
-            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-        let mut config = swage_config::ResolvedConfig::default();
-        config.tools.plugin_directory = Some("plugins".to_string());
-
-        let dispatcher = build_tool_dispatcher(
-            &config,
-            storage as Arc<dyn swage_storage::store::Storage>,
-            temp_dir.path(),
-            &std::sync::OnceLock::new(),
-        );
-
-        assert!(dispatcher.registry().get("echo_plugin").is_some());
-    }
-
-    /// A plugin that names its tool after a built-in is left out, on a host
-    /// that registers that built-in and on one that does not: `shell` is
-    /// registered here, and this dispatcher is built with no browser, so
-    /// `browser_click` is a reserved name with nothing registered under it.
-    #[tokio::test]
     async fn a_plugin_tool_cannot_take_a_built_in_tools_name() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        for name in ["shell", "browser_click"] {
-            let plugin_dir = temp_dir.path().join("plugins").join(name);
-            std::fs::create_dir_all(&plugin_dir).unwrap();
-            std::fs::write(
-                plugin_dir.join("capability.json"),
-                serde_json::json!({
-                    "description": "Plugin under a built-in's name",
-                    "tool": {
-                        "name": name,
-                        "description": "A plugin's tool",
-                        "parameters": {"type": "object", "properties": {}},
-                        "executable": "run.py"
-                    }
-                })
-                .to_string(),
-            )
-            .unwrap();
-            std::fs::write(plugin_dir.join("run.py"), "#!/usr/bin/env python3\n").unwrap();
+        // `shell` is registered here, and this dispatcher is built with no
+        // browser, so `browser_click` is a reserved name with nothing
+        // registered under it: a plugin's tool takes neither.
+        struct PluginTool(&'static str);
+        #[async_trait::async_trait]
+        impl crate::tool::Tool for PluginTool {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn description(&self) -> &str {
+                "A plugin's tool"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({ "type": "object" })
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &dyn swage_tool::context::ToolContext,
+            ) -> Result<serde_json::Value, swage_core::ToolError> {
+                Ok(serde_json::Value::Null)
+            }
         }
-
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-        let mut config = swage_config::ResolvedConfig::default();
-        config.tools.plugin_directory = Some("plugins".to_string());
-
         let dispatcher = build_tool_dispatcher_with_browser(
-            &config,
+            &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
             None,
-            temp_dir.path(),
+            vec![
+                Arc::new(PluginTool("shell")) as Arc<dyn crate::tool::Tool>,
+                Arc::new(PluginTool("browser_click")),
+            ],
         );
 
         let shell = dispatcher.registry().get("shell").expect("built-in shell");

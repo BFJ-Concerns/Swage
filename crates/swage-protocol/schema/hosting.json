@@ -1942,12 +1942,6 @@
           "minimum": 0,
           "type": "integer"
         },
-        "plugin_directory": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "python_execute": {
           "$ref": "#/$defs/PythonExecuteToolConfig"
         },

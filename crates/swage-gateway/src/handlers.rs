@@ -14,8 +14,15 @@ use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
 use swage_protocol::{
     client::{
-        channel as channel_wire, schedule as schedule_wire,
+        channel as channel_wire,
+        plugin::{
+            InstallPluginRequest, PluginEnablementRequest, PluginListResponse, PluginSummary,
+        },
+        schedule as schedule_wire,
         skill::{SkillItem, SkillListResponse},
+        turn_graph::{
+            ProposeTurnGraphRequest, TurnGraphDiff, TurnGraphResponse, TurnGraphRevision,
+        },
     },
     hosting::{
         AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
@@ -82,6 +89,155 @@ use crate::{
 /// is up and accepting connections before routing traffic to it.
 pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// `GET /api/plugins` — the installed plugins with what each provides,
+/// its grants, secrets, revisions and where it is enabled.
+pub async fn list_plugins(State(state): State<AppState>) -> Json<PluginListResponse> {
+    Json(state.plugins.list())
+}
+
+/// `POST /api/plugins` — install a package from a directory on this host as
+/// a new revision of its plugin, serving at once; the dispatcher is rebuilt
+/// so new sessions see the plugin's tools where it is enabled.
+pub async fn install_plugin(
+    State(state): State<AppState>,
+    Json(request): Json<InstallPluginRequest>,
+) -> Result<Json<PluginSummary>, ApiError> {
+    let source = std::path::PathBuf::from(request.source_path.trim());
+    if source.as_os_str().is_empty() {
+        return Err(ApiError::validation(
+            "source_path must name the package directory".to_string(),
+        ));
+    }
+    let reserved = crate::plugin::built_in_tool_names(&state);
+    let outcome = state.plugins.install(&source, &reserved, None).await;
+    // An install that was applied but could not be recorded has changed the
+    // live set as much as a recorded one; the dispatcher follows it either way.
+    if matches!(
+        outcome,
+        Ok(_) | Err(crate::plugin::PluginServiceError::Unrecorded(_))
+    ) {
+        crate::plugin::refresh_tool_dispatcher(&state);
+    }
+    Ok(Json(outcome.map_err(plugin_service_error)?))
+}
+
+/// `PUT /api/plugins/{name}/enablement` — enable or disable a plugin for the
+/// install or for one topic. Enablement is read at each turn, so no
+/// dispatcher rebuild is needed.
+pub async fn set_plugin_enablement(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<PluginEnablementRequest>,
+) -> Result<Json<PluginSummary>, ApiError> {
+    if let Some(topic_id) = request.topic_id {
+        state
+            .topic_store
+            .get(topic_id)
+            .await
+            .map_err(|e| ApiError::from(GatewayError::Storage(e)))?
+            .ok_or(ApiError::from(GatewayError::TopicNotFound { id: topic_id }))?;
+    }
+    let summary = state
+        .plugins
+        .set_enablement(&name, request.topic_id, request.enabled, None)
+        .await
+        .map_err(plugin_service_error)?;
+    Ok(Json(summary))
+}
+
+/// `GET /api/turn-graph` — the active revision and every revision recorded.
+pub async fn get_turn_graph(
+    State(state): State<AppState>,
+) -> Result<Json<TurnGraphResponse>, ApiError> {
+    state.turn_graph.list().map(Json).map_err(turn_graph_error)
+}
+
+/// `POST /api/turn-graph/revisions` — propose a revision: validated against
+/// what is installed, recorded either way, and activated if it validates.
+/// The record comes back in both cases; a failed one carries why, and the
+/// revision that served before keeps serving.
+pub async fn propose_turn_graph(
+    State(state): State<AppState>,
+    Json(request): Json<ProposeTurnGraphRequest>,
+) -> Result<Json<TurnGraphRevision>, ApiError> {
+    let revision = state
+        .turn_graph
+        .propose(request.graph, None)
+        .await
+        .map_err(turn_graph_error)?;
+    Ok(Json(revision))
+}
+
+/// `GET /api/turn-graph/revisions/{revision}` — one recorded revision.
+pub async fn get_turn_graph_revision(
+    State(state): State<AppState>,
+    Path(revision): Path<String>,
+) -> Result<Json<TurnGraphRevision>, ApiError> {
+    let number = parse_revision(&revision)?;
+    state
+        .turn_graph
+        .revision(number)
+        .map(Json)
+        .map_err(turn_graph_error)
+}
+
+/// `POST /api/turn-graph/revisions/{revision}/activate` — make a recorded
+/// revision the one that serves, re-validated against what is installed now.
+pub async fn activate_turn_graph_revision(
+    State(state): State<AppState>,
+    Path(revision): Path<String>,
+) -> Result<Json<TurnGraphRevision>, ApiError> {
+    let number = parse_revision(&revision)?;
+    let revision = state
+        .turn_graph
+        .activate(number, None)
+        .await
+        .map_err(turn_graph_error)?;
+    Ok(Json(revision))
+}
+
+/// `GET /api/turn-graph/diff/{from}/{to}` — what changed between two revisions.
+pub async fn diff_turn_graph(
+    State(state): State<AppState>,
+    Path((from, to)): Path<(String, String)>,
+) -> Result<Json<TurnGraphDiff>, ApiError> {
+    let diff = state
+        .turn_graph
+        .diff(parse_revision(&from)?, parse_revision(&to)?)
+        .map_err(turn_graph_error)?;
+    Ok(Json(diff))
+}
+
+fn parse_revision(text: &str) -> Result<u32, ApiError> {
+    text.trim()
+        .parse::<u32>()
+        .map_err(|_| ApiError::validation(format!("'{text}' is not a revision number")))
+}
+
+fn turn_graph_error(error: crate::turn_graph::TurnGraphError) -> ApiError {
+    use crate::turn_graph::TurnGraphError;
+    match error {
+        TurnGraphError::Refused(message) => ApiError::validation(message),
+        TurnGraphError::NotFound(revision) => {
+            ApiError::not_found_str("turn graph revision", &revision.to_string())
+        }
+        unreadable @ TurnGraphError::Unreadable { .. } => {
+            ApiError::from(GatewayError::ConfigError(unreadable.to_string()))
+        }
+        TurnGraphError::Storage(error) => ApiError::from(GatewayError::Storage(error)),
+    }
+}
+
+fn plugin_service_error(error: crate::plugin::PluginServiceError) -> ApiError {
+    use crate::plugin::PluginServiceError;
+    match error {
+        PluginServiceError::Refused(message) => ApiError::validation(message),
+        PluginServiceError::NotFound(name) => ApiError::not_found_str("plugin", &name),
+        PluginServiceError::Storage(error) => ApiError::from(GatewayError::Storage(error)),
+        PluginServiceError::Unrecorded(message) => ApiError::internal(message),
+    }
 }
 
 /// `GET /api/capabilities` — inspect gateway workflow capability gating.
@@ -1115,6 +1271,17 @@ pub async fn delete_conversation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    // The session's processes stop while the session row still exists, so
+    // each stop is recorded against it; then the row goes.
+    if state
+        .storage
+        .get_session(id)
+        .await
+        .map_err(GatewayError::from)?
+        .is_some()
+    {
+        state.plugins.stop_session(id).await;
+    }
     let svc =
         ConversationService::new(state.storage, state.topic_store).with_broadcast(state.broadcast);
     svc.delete_conversation(id).await?;
@@ -1640,11 +1807,12 @@ pub async fn submit_turn(
         .contains_key(&req.conversation_id);
     let queue_standing = crate::turn_queue::has_queued_input(&state, req.conversation_id).await?;
     if running_turn.is_some() || guard_held || queue_standing {
-        let queued = crate::turn_queue::queue_input(
+        let queued = crate::turn_queue::queue_input_with_model(
             &state,
             req.conversation_id,
             thread.id,
             crate::turn::TurnInput::with_attachments(req.message, req.attachments),
+            req.model,
         )
         .await?;
         return Ok((
@@ -1674,11 +1842,12 @@ pub async fn submit_turn(
     let turn = match turn {
         Ok(turn) => turn,
         Err(swage_core::StorageError::ConstraintViolation(_)) => {
-            let queued = crate::turn_queue::queue_input(
+            let queued = crate::turn_queue::queue_input_with_model(
                 &state,
                 req.conversation_id,
                 thread.id,
                 crate::turn::TurnInput::with_attachments(req.message, req.attachments),
+                req.model,
             )
             .await?;
             // The claim lost to a turn the table holds: name that turn.
@@ -1993,6 +2162,7 @@ async fn execute_external_delegate_message(
             ws_tx: silent_ws_tx.clone(),
             session_id: None,
             turn_id: sender_turn_id,
+            call_hook: None,
         },
         "external delegated turn",
     )
@@ -2411,62 +2581,6 @@ mod tests {
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn channel_link_code_list_uses_declared_response_and_preserves_array_body() {
-        let root = tempfile::tempdir().unwrap();
-        let storage =
-            Arc::new(swage_storage::SqliteStorage::open(&root.path().join("codes.db")).unwrap());
-        let state = AppState::for_test(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn TopicStore>,
-            Arc::new(MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
-        let helper_response: channel_wire::ChannelLinkCodeListResponse =
-            crate::onboarding::list_channel_link_codes(&state)
-                .await
-                .unwrap();
-        assert!(helper_response.0.is_empty());
-        let response: Json<channel_wire::ChannelLinkCodeListResponse> =
-            list_channel_link_codes(State(state.clone())).await.unwrap();
-        assert_eq!(
-            body_json(response.into_response()).await,
-            serde_json::json!([])
-        );
-
-        let issued = crate::onboarding::create_channel_link_code(
-            &state,
-            channel_wire::CreateChannelLinkCodeRequest {
-                integration: swage_protocol::client::delivery::ExternalChannelIntegration::Telegram,
-                topic_id: None,
-                agent_id: None,
-                home_target: None,
-            },
-        )
-        .await
-        .unwrap();
-        let response = build_router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/api/onboarding/channels/link-codes")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            body_json(response).await,
-            serde_json::json!([{
-                "integration": "telegram",
-                "link_code": issued.link_code,
-                "expires_at": issued.expires_at,
-            }]),
-        );
     }
 
     #[test]

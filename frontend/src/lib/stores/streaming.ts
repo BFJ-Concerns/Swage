@@ -10,6 +10,7 @@ import type { Effort } from "../protocol/Effort";
 import type { MessageAttachment } from "../protocol/MessageAttachment";
 import { stopConversationTurn } from "../api/conversations";
 import type { MessageView, ServerEvent, ToolCallView } from "../types";
+import type { ConversationStore } from "./conversations";
 
 // Approval state surfaced for the ApprovalCard / MessageInput swap.
 // Fields match the `approval_required` server event so the UI can render
@@ -145,10 +146,7 @@ export interface StreamingStoreOptions {
       conversationId?: string | null,
     ): void;
     /** Installs a message the gateway recorded and announced on its conversation. */
-    appendRecordedMessage?(
-      message: import("../protocol/MessageView").MessageView,
-      conversationId: string,
-    ): void;
+    appendRecordedMessage?: ConversationStore["appendRecordedMessage"];
     /** Shows a message the gateway holds for the conversation's next turn. */
     appendQueuedMessage?(
       queued: import("../protocol/QueuedMessageView").QueuedMessageView,
@@ -199,6 +197,7 @@ export function createStreamingStore(
     providerRetryState: { current: ProviderRetryState | null };
     pendingApprovalState: { current: PendingApproval | null };
     activeTurnGeneration: number;
+    queuedTurnId: string | null;
     /** The thread the running turn was sent on; null is the root thread. */
     threadId: string | null;
   }
@@ -242,6 +241,7 @@ export function createStreamingStore(
       providerRetryState: fromStore(providerRetryStore),
       pendingApprovalState: fromStore(pendingApprovalStore),
       activeTurnGeneration: 0,
+      queuedTurnId: null,
       get threadId() { return threadIdState.current; },
       set threadId(value: string | null) { threadIdStore.set(value); },
     };
@@ -286,6 +286,7 @@ export function createStreamingStore(
   }
 
   function setStreamActive(conversationId: string | null, stream: InternalStreamState, active: boolean): void {
+    if (!active) stream.queuedTurnId = null;
     stream.isStreamingStore.set(active);
     if (conversationId) options?.connectionStore?.setStreamActive?.(conversationId, active);
   }
@@ -625,6 +626,8 @@ export function createStreamingStore(
           // starting, as far as this view is concerned — no client called
           // startTurn for it.
           options?.conversationStore?.clearQueuedMessages?.(event.session_id, event.queued_ids);
+          if (stream.queuedTurnId === event.turn_id) break;
+          stream.queuedTurnId = event.turn_id;
           stream.threadId = event.thread_id;
           stream.streamedContentStore.set("");
           stream.turnErrorStore.set(null);
@@ -633,6 +636,13 @@ export function createStreamingStore(
           stream.activeTurnGeneration += 1;
           stream.turnStartedAtStore.set(new Date().toISOString());
           setStreamActive(ownerId, stream, true);
+          break;
+
+        case "queued_message_sent":
+          options?.conversationStore?.appendRecordedMessage?.(event.message, event.session_id, {
+            id: event.queued_id,
+            clientId: event.client_id,
+          });
           break;
 
         case "message_appended":

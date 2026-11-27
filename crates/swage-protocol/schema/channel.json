@@ -374,10 +374,15 @@
         "queued_at": {
           "format": "date-time",
           "type": "string"
+        },
+        "thread_id": {
+          "format": "uuid",
+          "type": "string"
         }
       },
       "required": [
         "id",
+        "thread_id",
         "origin",
         "content",
         "queued_at"

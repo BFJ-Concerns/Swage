@@ -375,11 +375,9 @@ pub struct WorkflowWorkerAccount {
     pub worktree: Option<WorkflowWorktreeCompletion>,
     /// Absent for a worker that settled on its own account.
     pub termination: Option<WorkflowWorkerTermination>,
-    /// Whether any attempt of this worker followed a gateway interruption:
-    /// the interrupted attempt's outcome is unknown and the tool calls it
-    /// issued may have been applied, so this worker's effects may have been
-    /// repeated.
-    pub redispatched_after_interruption: bool,
+    /// Why replay dispatched each additional attempt, in dispatch order.
+    /// Tool calls from earlier attempts may have been applied already.
+    pub redispatch_causes: Vec<WorkflowAttemptCause>,
 }
 
 /// Every worker the run dispatched, sorted by how it stood when the run

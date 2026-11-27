@@ -13,6 +13,7 @@ use swage_storage::{AttachmentScopeKind, MaterialStatus};
 use swage_tool::context::ToolContext;
 use uuid::Uuid;
 
+use super::workspace::continuable_output_value;
 use crate::state::AppState;
 use crate::tool::Tool;
 
@@ -131,33 +132,18 @@ impl Tool for MaterialReadTool {
                 "'offset_bytes' must be a `next_offset_bytes` from an earlier read of this material",
             ));
         }
-        let mut end = offset.saturating_add(self.max_output_bytes).min(text.len());
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == offset && end < text.len() {
-            return Err(failed(
-                "the installation's output limit is too small to return the next character",
-            ));
-        }
-        let mut result = json!({
-            "id": material.id,
-            "title": material.title,
-            "mime_type": material.mime_type,
-            "output": &text[offset..end],
-        });
-        if offset > 0 || end < text.len() {
-            result["offset_bytes"] = json!(offset);
-            result["total_bytes"] = json!(text.len());
-        }
-        if end < text.len() {
-            result["truncated"] = json!(true);
-            result["next_offset_bytes"] = json!(end);
-            result["follow_up"] = json!({
-                "tool": MATERIAL_READ_TOOL,
-                "arguments": {"id": material.id, "offset_bytes": end},
-            });
-        }
+        let arguments = serde_json::Map::from_iter([("id".to_owned(), json!(material.id))]);
+        let mut result = continuable_output_value(
+            text,
+            self.max_output_bytes,
+            offset,
+            MATERIAL_READ_TOOL,
+            arguments,
+        )
+        .map_err(failed)?;
+        result["id"] = json!(material.id);
+        result["title"] = json!(material.title);
+        result["mime_type"] = json!(material.mime_type);
         Ok(result)
     }
 }
@@ -359,19 +345,21 @@ mod tests {
             max_output_bytes: 25,
         };
         let mut joined = String::new();
-        let mut offset = None;
+        let mut params = json!({ "id": material.id });
         loop {
-            let mut params = json!({ "id": material.id.to_string() });
-            if let Some(offset) = offset {
-                params["offset_bytes"] = json!(offset);
-            }
             let result = tool.execute(params, &ctx).await.unwrap();
             joined.push_str(result["output"].as_str().unwrap());
             assert_eq!(result["total_bytes"], text.len());
-            match result.get("next_offset_bytes") {
-                Some(next) => offset = next.as_u64(),
-                None => break,
-            }
+            let Some(follow_up) = result.get("follow_up") else {
+                break;
+            };
+            assert_eq!(follow_up["tool"], MATERIAL_READ_TOOL);
+            assert_eq!(follow_up["arguments"]["id"], material.id.to_string());
+            assert_eq!(
+                follow_up["arguments"]["offset_bytes"],
+                result["next_offset_bytes"]
+            );
+            params = follow_up["arguments"].clone();
         }
         assert_eq!(joined, text);
     }

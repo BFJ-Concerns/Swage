@@ -94,7 +94,7 @@ override, but `undefined` at the call site falls back to the default.
 
 | Function | Returns | Notes |
 |---|---|---|
-| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Every option is optional: a worker needs no `agent` or `task` definition (model, effort and prompt suffice; `agent` given but empty is refused with `AgentRequiredError`). Accepted options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `timeoutMs`, `cwd`, `isolation`, `schema`, `maxAttempts`, `label`, `phase`, `identity`, `session`, `worker`, `elements`, `variables`, `assembly`; any other key throws `UnknownAgentOptionError` before a worker spawns. `identity` (boolean) preserves the call's identity through fan-in, `phase` (string) groups the call in the journal, and `assembly` (string) selects the context assembly strategy. |
+| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Every option is optional: a worker needs no `agent` or `task` definition (model, effort and prompt suffice; `agent` given but empty is refused with `AgentRequiredError`). Accepted options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `minEffort`, `timeoutMs`, `cwd`, `isolation`, `schema`, `maxAttempts`, `label`, `phase`, `identity`, `session`, `worker`, `elements`, `variables`, `assembly`; any other key throws `UnknownAgentOptionError` before a worker spawns. `identity` (boolean) preserves the call's identity through fan-in, `phase` (string) groups the call in the journal, and `assembly` (string) selects the context assembly strategy. |
 | `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`, and `.workingDirectory` after completion; the latter is the host-resolved child directory, including a provisioned isolated worktree. Accepts the same options as `agent()`. |
 | `session(options?)` | `Promise<HeldWorker>` | Opens a held worker. Creation options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `cwd`, `isolation`, `label`. |
 | `send(worker, prompt, options?)` | `Promise<Value>` | Runs the held worker's next sequential turn. Turn options: `schema`, `maxAttempts`, `timeoutMs`, `label`. |
@@ -127,6 +127,35 @@ result records `served_model`, the catalogue model that actually served the
 call. Continuation calls ignore `fallbackModel` and never make a fallback
 attempt; they use the worker's persisted model selection, including a fallback
 selected at creation.
+
+### Effort floor
+
+`agent()` and `agentStart()` accept `minEffort`, the least effort the call
+accepts being served at, in the `effort` vocabulary. `session()` and `send()`
+do not take it. Before the call's worker exists, `refuse_below_effort_floor`
+(`crates/swage-gateway/src/workflow.rs`) resolves the call's effort against
+the model it would run on and fails the call with `EffortFloorError`, naming
+the shortfall, in three cases: the requested level clamps to one below the
+floor, the call sets no effort and its model's catalogue entry has no
+`default_effort`, or the model declares no effort control. The refusal is
+journalled with the call and no provider request is made. A call served by
+its declared `fallbackModel` is not checked against the floor.
+
+The clamp is `resolve_effort`'s (`crates/swage-core/src/effort.rs`): a level
+the model lacks becomes the nearest supported level below it, or the lowest
+supported level when none is below it. `off` is never that level. It is
+served only to a call that requests `off`, on a model that can switch
+reasoning off; requested of a model that cannot, it clamps to the model's
+lowest level.
+
+A script's author reads the catalogue with the `model_list` tool
+(`crates/swage-gateway/src/tool/model_list.rs`). It returns each model's
+`id`, `aliases`, provider `model` name and vendor `family`, with
+`effort_levels`, the levels the model serves as asked, lowest first and
+including `off` where the model can switch reasoning off. Its `default` is
+the id a call runs on when neither the call nor the script's `defaults`
+header gives a `model`, an `agent` or a `task`. The ids it lists are the ones
+`model` and `fallbackModel` accept.
 
 ### Structured output extraction
 
