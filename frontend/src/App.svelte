@@ -17,6 +17,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
+  import PairingDialog from "./lib/components/PairingDialog.svelte";
   import { getConversation } from "./lib/api/conversations";
   import { fetchSettings } from "./lib/api/settings";
   import { openSharedWorkSurfaceChannel } from "./lib/api/work-surface";
@@ -602,6 +603,8 @@
     }
   });
 </script>
+
+<PairingDialog />
 
 {#if isInitialising}
   <!--

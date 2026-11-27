@@ -164,12 +164,6 @@ async fn browser_survives_settings_save_and_grant_update() {
     );
     request.tool_permissions.as_mut().unwrap().allow =
         vec!["browser_navigate".into(), "browser_snapshot".into()];
-    request
-        .tool_permissions
-        .as_mut()
-        .unwrap()
-        .require_approval
-        .clear();
     swage_gateway::settings::save_settings(&state, request)
         .await
         .expect("grant update");

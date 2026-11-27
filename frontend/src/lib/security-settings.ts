@@ -1,0 +1,11 @@
+import type { SecurityCheck } from "./protocol/SecurityCheck";
+import type { RelaxedCheck } from "./protocol/RelaxedCheck";
+
+export const CHECK_LABELS: Record<SecurityCheck, string> = {
+  sandbox: "Sandbox",
+  approval_prompts: "Approval prompts",
+  access_gate: "Access gate",
+};
+export function relaxedBy(entry: Pick<RelaxedCheck, "relaxed_by">): string {
+  return entry.relaxed_by.kind === "topic" ? "relaxed by this topic" : "relaxed by the install";
+}

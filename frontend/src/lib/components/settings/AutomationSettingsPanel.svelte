@@ -1,14 +1,12 @@
 <script lang="ts">
   import { SETTINGS_LABELS } from "../../settings-labels";
-  import type { RequireApprovalEntry, SettingsResponse } from "../../types";
-  interface Props { archiveDelayError?: string | null; settings: SettingsResponse; onValidation?: (bundlesInvalid: boolean, approvalsInvalid: boolean, message: string | null) => void; }
+  import type { SettingsResponse } from "../../types";
+  interface Props { archiveDelayError?: string | null; settings: SettingsResponse; onValidation?: (bundlesInvalid: boolean) => void; }
   let { archiveDelayError = null, settings = $bindable(), onValidation }: Props = $props();
   const BUNDLES_SHAPE_MESSAGE = "Tool bundles must be a JSON object of string arrays.";
   const id = $props.id();
-  let bundlesInvalid = false;
   let bundlesError = $state<string | null>(null);
   let invalidBundlesDraft = $state<string | null>(null);
-  let approvalsInvalid = false;
   function changed(): void { settings = { ...settings }; }
   function lines(values: string[]): string { return values.join("\n"); }
   function parseLines(value: string): string[] { return value.split("\n").map((line) => line.trim()).filter(Boolean); }
@@ -18,9 +16,8 @@
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(BUNDLES_SHAPE_MESSAGE);
       const bundles: Record<string, string[]> = {};
       for (const [name, tools] of Object.entries(parsed)) { if (!Array.isArray(tools) || tools.some((tool) => typeof tool !== "string")) throw new Error(BUNDLES_SHAPE_MESSAGE); bundles[name] = tools; }
-      settings.tool_permissions.bundles = bundles; bundlesInvalid = false; bundlesError = null; invalidBundlesDraft = null; changed(); onValidation?.(false, approvalsInvalid, null);
+      settings.tool_permissions.bundles = bundles; bundlesError = null; invalidBundlesDraft = null; changed(); onValidation?.(false);
     } catch (error) {
-      bundlesInvalid = true;
       invalidBundlesDraft = value;
       const message = error instanceof Error ? error.message : "";
       const location = message.match(/line (\d+) column (\d+)/);
@@ -36,16 +33,10 @@
       bundlesError = error instanceof SyntaxError
         ? `Tool bundles: invalid JSON${suffix}. Use an object mapping bundle names to arrays of tool names.`
         : `Tool bundles: ${message || "Use an object mapping bundle names to arrays of tool names."}`;
-      onValidation?.(true, approvalsInvalid, null);
+      onValidation?.(true);
     }
   }
-  function updateApprovals(value: string): void {
-    try {
-      const parsed = JSON.parse(value) as unknown; if (!Array.isArray(parsed)) throw new Error("Approval rules must be a JSON array.");
-      for (const entry of parsed) if (typeof entry !== "string" && (!entry || typeof entry !== "object" || typeof (entry as {tool?:unknown}).tool !== "string")) throw new Error("Approval rule objects need a tool string.");
-      settings.tool_permissions.require_approval = parsed as RequireApprovalEntry[]; approvalsInvalid = false; changed(); onValidation?.(bundlesInvalid, false, null);
-    } catch (error) { approvalsInvalid = true; onValidation?.(bundlesInvalid, true, error instanceof Error ? error.message : "Approval rules must be valid JSON."); }
-  }
+
 </script>
 
 <div class="field"><div class="key">{SETTINGS_LABELS["attachments.accepted_schemes"]}<small>Allowed URI schemes, one per line without a colon. Defaults: https and data. Saved changes apply to new turns; provider restrictions still apply.</small></div><div class="val"><textarea class="text" rows="3" aria-label="Accepted image reference schemes" value={lines(settings.attachments.accepted_schemes)} oninput={(event) => { settings.attachments.accepted_schemes = parseLines(event.currentTarget.value); changed(); }}></textarea></div></div>
@@ -63,13 +54,12 @@
     <label>{SETTINGS_LABELS["tool_runtime.search.base_url"]}<input type="url" class="text" aria-label="Search base URL" bind:value={settings.tool_runtime.search.base_url} oninput={changed} autocomplete="off" placeholder="https://search.example.org" required/></label>
   {/if}
 </div></div>
-<div class="field"><div class="key">{SETTINGS_LABELS["sandbox.enabled"]}<small>Global sandbox policy written to config.toml. Saved changes apply to new turns.</small></div><div class="val"><button type="button" class="opt" class:active={settings.sandbox.enabled} onclick={() => {settings.sandbox.enabled=true;changed();}}>Enabled</button><button type="button" class="opt" class:active={!settings.sandbox.enabled} onclick={() => {settings.sandbox.enabled=false;changed();}}>Disabled</button></div></div>
 <div class="field"><div class="key">{SETTINGS_LABELS["hitl"]}<small>Timeout and timeout policy for human approval requests without a per-tool override.</small></div><div class="val val-stack"><div class="search-row"><label>Approval timeout (seconds)<input type="number" class="text small" bind:value={settings.hitl.timeout} oninput={changed} min="1" placeholder="300"/></label><button type="button" class="opt" class:active={settings.hitl.timeout_policy === "reject"} onclick={() => {settings.hitl.timeout_policy="reject";changed();}}>Reject</button><button type="button" class="opt" class:active={settings.hitl.timeout_policy === "interrupt"} onclick={() => {settings.hitl.timeout_policy="interrupt";changed();}}>Interrupt</button></div></div></div>
 <div class="field"><div class="key">{SETTINGS_LABELS["context"]}<small>Assembly strategy, assembly timeout, and optional token budget.</small></div><div class="val val-stack"><div class="search-row"><label>Context assembly<input type="text" class="text" bind:value={settings.context.assembly} oninput={changed} placeholder="default" autocomplete="off"/></label><label>Context assembly timeout (seconds)<input type="number" class="text small" bind:value={settings.context.timeout} oninput={changed} min="1" placeholder="5"/></label><label>Context token budget<input type="number" class="text small" value={settings.context.budget ?? ""} min="1" placeholder="model limit" oninput={(event)=>{settings.context.budget=event.currentTarget.value?Number(event.currentTarget.value):null;changed();}}/></label></div></div></div>
 <div class="field"><div class="key"><label for={`${id}-allow`}>{SETTINGS_LABELS["tool_permissions.allow"]}</label><small>One rule per line. Use * for broad availability.</small></div><div class="val"><textarea class="text" rows="4" id={`${id}-allow`} value={lines(settings.tool_permissions.allow)} oninput={(event)=>{settings.tool_permissions.allow=parseLines(event.currentTarget.value);changed();}}></textarea></div></div>
 <div class="field"><div class="key"><label for={`${id}-deny`}>{SETTINGS_LABELS["tool_permissions.deny"]}</label><small>One denied tool name or pattern per line.</small></div><div class="val"><textarea class="text" rows="4" id={`${id}-deny`} value={lines(settings.tool_permissions.deny)} oninput={(event)=>{settings.tool_permissions.deny=parseLines(event.currentTarget.value);changed();}}></textarea></div></div>
 <div class="field"><div class="key"><label for={`${id}-bundles`}>{SETTINGS_LABELS["tool_permissions.bundles"]}</label><small>JSON object mapping bundle names to tool arrays.</small></div><div class="val val-stack"><textarea class="text code" rows="7" id={`${id}-bundles`} value={invalidBundlesDraft ?? JSON.stringify(settings.tool_permissions.bundles,null,2)} spellcheck="false" aria-label={SETTINGS_LABELS["tool_permissions.bundles"]} aria-invalid={bundlesError ? "true" : undefined} aria-describedby={bundlesError ? "tool-bundles-error" : undefined} oninput={(event)=>updateBundles(event.currentTarget.value)}></textarea>{#if bundlesError}<small id="tool-bundles-error" role="alert">{bundlesError}</small>{/if}</div></div>
-<div class="field"><div class="key"><label for={`${id}-approvals`}>{SETTINGS_LABELS["tool_permissions.require_approval"]}</label><small>JSON array of tool names or objects with timeout overrides.</small></div><div class="val"><textarea class="text code" rows="7" id={`${id}-approvals`} value={JSON.stringify(settings.tool_permissions.require_approval,null,2)} spellcheck="false" oninput={(event)=>updateApprovals(event.currentTarget.value)}></textarea></div></div>
+<p>Sandbox and approval-gated tools are configured in <a href="/settings/security">Security settings</a>.</p>
 
 <style>
   .search-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
