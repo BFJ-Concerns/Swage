@@ -315,6 +315,39 @@ async fn a_process_that_dies_mid_call_fails_the_call_and_the_next_call_starts_af
         .await;
 }
 
+/// A process whose connection fails while it keeps running is ended and
+/// reaped, not left behind once the next call starts another.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_process_that_drops_its_connection_is_ended_with_it() {
+    let plugin = ProcessPlugin::new(
+        spec(vec![], vec![], Duration::from_secs(60)),
+        Arc::new(Events::default()) as Arc<dyn ProcessObserver>,
+    );
+    let host = Arc::new(RecordingHost::default());
+    let first = invoke(&plugin, "s", "count", json!({}), &host)
+        .await
+        .expect("serves");
+    let pid = first["pid"].as_u64().expect("the process's pid");
+    let dropped = invoke(&plugin, "s", "disconnect", json!({}), &host)
+        .await
+        .expect_err("the connection ended mid-call");
+    assert!(
+        matches!(dropped, PluginError::ProcessExited(_)),
+        "{dropped}"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "process {pid} outlived its connection"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    plugin
+        .stop_all(PluginProcessStopReason::GatewayStopping)
+        .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_process_that_does_not_serve_a_declared_tool_fails_the_start() {
     let mut spec = spec(vec![], vec![], Duration::from_secs(60));

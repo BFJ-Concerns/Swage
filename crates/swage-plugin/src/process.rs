@@ -650,6 +650,18 @@ impl ServingProcess {
                     .is_some();
                 if !already_ended {
                     process.end(ending.clone());
+                    // A process whose connection failed may still be
+                    // running; it is ended and reaped here, since nothing
+                    // reaches it once it is forgotten.
+                    if let Err(error) = process
+                        .child
+                        .lock()
+                        .await
+                        .graceful_shutdown(KILL_GRACE)
+                        .await
+                    {
+                        tracing::warn!(pid = process.pid, %error, "plugin process did not stop after its connection ended");
+                    }
                     on_exit(&ending);
                 }
             })

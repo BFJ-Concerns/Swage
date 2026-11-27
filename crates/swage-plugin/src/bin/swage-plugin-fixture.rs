@@ -5,7 +5,8 @@
 //! times it has been called in this process (state a session keeps);
 //! `call` runs the session tool named by `params.tool` through the host;
 //! `log` writes `params.message` to the host's log; `hang` never answers;
-//! `exit` ends the process mid-call. With `--stop-file <path>` it writes
+//! `exit` ends the process mid-call; `disconnect` drops the connection and
+//! keeps running. With `--stop-file <path>` it writes
 //! the reason it was stopped for to that path before exiting.
 
 use std::collections::HashMap;
@@ -48,7 +49,7 @@ async fn main() {
     });
     out_tx
         .send(PluginProcessMessage::Ready {
-            tools: ["echo", "count", "call", "log", "hang", "exit"]
+            tools: ["echo", "count", "call", "log", "hang", "exit", "disconnect"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
@@ -66,6 +67,15 @@ async fn main() {
             }
         };
         match request {
+            PluginProcessRequest::Invoke { tool, .. } if tool == "disconnect" => {
+                // Closing both halves of the socket, the process stays up
+                // with nothing to talk to.
+                drop(lines);
+                drop(out_tx);
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+            }
             PluginProcessRequest::Invoke {
                 id,
                 tool,
