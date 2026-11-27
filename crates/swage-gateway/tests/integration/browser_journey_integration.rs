@@ -12,7 +12,7 @@ use std::sync::{
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::get;
@@ -43,6 +43,33 @@ use crate::support::{ProcessEnvGuard, start_live_server};
 use tokio_util::sync::CancellationToken;
 
 static BROWSER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn browser_type_appends_to_a_prefilled_field_and_submits_it() {
+    let _browser_guard = BROWSER_TEST_LOCK.lock().await;
+    let Some(binary) = browser_binary_or_skip() else {
+        return;
+    };
+    let fixture = FixtureServer::spawn().await;
+    let temp = TempDir::new().expect("tempdir");
+    let host = BrowserHost::new(browser_config(&binary, temp.path(), fixture.host()));
+
+    let page = host
+        .navigate("typing-session", &fixture.url("/prefilled"))
+        .await
+        .expect("navigate to prefilled form");
+    let reference = extract_ref_for_name(&page.output, "Name").expect("field ref");
+    let (submitted, _) = host
+        .type_text("typing-session", &reference, "surname", false, true)
+        .await
+        .expect("append and submit");
+    host.shutdown().await;
+    assert!(
+        submitted.output.contains("Received first surname"),
+        "{}",
+        submitted.output
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn browser_survives_settings_save_and_grant_update() {
@@ -1186,6 +1213,8 @@ impl FixtureServer {
         let saw_login = Arc::new(AtomicBool::new(false));
         let app = Router::new()
             .route("/login", get(login_page).post(login_post))
+            .route("/prefilled", get(prefilled_form))
+            .route("/prefilled-result", get(prefilled_result))
             .route("/long-login", get(long_login_page))
             .route("/fallback-mask", get(fallback_mask_page))
             .route("/single-action", get(single_action_page))
@@ -1227,6 +1256,30 @@ impl FixtureServer {
 impl Drop for FixtureServer {
     fn drop(&mut self) {
         self.shutdown.cancel();
+    }
+}
+
+async fn prefilled_form() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+        <form action="/prefilled-result">
+            <label for="name">Name</label>
+            <input id="name" name="name" value="first ">
+            <button>Send</button>
+        </form>"#,
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct PrefilledSubmission {
+    name: String,
+}
+
+async fn prefilled_result(Query(form): Query<PrefilledSubmission>) -> Html<&'static str> {
+    if form.name == "first surname" {
+        Html("<h1>Received first surname</h1>")
+    } else {
+        Html("<h1>Unexpected name</h1>")
     }
 }
 
