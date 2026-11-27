@@ -32,6 +32,7 @@ import type {
   ConnectionStatus,
   ConversationDetail,
   ConversationResponse,
+  ConversationSummary,
   OperatorOverview,
   Topic,
   ServerEvent,
@@ -509,6 +510,71 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledWith(
       "conv-general",
     );
+  });
+
+  it("records the agent chosen on the front door after switching to a topic", async () => {
+    const topic = makeTopic();
+    const agent = makeAgentDefinition({ id: "topic-reviewer", display_name: "Topic reviewer" });
+    let finishLoadingSessions!: (sessions: ConversationSummary[]) => void;
+    const sessions = new Promise<ConversationSummary[]>((resolve) => {
+      finishLoadingSessions = resolve;
+    });
+    vi.mocked(topicsApi.listTopics).mockResolvedValue([topic]);
+    vi.mocked(conversationsApi.listConversations).mockReturnValue(sessions);
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockImplementation(
+      async (topicId) => topicId === topic.id ? [agent] : [],
+    );
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce({
+      id: "conv-topic-reviewer",
+      topic_id: topic.id,
+      agent_id: agent.id,
+      agent_display_name: agent.display_name,
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    });
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    const start = document.querySelector('[aria-label="Start a session"]')!;
+    const topicPicker = start.querySelector<HTMLSelectElement>(".topic-choice select")!;
+    flushSync(() => {
+      topicPicker.value = topic.id;
+      topicPicker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await waitForText(agent.display_name);
+
+    const agentPicker = start.querySelector<HTMLSelectElement>('select[aria-label="Agent"]')!;
+    expect(Array.from(agentPicker.options, (option) => option.value)).toContain(agent.id);
+    flushSync(() => {
+      agentPicker.value = agent.id;
+      agentPicker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const startButton = Array.from(start.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Start",
+    )!;
+    flushSync(() => startButton.click());
+    await settleUi();
+
+    const composerAgent = () => document.querySelector<HTMLSelectElement>(
+      '[aria-label="Conversation"] select[aria-label="Agent"]',
+    )?.value;
+    expect(conversationsApi.listConversations).toHaveBeenCalledWith(topic.id);
+    expect(conversationsApi.createConversation).not.toHaveBeenCalled();
+    expect(composerAgent()).toBe(agent.id);
+
+    finishLoadingSessions([]);
+    await settleUi();
+    expect(composerAgent()).toBe(agent.id);
+
+    sendDraft();
+    await settleUi();
+
+    expect(conversationsApi.createConversation).toHaveBeenCalledExactlyOnceWith(
+      topic.id, null, agent.id, null,
+    );
+    expect(window.location.pathname).toBe("/conversations/conv-topic-reviewer");
+    expect(document.querySelector('[aria-label="Session agent"]')?.textContent).toBe(agent.display_name);
   });
 
   it("keeps a session created for one scope out of the scope the user moved to meanwhile", async () => {
