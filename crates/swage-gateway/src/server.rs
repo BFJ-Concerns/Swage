@@ -76,9 +76,10 @@ async fn activity_recording_middleware(
 /// masked answer would be written back into the person's configuration.
 const UNMASKED_API_PATHS: &[&str] = &["/api/secrets", "/api/recovery", "/api/settings"];
 
-/// Mask registered secret values in every JSON answer the API gives, as the
-/// store and the conversation socket do. A handler that answers with what it
-/// was sent, before or instead of what it stored, is covered here.
+/// Mask registered secret values in every JSON answer the API gives
+/// ([`crate::answer_masking`]), as the conversation socket does. A handler
+/// that answers with what it was sent, before or instead of what it stored,
+/// is covered here.
 async fn registered_value_masking_middleware(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -94,8 +95,15 @@ async fn registered_value_masking_middleware(
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("application/json"));
-    let values = state.storage.registered_secret_values();
-    if !path.starts_with("/api/") || owned_text || !is_json || values.current().is_empty() {
+    if !path.starts_with("/api/")
+        || owned_text
+        || !is_json
+        || state
+            .storage
+            .registered_secret_values()
+            .current()
+            .is_empty()
+    {
         return response;
     }
     let (mut parts, body) = response.into_parts();
@@ -112,7 +120,7 @@ async fn registered_value_masking_middleware(
     let Ok(mut text) = String::from_utf8(bytes.to_vec()) else {
         return Response::from_parts(parts, Body::from(bytes));
     };
-    if values.mask(&mut text) {
+    if crate::answer_masking::mask_answer_text(state.storage.as_ref(), &mut text).await {
         parts.headers.remove(axum::http::header::CONTENT_LENGTH);
     }
     Response::from_parts(parts, Body::from(text))

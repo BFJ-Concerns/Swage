@@ -520,6 +520,13 @@ pub trait SecretStore: AuditStore + Send + Sync {
     /// input and context snapshots. Whoever reads the values from their
     /// backends replaces the set, so every writer masks against the same one.
     fn registered_secret_values(&self) -> swage_core::RegisteredSecretValues;
+    /// Those of `candidates` this store holds as its own keys: values of its
+    /// identifier and slug columns. An answer that masks registered values
+    /// keeps these, so it still names what it points at.
+    async fn stored_keys_among(
+        &self,
+        candidates: Vec<String>,
+    ) -> Result<std::collections::HashSet<String>, StorageError>;
 }
 
 #[async_trait]
@@ -2410,6 +2417,13 @@ mod tests {
     impl SecretStore for StubStorage {
         fn registered_secret_values(&self) -> swage_core::RegisteredSecretValues {
             swage_core::RegisteredSecretValues::default()
+        }
+
+        async fn stored_keys_among(
+            &self,
+            _: Vec<String>,
+        ) -> Result<std::collections::HashSet<String>, StorageError> {
+            unimplemented!()
         }
 
         async fn write_credentials_with_audit(

@@ -40,29 +40,52 @@ pub(super) fn install(conn: &Connection, values: &RegisteredSecretValues) -> rus
         },
     )?;
 
-    for (table, columns) in masked_columns(conn)? {
-        for column in columns {
-            for (event, name) in [("INSERT", "insert"), ("UPDATE OF \"{column}\"", "update")] {
-                let event = event.replace("{column}", &column);
-                conn.execute_batch(&format!(
-                    "CREATE TEMP TRIGGER \"swage_mask_{table}_{column}_{name}\"
-                     AFTER {event} ON main.\"{table}\"
-                     WHEN swage_holds_secret(NEW.\"{column}\")
-                     BEGIN
-                         UPDATE main.\"{table}\" SET \"{column}\" = swage_mask(\"{column}\")
-                         WHERE rowid = NEW.rowid;
-                     END;"
-                ))?;
-            }
+    for (table, column) in text_columns(conn)?
+        .into_iter()
+        .filter(|(_, column)| !swage_core::secret_masking::is_key_field(column))
+    {
+        // The body names its table unqualified: some SQLite releases (3.46.1
+        // among them) refuse a qualified name there, and with no temp table of
+        // that name it resolves to the main table the trigger is on.
+        for (event, name) in [("INSERT", "insert"), ("UPDATE OF \"{column}\"", "update")] {
+            let event = event.replace("{column}", &column);
+            conn.execute_batch(&format!(
+                "CREATE TEMP TRIGGER \"swage_mask_{table}_{column}_{name}\"
+                 AFTER {event} ON main.\"{table}\"
+                 WHEN swage_holds_secret(NEW.\"{column}\")
+                 BEGIN
+                     UPDATE \"{table}\" SET \"{column}\" = swage_mask(\"{column}\")
+                     WHERE rowid = NEW.rowid;
+                 END;"
+            ))?;
         }
     }
     Ok(())
 }
 
-/// Each ordinary table's text columns, leaving out the secret store itself,
-/// full-text indexes, whose shadow tables only the index may write, and key
-/// columns (`is_key_field`), which the product reads back to find a row.
-fn masked_columns(conn: &Connection) -> rusqlite::Result<Vec<(String, Vec<String>)>> {
+/// Whether `candidate` is held in one of the store's own key columns — an
+/// identifier or slug column of a table masking covers — and so is a key
+/// the product reads back rather than text anyone wrote.
+pub(super) fn is_stored_key(conn: &Connection, candidate: &str) -> rusqlite::Result<bool> {
+    for (table, column) in text_columns(conn)?
+        .into_iter()
+        .filter(|(_, column)| swage_core::secret_masking::is_key_field(column))
+    {
+        let found = conn
+            .prepare_cached(&format!(
+                "SELECT 1 FROM main.\"{table}\" WHERE \"{column}\" = ?1 LIMIT 1"
+            ))?
+            .exists([candidate])?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Each ordinary table's text columns, leaving out the secret store itself
+/// and full-text indexes, whose shadow tables only the index may write.
+fn text_columns(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
     let mut statement = conn.prepare(
         "SELECT name, sql FROM main.sqlite_schema
          WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -76,7 +99,7 @@ fn masked_columns(conn: &Connection) -> rusqlite::Result<Vec<(String, Vec<String
         .map(|(name, _)| name.as_str())
         .collect();
 
-    let mut masked = Vec::new();
+    let mut found = Vec::new();
     for (table, _) in &tables {
         let is_index = virtual_tables
             .iter()
@@ -88,17 +111,9 @@ fn masked_columns(conn: &Connection) -> rusqlite::Result<Vec<(String, Vec<String
             "SELECT name FROM pragma_table_info('{table}')
              WHERE upper(type) LIKE '%TEXT%'"
         ))?;
-        let columns: Vec<String> = columns
-            .query_map([], |row| row.get::<_, String>(0))?
-            .filter(|column| {
-                column
-                    .as_ref()
-                    .map_or(true, |name| !swage_core::secret_masking::is_key_field(name))
-            })
-            .collect::<Result<_, _>>()?;
-        if !columns.is_empty() {
-            masked.push((table.clone(), columns));
+        for column in columns.query_map([], |row| row.get::<_, String>(0))? {
+            found.push((table.clone(), column?));
         }
     }
-    Ok(masked)
+    Ok(found)
 }

@@ -407,6 +407,22 @@ impl SecretStore for SqliteStorage {
         self.secret_values.clone()
     }
 
+    async fn stored_keys_among(
+        &self,
+        candidates: Vec<String>,
+    ) -> Result<std::collections::HashSet<String>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut keys = std::collections::HashSet::new();
+            for candidate in candidates {
+                if super::record_masking::is_stored_key(conn, &candidate)? {
+                    keys.insert(candidate);
+                }
+            }
+            Ok(keys)
+        })
+        .await
+    }
+
     async fn write_credentials_with_audit(
         &self,
         creations: Vec<NewSecretRecord>,

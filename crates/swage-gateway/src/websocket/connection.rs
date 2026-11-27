@@ -10,7 +10,9 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
 
 use swage_protocol::client::error::ErrorCode;
+use swage_storage::store::SecretStore;
 
+use crate::answer_masking::mask_answer_text;
 use crate::{error::ApiError, state::AppState, subscription::SubscriptionState};
 
 use super::{ServerEvent, dispatch_client_message};
@@ -134,7 +136,7 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
         session_id,
         rx,
         bcast_rx,
-        state.storage.registered_secret_values(),
+        Arc::clone(&state.storage) as Arc<dyn SecretStore>,
     ));
 
     if state.shutdown_signal.is_cancelled() {
@@ -224,13 +226,14 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
 }
 
 /// Forward the connection's ordered session stream and unrelated broadcasts,
-/// each frame masked against the registered secret values as the record is.
+/// each frame masked against the registered secret values as every answer is
+/// ([`crate::answer_masking`]).
 async fn forward_events<S>(
     mut ws_sink: S,
     session_id: Uuid,
     mut rx: mpsc::UnboundedReceiver<ServerEvent>,
     mut bcast_rx: broadcast::Receiver<ServerEvent>,
-    secret_values: swage_core::RegisteredSecretValues,
+    store: Arc<dyn SecretStore>,
 ) where
     S: futures::Sink<Message> + Unpin,
 {
@@ -244,10 +247,10 @@ async fn forward_events<S>(
                     Some(event) => {
                         let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
                         let mut disconnected = false;
-                        for event in held_back_stream(&mut streamed, event, &secret_values) {
+                        for event in held_back_stream(&mut streamed, event, &store.registered_secret_values()) {
                             match serde_json::to_string(&event) {
                                 Ok(mut json) => {
-                                    secret_values.mask(&mut json);
+                                    mask_answer_text(store.as_ref(), &mut json).await;
                                     if ws_sink.send(Message::Text(json.into())).await.is_err() {
                                         disconnected = true;
                                         break;
@@ -277,7 +280,7 @@ async fn forward_events<S>(
                         let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
                         match serde_json::to_string(&event) {
                             Ok(mut json) => {
-                                secret_values.mask(&mut json);
+                                mask_answer_text(store.as_ref(), &mut json).await;
                                 // Attempt the send; ignore the result for broadcast events.
                                 let _ = ws_sink.send(Message::Text(json.into())).await;
                                 if is_shutdown {
@@ -367,13 +370,22 @@ mod tests {
     use crate::turn::TurnInput;
     use swage_core::{FinishReason, StreamChunk};
 
+    /// An in-memory store masking `values`, as the socket's forwarder reads it.
+    fn store_masking(values: &[&str]) -> Arc<dyn SecretStore> {
+        let store = swage_storage::SqliteStorage::in_memory().unwrap();
+        store
+            .registered_secret_values()
+            .replace(values.iter().map(|value| value.to_string()).collect());
+        Arc::new(store)
+    }
+
     /// What the socket carries is masked as the record is: a tool's result
-    /// holding a registered value reaches the client with the value masked.
-    #[tokio::test]
+    /// holding a registered value reaches the client with the value masked,
+    /// under a field named like a key as anywhere else, while the event's own
+    /// call id is left as it is.
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_registered_value_never_reaches_the_socket() {
         let secret = r#"sock-"registered"-value"#;
-        let values = swage_core::RegisteredSecretValues::default();
-        values.replace(vec![secret.to_string()]);
         let (sender, receiver) = mpsc::unbounded_channel();
         let (_broadcast_sender, broadcast) = broadcast::channel(4);
         let (sink, mut output) = futures::channel::mpsc::unbounded::<Message>();
@@ -382,14 +394,17 @@ mod tests {
             Uuid::new_v4(),
             receiver,
             broadcast,
-            values,
+            store_masking(&[secret]),
         ));
         sender
             .send(ServerEvent::ToolEnd {
                 execution: None,
                 call_id: "call-1".into(),
                 tool: "shell".into(),
-                result: serde_json::json!({ "output": format!("key {secret} end") }),
+                result: serde_json::json!({
+                    "output": format!("key {secret} end"),
+                    "secret_id": secret,
+                }),
                 status: "success".into(),
                 duration_ms: 1,
                 truncated: false,
@@ -409,14 +424,14 @@ mod tests {
         };
         let event: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(event["result"]["output"], "key [REDACTED_SECRET] end");
+        assert_eq!(event["result"]["secret_id"], "[REDACTED_SECRET]");
+        assert_eq!(event["call_id"], "call-1");
     }
 
     /// A registered value a provider streams in two pieces reaches the
     /// client masked whole, and the text after it is not lost.
     #[tokio::test]
     async fn a_value_split_across_tokens_never_reaches_the_socket() {
-        let values = swage_core::RegisteredSecretValues::default();
-        values.replace(vec!["verifier-canary-7F29".to_string()]);
         let (sender, receiver) = mpsc::unbounded_channel();
         let (_broadcast_sender, broadcast) = broadcast::channel(4);
         let (sink, output) = futures::channel::mpsc::unbounded::<Message>();
@@ -425,7 +440,7 @@ mod tests {
             Uuid::new_v4(),
             receiver,
             broadcast,
-            values,
+            store_masking(&["verifier-canary-7F29"]),
         ));
         for content in ["the key is verifier-canary-", "7F29 and verif"] {
             sender
@@ -515,7 +530,7 @@ mod tests {
                 session_id,
                 receiver,
                 broadcast,
-                state.storage.registered_secret_values(),
+                Arc::clone(&state.storage) as Arc<dyn SecretStore>,
             ));
             let mut events = Vec::new();
             for _ in 0..6 {

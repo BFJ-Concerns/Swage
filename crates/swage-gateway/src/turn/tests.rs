@@ -6340,6 +6340,13 @@ impl swage_storage::store::SecretStore for MockStorage {
         swage_core::RegisteredSecretValues::default()
     }
 
+    async fn stored_keys_among(
+        &self,
+        _: Vec<String>,
+    ) -> Result<std::collections::HashSet<String>, StorageError> {
+        Ok(std::collections::HashSet::new())
+    }
+
     async fn write_credentials_with_audit(
         &self,
         creations: Vec<swage_storage::NewSecretRecord>,

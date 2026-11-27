@@ -168,11 +168,14 @@ mod tests {
             .unwrap()
     }
 
-    /// Identifiers are never rewritten: a short registered value that
-    /// happens to occur inside a generated key leaves the key, and every
-    /// reference to it, as it was, while the row's text is still masked.
+    /// The store's own keys are never rewritten: a short registered value
+    /// that happens to occur inside a generated key leaves the key, and every
+    /// reference to it, as it was, and the store reports it as a key. Text
+    /// anyone wrote is masked whatever its fields are called, so a value
+    /// under an `id`-named field of a record, or inside an object under one,
+    /// is masked like any other.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_registered_value_inside_an_identifier_leaves_it_whole() {
+    async fn keys_stay_whole_and_key_named_fields_of_a_record_are_masked() {
         use crate::store::SecretStore;
 
         let storage = SqliteStorage::in_memory().unwrap();
@@ -182,8 +185,10 @@ mod tests {
         let (id, description) = storage
             .with_conn(|conn| {
                 conn.execute(
-                    "INSERT INTO topics (id, name, description, slug, created_at, updated_at)
-                     VALUES ('0f4821aa', 'pin topic', 'pin 4821', 'pin', 'now', 'now')",
+                    r#"INSERT INTO topics (id, name, description, slug, created_at, updated_at)
+                     VALUES ('0f4821aa', 'pin topic',
+                             '{"secret_id":"4821","session":{"id":"s-4821"},"note":"ok"}',
+                             'pin', 'now', 'now')"#,
                     [],
                 )?;
                 conn.query_row(
@@ -195,7 +200,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(id, "0f4821aa");
-        assert_eq!(description, "pin [REDACTED_SECRET]");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&description).unwrap(),
+            serde_json::json!({
+                "secret_id": "[REDACTED_SECRET]",
+                "session": { "id": "s-[REDACTED_SECRET]" },
+                "note": "ok",
+            })
+        );
+        let keys = storage
+            .stored_keys_among(vec!["0f4821aa".into(), "s-4821".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            keys,
+            std::collections::HashSet::from(["0f4821aa".to_string()])
+        );
     }
 
     /// A record that is a JSON column stays readable when a registered value

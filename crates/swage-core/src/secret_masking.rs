@@ -7,6 +7,7 @@
 //! durable record masks through it, so a value reaches no record however it
 //! came in.
 
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 /// The text a registered value is replaced by.
@@ -94,7 +95,7 @@ pub fn mask_record_text(text: &mut String, values: &[String]) -> bool {
     {
         let documents = registered_documents(values);
         let changed = mask_document(&mut document, values, &documents);
-        if holds_any_form(&without_keys(&document).to_string(), values) {
+        if holds_any_form(&document.to_string(), values) {
             *text = serde_json::Value::String(REDACTED_SECRET.to_owned()).to_string();
             return true;
         }
@@ -136,26 +137,120 @@ fn registered_documents(values: &[String]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Whether a field holds a value the product reads back as a key: an
-/// identifier (`id`, `*_id`) or a slug (`slug`, `*_slug`). Masking leaves such
-/// a value as it is, in the store and in every JSON answer, because a key
-/// rewritten to the marker no longer finds what it names, and a key is
-/// generated or derived, never text anyone wrote.
+/// Whether a name is one the product gives its own keys: an identifier
+/// (`id`, `*_id`) or a slug (`slug`, `*_slug`). The name alone exempts
+/// nothing. The store leaves its own columns of such a name unmasked, and an
+/// answer keeps such a field only when the store confirms the value is one of
+/// its keys ([`mask_answer`]), so a field of that name in what a tool, a
+/// model or a person wrote is masked like any other.
 pub fn is_key_field(name: &str) -> bool {
     name == "id" || name.ends_with("_id") || name == "slug" || name.ends_with("_slug")
 }
 
-/// The document without the values of its key fields, which masking leaves.
-fn without_keys(value: &serde_json::Value) -> serde_json::Value {
+/// The string values of an answer's key-named fields that hold a registered
+/// value: the candidates [`mask_answer`] keeps when the store confirms they
+/// are its keys. Strings that hold a document of their own are content, so
+/// their fields are never candidates.
+pub fn answer_key_candidates(answer: &serde_json::Value, values: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    collect_key_candidates(answer, values, &mut found);
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
+fn collect_key_candidates(value: &serde_json::Value, values: &[String], found: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                match item {
+                    serde_json::Value::String(text)
+                        if is_key_field(key) && holds_any_form(text, values) =>
+                    {
+                        found.push(text.clone());
+                    }
+                    item => collect_key_candidates(item, values, found),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_key_candidates(item, values, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Mask every value in a JSON answer the product gives, as
+/// [`mask_record_text`] masks a record, except that a key-named field whose
+/// string value is in `keys` — the product's own keys, as its store confirms
+/// them — is left as it is, so the answer still names what it points at.
+pub fn mask_answer(
+    answer: &mut serde_json::Value,
+    values: &[String],
+    keys: &HashSet<String>,
+) -> bool {
+    if values.is_empty() {
+        return false;
+    }
+    let documents = registered_documents(values);
+    let changed = mask_answer_part(answer, values, &documents, keys);
+    if holds_any_form(&without_keys(answer, keys).to_string(), values) {
+        *answer = serde_json::Value::String(REDACTED_SECRET.to_owned());
+        return true;
+    }
+    changed
+}
+
+fn mask_answer_part(
+    value: &mut serde_json::Value,
+    values: &[String],
+    documents: &[serde_json::Value],
+    keys: &HashSet<String>,
+) -> bool {
+    if documents.contains(value) {
+        return mask_document(value, values, documents);
+    }
+    let mut replaced = false;
+    match value {
+        serde_json::Value::Object(map) => {
+            let entries = std::mem::take(map);
+            for (mut key, mut item) in entries {
+                if !is_kept_key(&key, &item, keys) {
+                    replaced |= mask_record_text(&mut key, values);
+                    replaced |= mask_answer_part(&mut item, values, documents, keys);
+                }
+                map.insert(key, item);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                replaced |= mask_answer_part(item, values, documents, keys);
+            }
+        }
+        other => replaced = mask_document(other, values, documents),
+    }
+    replaced
+}
+
+/// Whether an answer's field is one of the product's keys that
+/// [`mask_answer`] leaves as it is.
+fn is_kept_key(name: &str, item: &serde_json::Value, keys: &HashSet<String>) -> bool {
+    is_key_field(name) && item.as_str().is_some_and(|text| keys.contains(text))
+}
+
+/// The answer without the key fields [`mask_answer`] kept.
+fn without_keys(value: &serde_json::Value, keys: &HashSet<String>) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => serde_json::Value::Object(
             map.iter()
-                .filter(|(key, _)| !is_key_field(key))
-                .map(|(key, item)| (key.clone(), without_keys(item)))
+                .filter(|(key, item)| !is_kept_key(key, item, keys))
+                .map(|(key, item)| (key.clone(), without_keys(item, keys)))
                 .collect(),
         ),
         serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(without_keys).collect())
+            serde_json::Value::Array(items.iter().map(|item| without_keys(item, keys)).collect())
         }
         other => other.clone(),
     }
@@ -191,10 +286,8 @@ fn mask_document(
         serde_json::Value::Object(map) => {
             let entries = std::mem::take(map);
             for (mut key, mut item) in entries {
-                if !is_key_field(&key) {
-                    replaced |= mask_record_text(&mut key, values);
-                    replaced |= mask_document(&mut item, values, documents);
-                }
+                replaced |= mask_record_text(&mut key, values);
+                replaced |= mask_document(&mut item, values, documents);
                 map.insert(key, item);
             }
         }
@@ -357,6 +450,65 @@ mod tests {
         passed.push_str(&stream.push("7F29 done, verif", &values));
         passed.push_str(&stream.finish(&values));
         assert_eq!(passed, "key: [REDACTED_SECRET] done, verif");
+    }
+
+    /// Content is masked whatever its fields are called: a value under an
+    /// identifier- or slug-named field, or inside an object under one, is
+    /// masked like any other, and the record keeps its other fields.
+    #[test]
+    fn a_key_named_field_of_a_record_is_masked() {
+        let set = RegisteredSecretValues::default();
+        set.replace(vec!["vault-7Q2".into()]);
+        let mut text = r#"{"output":"{\"secret_id\":\"vault-7Q2\",\"note\":\"ok\"}","session_id":"vault-7Q2","id":{"token":"vault-7Q2"},"slug":"x-vault-7Q2"}"#.to_string();
+        assert!(set.mask(&mut text));
+        let mut parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let output: serde_json::Value =
+            serde_json::from_str(parsed["output"].take().as_str().unwrap()).unwrap();
+        assert_eq!(
+            output,
+            serde_json::json!({ "secret_id": REDACTED_SECRET, "note": "ok" })
+        );
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "output": null,
+                "session_id": REDACTED_SECRET,
+                "id": { "token": REDACTED_SECRET },
+                "slug": "x-[REDACTED_SECRET]",
+            })
+        );
+    }
+
+    /// An answer keeps a key-named field only when its value is one of the
+    /// keys given — the store's own — and masks the same name anywhere else,
+    /// including in a tool's result inside the answer.
+    #[test]
+    fn an_answer_keeps_only_the_keys_it_is_given() {
+        let values = vec!["7391".to_string()];
+        let mut answer = serde_json::json!({
+            "topics": [{ "id": "a-7391", "slug": "topic-7391", "name": "Topic 7391" }],
+            "result": { "secret_id": "7391", "id": "b-7391" },
+            "output": r#"{"slug":"topic-7391"}"#,
+        });
+        assert_eq!(
+            answer_key_candidates(&answer, &values),
+            vec![
+                "7391".to_string(),
+                "a-7391".into(),
+                "b-7391".into(),
+                "topic-7391".into()
+            ]
+        );
+        let keys = HashSet::from(["a-7391".to_string(), "topic-7391".to_string()]);
+        assert!(mask_answer(&mut answer, &values, &keys));
+        assert_eq!(
+            answer,
+            serde_json::json!({
+                "topics": [{ "id": "a-7391", "slug": "topic-7391", "name": "Topic [REDACTED_SECRET]" }],
+                "result": { "secret_id": REDACTED_SECRET, "id": "b-[REDACTED_SECRET]" },
+                "output": r#"{"slug":"topic-[REDACTED_SECRET]"}"#,
+            })
+        );
     }
 
     #[test]
