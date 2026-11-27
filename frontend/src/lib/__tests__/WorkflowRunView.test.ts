@@ -284,7 +284,7 @@ describe("WorkflowRunView", () => {
     const done = Array.from(document.querySelectorAll(".standing li"));
     const appender = done.find((item) => item.textContent?.includes("appender"))!;
     expect(appender.textContent).toContain("redispatched after an interruption");
-    expect(appender.textContent).toContain("unknown outcomes and may have been applied twice");
+    expect(appender.textContent).toContain("tool calls from the earlier attempt may have been applied twice");
     const clean = done.find((item) => item.textContent?.includes("clean"))!;
     expect(clean.textContent).not.toContain("redispatched");
   });

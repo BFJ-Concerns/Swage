@@ -106,7 +106,7 @@
       case "after_interruption":
         return `${ordinal} — dispatched again after a gateway interruption: attempt ${index}'s outcome is unknown and the tool calls it issued may have been applied twice`;
       case "after_provider_failure":
-        return `${ordinal} — dispatched again after a recorded provider failure (${attempt.cause.failure})`;
+        return `${ordinal} — dispatched again after a recorded provider failure (${attempt.cause.failure}). Earlier tool calls may have been applied twice`;
       case "provider_fallback":
         return `${ordinal} — dispatched to the declared fallback because the primary failed (${attempt.cause.primary_failure})`;
     }

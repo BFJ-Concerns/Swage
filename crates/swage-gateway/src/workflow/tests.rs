@@ -20637,7 +20637,7 @@ mod dispatch_attempt_reader_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn redispatch_names_the_attempts_recorded_provider_failure() {
+    async fn redispatch_after_provider_failure_keeps_the_repeated_effects_warning() {
         let (storage, entry) = entry_with_attempts(Some(serde_json::json!([]))).await;
         let run = storage
             .get_workflow_run(entry.run_id)
@@ -20647,11 +20647,21 @@ mod dispatch_attempt_reader_tests {
         let turn_id = worker_turn(&storage, run.topic_id, "first attempt").await;
         dispatch_attempt(&storage, entry.id, WorkflowAttemptCause::First, turn_id).await;
         open_round(&storage, turn_id, 1).await;
-        let failure = "provider refused the request".to_owned();
         settle_round(
             &storage,
             turn_id,
             1,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Responded {
+                tool_calls: 1,
+            },
+        )
+        .await;
+        open_round(&storage, turn_id, 2).await;
+        let failure = "provider refused the request".to_owned();
+        settle_round(
+            &storage,
+            turn_id,
+            2,
             swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Failed {
                 message: failure.clone(),
             },
@@ -20665,6 +20675,19 @@ mod dispatch_attempt_reader_tests {
             cause,
             WorkflowAttemptCause::AfterProviderFailure { failure }
         );
+
+        let resumed_turn = worker_turn(&storage, run.topic_id, "replayed attempt").await;
+        dispatch_attempt(&storage, entry.id, cause, resumed_turn).await;
+        let entries = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        let replayed = entries
+            .iter()
+            .find(|row| row.id == entry.id)
+            .expect("replayed call");
+        let worker = worker_account(replayed, &HashMap::new(), None).expect("worker account");
+        assert!(worker.redispatched_after_interruption);
     }
 
     #[tokio::test(flavor = "multi_thread")]

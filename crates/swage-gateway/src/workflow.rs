@@ -3688,9 +3688,13 @@ fn worker_account(
         placement: worker_placement_of(entry, placements),
         worktree: worker_worktree_completion(entry),
         termination,
-        redispatched_after_interruption: attempts
-            .iter()
-            .any(|attempt| attempt.cause == WorkflowAttemptCause::AfterInterruption),
+        redispatched_after_interruption: attempts.iter().any(|attempt| {
+            matches!(
+                attempt.cause,
+                WorkflowAttemptCause::AfterInterruption
+                    | WorkflowAttemptCause::AfterProviderFailure { .. }
+            )
+        }),
     })
 }
 
