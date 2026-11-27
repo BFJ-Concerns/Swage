@@ -98,6 +98,10 @@ pub(crate) fn build_bwrap_command_with_path(
     Ok(cmd)
 }
 
+/// The runtime directory every sandboxed command is given, inside the
+/// sandbox's own `/tmp`.
+const RUNTIME_DIRECTORY: &str = "/tmp/runtime";
+
 /// Construct the shared namespace and filesystem boundary for a child.
 pub fn policy_command(
     bwrap_path: &Path,
@@ -130,10 +134,14 @@ pub fn policy_command(
         "XDG_CACHE_HOME",
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
-        "XDG_RUNTIME_DIR",
         "CARGO_HOME",
         "RUSTUP_HOME",
         "RUSTUP_TOOLCHAIN",
+        // Where the operator keeps Go's and npm's caches, which the policy
+        // opens where these name them.
+        "GOPATH",
+        "npm_config_cache",
+        "NPM_CONFIG_CACHE",
         // Which system and global git configuration the operator uses.
         "GIT_CONFIG_GLOBAL",
         "GIT_CONFIG_SYSTEM",
@@ -169,6 +177,11 @@ pub fn policy_command(
     cmd.args(["--dev", "/dev"]);
     cmd.args(["--proc", "/proc"]);
     cmd.args(["--tmpfs", "/tmp"]);
+    // A runtime directory of the command's own, private to it as a
+    // session's is: pnpm and others keep their locks there, and the host's,
+    // holding the operator's session sockets, is not the command's to use.
+    cmd.args(["--perms", "0700", "--dir", RUNTIME_DIRECTORY]);
+    cmd.args(["--setenv", "XDG_RUNTIME_DIR", RUNTIME_DIRECTORY]);
 
     if let Some(egress) = egress_socket {
         cmd.arg("--setenv")
