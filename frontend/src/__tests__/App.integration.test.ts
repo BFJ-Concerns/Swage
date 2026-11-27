@@ -373,7 +373,7 @@ function setPath(path: string): void {
  */
 async function startSessionInTopic(topicId: string | null): Promise<void> {
   const topicSelect = document.querySelector<HTMLSelectElement>(
-    'select[aria-label="Topic"]',
+    '.topic-choice select',
   );
   if (!topicSelect)
     throw new Error("the session-start control is not on screen");

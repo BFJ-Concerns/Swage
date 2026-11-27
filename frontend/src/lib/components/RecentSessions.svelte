@@ -210,28 +210,17 @@
   <header class="recent-head">
     <p class="eyebrow">{showArchived ? "Archived sessions" : "Recent sessions"}</p>
     <input class="topic-search" type="search" aria-label="Search topic filters" placeholder="Search topics…" bind:value={topicSearch} />
-    <div class="filters" role="group" aria-label="Topic filter">
-      <button
-        type="button"
-        class="filter"
-        class:active={topicFilter === null}
-        aria-pressed={topicFilter === null}
-        onclick={() => setFilter(null)}
-      >
-        All sessions
-      </button>
+    <select
+      class="topic-filter"
+      aria-label="Topic filter"
+      value={topicFilter ?? ""}
+      onchange={(event) => setFilter(event.currentTarget.value || null)}
+    >
+      <option value="">All sessions</option>
       {#each matchingTopics as topic (topic.id)}
-        <button
-          type="button"
-          class="filter"
-          class:active={topicFilter === topic.id}
-          aria-pressed={topicFilter === topic.id}
-          onclick={() => setFilter(topic.id)}
-        >
-          {topic.name}
-        </button>
+        <option value={topic.id}>{topic.name}</option>
       {/each}
-    </div>
+    </select>
     <button type="button" class="archived-toggle" aria-pressed={showArchived} onclick={toggleArchived}>
       {showArchived ? "Back to recent" : "Archived"}
     </button>
@@ -315,13 +304,19 @@
 </section>
 
 <style>
-  .topic-search {
+  .topic-search,
+  .topic-filter {
     min-width: 0;
+    max-width: min(100%, 20rem);
     background: var(--paper);
     color: var(--ink);
     border: 1px solid var(--rule-soft);
     font: inherit;
     padding: 6px 8px;
+  }
+
+  .topic-filter {
+    cursor: pointer;
   }
 
   .recent-sessions {
@@ -351,13 +346,6 @@
     color: var(--ink-soft);
   }
 
-  .filters {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-
-  .filter,
   .archived-toggle {
     border: 1px solid var(--ink);
     background: var(--paper);
@@ -370,7 +358,6 @@
     cursor: pointer;
   }
 
-  .filter.active,
   .archived-toggle[aria-pressed="true"] {
     background: var(--ink);
     color: var(--paper);
