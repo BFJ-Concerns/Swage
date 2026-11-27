@@ -401,7 +401,7 @@ mod tests {
                 vec![
                     "turn_complete",
                     "message_queued",
-                    "message_appended",
+                    "queued_message_sent",
                     "queue_drained",
                     "token",
                     "turn_complete"
