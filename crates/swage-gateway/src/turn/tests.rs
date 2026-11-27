@@ -9164,9 +9164,24 @@ async fn unattended_turn_rejects_a_relative_managed_scratch_root() {
     );
 }
 
+/// A relative path from the test's working directory to `directory`, so a
+/// relative root is one whose files land in a temporary directory and never
+/// in the repository.
+fn relative_path_to(directory: &std::path::Path) -> std::path::PathBuf {
+    let working_directory = std::env::current_dir().expect("working directory");
+    let mut path = std::path::PathBuf::new();
+    for _ in working_directory.components().skip(1) {
+        path.push("..");
+    }
+    path.join(directory.strip_prefix("/").expect("absolute directory"))
+}
+
 #[tokio::test]
 async fn unattended_turn_accepts_an_active_workspace_when_scratch_root_is_relative() {
     let storage = Arc::new(MockStorage::new());
+    let data_root = tempfile::tempdir().expect("data root");
+    let relative_root = relative_path_to(data_root.path());
+    assert!(relative_root.is_relative());
     let (state, session_id) = make_state_with_storage_and_root(
         vec![
             StreamChunk::Delta {
@@ -9177,7 +9192,7 @@ async fn unattended_turn_accepts_an_active_workspace_when_scratch_root_is_relati
             },
         ],
         Arc::clone(&storage),
-        Some(std::path::PathBuf::from(".")),
+        Some(relative_root),
     )
     .await;
     let workspace = tempfile::tempdir().expect("workspace root");
