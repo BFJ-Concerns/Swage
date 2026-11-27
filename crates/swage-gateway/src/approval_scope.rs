@@ -75,6 +75,16 @@ pub(crate) async fn decide_approval(
 ) -> Result<(), ApiError> {
     use swage_storage::ApprovalState;
 
+    // Refused before anything settles, so the request stays pending for a
+    // decision the session can hold.
+    if decision.decision == ApprovalDecisionValue::Approved
+        && decision.scope == ApprovalDecisionScope::Permanent
+        && approval_topic(state, approval).await?.is_general
+    {
+        return Err(ApiError::validation(
+            "this session has no topic to allow it for; allow it once, for this session, or permanently for every topic".to_string(),
+        ));
+    }
     let sender = claim_approval_waiter(state, approval).await?;
     let outcome = match decision.decision {
         ApprovalDecisionValue::Approved => ApprovalState::Approved,

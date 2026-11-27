@@ -22526,6 +22526,32 @@ async fn approval_scope_deadline_race(
         Some(root.path().to_path_buf()),
     )
     .await;
+    // A topic approval needs a session with a topic; the others run in the
+    // general scope the state seeds.
+    let session_id = if scope == swage_agent::approval::ApprovalDecisionScope::Permanent {
+        let topic = swage_storage::store::TopicStore::create(
+            &*storage,
+            swage_storage::NewTopic {
+                name: "Orchard".into(),
+                slug: "orchard".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let session = storage.create_session(new_session(topic.id)).await.unwrap();
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "gateway".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        session.id
+    } else {
+        session_id
+    };
     let thread = storage.list_by_session(session_id).await.unwrap()[0].clone();
     let turn = storage
         .create_turn(NewTurn {
@@ -22629,6 +22655,83 @@ async fn approval_scope_deadline_race(
         (ApprovalState::Expired, 0, 0, 409),
         "expiry must win without installing a file grant or confirming the decision"
     );
+}
+
+#[tokio::test]
+async fn a_topic_approval_in_a_session_without_a_topic_is_refused_and_stays_pending() {
+    use crate::error::{Json, Path};
+    use axum::extract::State;
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(MockProvider::new(vec![])),
+        storage.clone(),
+        Some(root.path().to_path_buf()),
+    )
+    .await;
+    let thread = storage.list_by_session(session_id).await.unwrap()[0].clone();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::AwaitingApproval,
+            user_input: None,
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let approval = storage
+        .create_approval(NewApprovalRequest {
+            turn_id: turn.id,
+            agent_id: "gateway".into(),
+            kind: swage_storage::ApprovalKind::Tool,
+            tool_name: Some("shell".into()),
+            tool_arguments: None,
+            hook_name: None,
+            prompt: "Allow shell?".into(),
+            context: None,
+            timeout_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+        })
+        .await
+        .unwrap();
+    let (sender, _receiver) = tokio::sync::oneshot::channel();
+    state
+        .approval_channels
+        .lock()
+        .unwrap()
+        .insert(approval.id, sender.into());
+
+    let Err(refused) = crate::handlers::decide_approval(
+        State(state.clone()),
+        Path(approval.id),
+        Json(crate::handlers::ApprovalDecisionRequest {
+            decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+            scope: swage_agent::approval::ApprovalDecisionScope::Permanent,
+            reason: None,
+        }),
+    )
+    .await
+    else {
+        panic!("a topic approval in a general session was accepted");
+    };
+    assert!(
+        refused.message().contains("no topic"),
+        "{}",
+        refused.message()
+    );
+    assert_eq!(
+        storage
+            .get_approval(approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ApprovalState::Pending
+    );
+    assert!(state.session_approval_grants.lock().unwrap().is_empty());
+    assert!(!root.path().join("general").join("config.toml").exists());
 }
 
 #[tokio::test]

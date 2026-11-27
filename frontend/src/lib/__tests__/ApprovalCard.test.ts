@@ -52,3 +52,24 @@ describe("approval denial", () => {
     expect(decision.reason).not.toContain("approval card");
   });
 });
+
+describe("permanent approval scopes", () => {
+  const approval = {
+    approval_id: "approval-1", turn_id: "turn-1", agent_id: "agent", kind: "tool",
+    tool_name: "shell", prompt: "Allow shell?", timeout_at: "2099-01-01T00:00:00Z", timeout_policy: "reject",
+  };
+  const labels = () => Array.from(document.querySelectorAll("button")).map((button) => button.textContent?.trim());
+
+  it("offers no topic approval in a session without a topic", () => {
+    component = mount(ApprovalCard, { target: document.body, props: { approval, inTopic: false } });
+    flushSync();
+    expect(labels()).not.toContain("Allow permanently");
+    expect(labels()).toContain("Allow permanently globally");
+  });
+
+  it("offers the topic approval in a session with a topic", () => {
+    component = mount(ApprovalCard, { target: document.body, props: { approval, inTopic: true } });
+    flushSync();
+    expect(labels()).toContain("Allow permanently");
+  });
+});
