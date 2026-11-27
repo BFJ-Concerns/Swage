@@ -3521,6 +3521,7 @@ dependencies = [
  "clap_complete",
  "cron",
  "futures",
+ "glob",
  "html2text",
  "jsonschema",
  "libc",

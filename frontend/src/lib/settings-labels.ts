@@ -11,6 +11,7 @@ export const SETTINGS_LABELS: Readonly<Record<string, string>> = {
   "tool_runtime.search.base_url": "Base URL (required)",
   "sandbox.enabled": "Sandbox",
   "sandbox.network": "Sandbox network",
+  "judge.model": "Judge model",
   "hitl": "Approval defaults",
   "context": "Context assembly",
   "tool_permissions.allow": "Tool allow rules",
