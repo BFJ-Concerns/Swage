@@ -10,4 +10,4 @@ export type QueuedMessageView = {
 /**
  * Identifies the client's optimistic send, when supplied.
  */
-client_id?: string | null, id: string, origin: MessageOrigin, content: string, attachments?: Array<MessageAttachment>, queued_at: string, };
+client_id?: string | null, id: string, thread_id: string, origin: MessageOrigin, content: string, attachments?: Array<MessageAttachment>, queued_at: string, };

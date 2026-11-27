@@ -98,6 +98,63 @@ pub(crate) fn build_bwrap_command_with_path(
     Ok(cmd)
 }
 
+/// The `bwrap` command that runs `program` with `args` inside the sandbox
+/// `config` describes — the boundary [`policy_command`] builds for the
+/// turn's own commands, and the same Landlock rules: the host binary
+/// re-executes inside as the governor ([`crate::SANDBOX_EXEC_FLAG`]),
+/// applies the rules and runs the program. The socket at `socket_path` is
+/// bound in and named as `socket_env`; `env` is set inside; the program's
+/// own directory is its working directory. For a process that is not the
+/// agent, such as a plugin's brokered process.
+pub fn build_bwrap_command_for(
+    config: &SandboxConfig,
+    socket_path: &Path,
+    socket_env: &str,
+    program: &Path,
+    args: &[String],
+    env: &[(String, String)],
+) -> Result<Command, SandboxError> {
+    let bwrap_path = find_bwrap()?;
+    let governor = crate::resolve_agent_binary()?;
+    build_bwrap_command_for_with_path(
+        &bwrap_path,
+        &governor,
+        config,
+        socket_path,
+        socket_env,
+        program,
+        args,
+        env,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_bwrap_command_for_with_path(
+    bwrap_path: &Path,
+    governor: &Path,
+    config: &SandboxConfig,
+    socket_path: &Path,
+    socket_env: &str,
+    program: &Path,
+    args: &[String],
+    env: &[(String, String)],
+) -> Result<Command, SandboxError> {
+    let mut cmd = policy_command(bwrap_path, config, &[socket_path], &[governor], None)?;
+    cmd.arg("--setenv").arg(socket_env).arg(socket_path);
+    for (name, value) in env {
+        cmd.arg("--setenv").arg(name).arg(value);
+    }
+    if let Some(root) = program.parent() {
+        cmd.arg("--chdir").arg(root);
+    }
+    cmd.arg("--")
+        .arg(governor)
+        .arg(crate::SANDBOX_EXEC_FLAG)
+        .arg(program)
+        .args(args);
+    Ok(cmd)
+}
+
 /// The runtime directory every sandboxed command is given, inside the
 /// sandbox's own `/tmp`.
 const RUNTIME_DIRECTORY: &str = "/tmp/runtime";
@@ -1157,5 +1214,47 @@ mod tests {
                 "socket bind must follow the /tmp tmpfs or the overlay hides it; args: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_governed_program_runs_inside_the_same_prefix_through_the_governor() {
+        let config = basic_config();
+        let cmd = build_bwrap_command_for_with_path(
+            Path::new("/usr/bin/bwrap"),
+            Path::new("/opt/swage/swage"),
+            &config,
+            Path::new("/run/swage/plugin.sock"),
+            "SWAGE_PLUGIN_SOCKET",
+            Path::new("/data/plugins/driver/1/driver"),
+            &["--serve".to_owned()],
+            &[("HTTP_PROXY".to_owned(), "http://proxy".to_owned())],
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let position = |needle: &str| args.iter().position(|a| *a == OsStr::new(needle));
+        assert!(position("--unshare-all").is_some());
+        let socket = position("SWAGE_PLUGIN_SOCKET").expect("the socket is named");
+        assert_eq!(args[socket + 1], OsStr::new("/run/swage/plugin.sock"));
+        let rules = position("SWAGE_SANDBOX_CONFIG_JSON").expect("the rules travel");
+        assert!(
+            args[rules + 1]
+                .to_str()
+                .unwrap()
+                .contains("working_directory")
+        );
+        let proxy = position("HTTP_PROXY").expect("extra env is set");
+        assert_eq!(args[proxy + 1], OsStr::new("http://proxy"));
+        let chdir = position("--chdir").expect("the program's directory is its cwd");
+        assert_eq!(args[chdir + 1], OsStr::new("/data/plugins/driver/1"));
+        let separator = position("--").expect("the program follows the separator");
+        assert_eq!(
+            &args[separator + 1..],
+            &[
+                OsStr::new("/opt/swage/swage"),
+                OsStr::new("--sandbox-exec"),
+                OsStr::new("/data/plugins/driver/1/driver"),
+                OsStr::new("--serve"),
+            ]
+        );
     }
 }

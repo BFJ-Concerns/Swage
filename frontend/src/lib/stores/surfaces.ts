@@ -124,10 +124,11 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
   function handleSignal(event: ServerEvent): void {
     if (event.type === "lagged") {
       // The server dropped signals; one may have been the only signal for
-      // what is open. Refetch what is open, as after a reconnect.
+      // an open surface, its session's list or the shared catalogue.
       const active = activeSurfaceState.current;
       if (active) void refreshActive(active.id).catch(() => {});
       if (currentSessionId) void refreshList(currentSessionId).catch(() => {});
+      void refreshLibrary().catch(() => {});
       return;
     }
     if (event.type === "library_updated") {

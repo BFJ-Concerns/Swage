@@ -94,6 +94,14 @@ pub(crate) fn anthropic_effort_capability() -> EffortCapability {
     }
 }
 
+pub(crate) fn model_effort_capability(model: &str) -> Option<EffortCapability> {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("claude")
+        .then(anthropic_effort_capability)
+}
+
 /// The Messages API's largest `max_tokens` for the model ids and aliases
 /// Anthropic documents at platform.claude.com/docs/en/models/overview and its
 /// linked model pages (read 2026-10-19): 128K on the listed 5-generation ids,
@@ -1186,11 +1194,7 @@ impl LlmProvider for AnthropicProvider {
     }
 
     fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
-        model
-            .trim()
-            .to_ascii_lowercase()
-            .starts_with("claude")
-            .then(anthropic_effort_capability)
+        model_effort_capability(model)
     }
 
     fn output_limit(&self, model: &str) -> Option<u32> {

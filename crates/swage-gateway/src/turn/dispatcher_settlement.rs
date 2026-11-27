@@ -19,6 +19,7 @@ use super::{
     record_terminal_state_and_release, record_turn_isolation, record_unsandboxed_execution,
     release_active_turn, request_sandbox_degradation_approval, shutdown_sandbox_guard,
 };
+use std::sync::Arc;
 
 /// What the coordinator resolved for building the turn's dispatcher.
 pub(super) struct DispatcherSettlement<'a> {
@@ -33,6 +34,7 @@ pub(super) struct DispatcherSettlement<'a> {
     pub(super) agent_id: &'a str,
     pub(super) attendance: TurnAttendance,
     pub(super) cancel_token: &'a CancellationToken,
+    pub(super) call_hook: Option<Arc<dyn swage_tool::dispatch::ToolCallHook>>,
 }
 
 /// How the dispatcher settled: built at an isolation the turn may run at,
@@ -64,6 +66,7 @@ pub(super) async fn settle_turn_dispatcher(
         agent_id,
         attendance,
         cancel_token,
+        call_hook,
     } = settlement;
     let execution_context = match attendance {
         TurnAttendance::Attended => "interactive turn",
@@ -80,6 +83,7 @@ pub(super) async fn settle_turn_dispatcher(
             ws_tx: ws_tx.clone(),
             session_id: Some(session_id),
             turn_id: Some(prepared_turn_id),
+            call_hook: call_hook.clone(),
         },
     )
     .await
@@ -206,6 +210,7 @@ pub(super) async fn settle_turn_dispatcher(
                         ws_tx: ws_tx.clone(),
                         session_id: Some(session_id),
                         turn_id: Some(prepared_turn_id),
+                        call_hook: call_hook.clone(),
                     },
                 )
                 .await

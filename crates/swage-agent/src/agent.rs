@@ -3241,6 +3241,10 @@ impl Agent {
         &self,
         dispatcher: &ToolDispatcher,
         call: &ToolCall,
+        // The action the location is asked for: the call the dispatcher's
+        // gates saw, which a hook may have rewritten from the model's
+        // `call`. It is what the person is asked about and what runs.
+        action: &ToolCall,
         execution: &TurnExecutionContext,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
@@ -3262,7 +3266,7 @@ impl Agent {
         let context = serde_json::json!({
             "path": path.clone(),
             "access": access.clone(),
-            "tool_name": call.name.clone(),
+            "tool_name": action.name.clone(),
         });
         let mut approved_ctx = ctx.clone();
         approved_ctx
@@ -3274,6 +3278,7 @@ impl Agent {
                 .dispatch_into_location(
                     dispatcher,
                     call,
+                    action,
                     execution,
                     event_tx,
                     cancel_token,
@@ -3300,7 +3305,7 @@ impl Agent {
         let Some(judge) = judge else {
             if approval_scope.routes_reach_to_judge() {
                 let result: ToolDispatchResult = (
-                    crate::judge::unanswered_location_feedback(&call.name, &path, &access),
+                    crate::judge::unanswered_location_feedback(&action.name, &path, &access),
                     true,
                     "refused".to_string(),
                 )
@@ -3311,6 +3316,7 @@ impl Agent {
                 .ask_person_for_location(
                     dispatcher,
                     call,
+                    action,
                     execution,
                     event_tx,
                     cancel_token,
@@ -3326,7 +3332,7 @@ impl Agent {
                 )
                 .await;
         };
-        let judgement = self.judge_reach(judge, call, execution, &reach).await;
+        let judgement = self.judge_reach(judge, action, execution, &reach).await;
         let recording_failed = judgement.is_err();
         let judgement = judgement.unwrap_or_else(|error| {
             crate::judge::Judgement::unavailable(format!(
@@ -3339,7 +3345,7 @@ impl Agent {
         {
             if judgement.verdict != crate::judge::JudgeVerdict::Allowed {
                 let result: ToolDispatchResult = (
-                    crate::judge::refused_feedback(&call.name, &reach, &judgement),
+                    crate::judge::refused_feedback(&action.name, &reach, &judgement),
                     true,
                     "refused".to_string(),
                 )
@@ -3350,6 +3356,7 @@ impl Agent {
                 .dispatch_into_location(
                     dispatcher,
                     call,
+                    action,
                     execution,
                     event_tx,
                     cancel_token,
@@ -3368,6 +3375,7 @@ impl Agent {
         self.ask_person_for_location(
             dispatcher,
             call,
+            action,
             execution,
             event_tx,
             cancel_token,
@@ -3391,6 +3399,7 @@ impl Agent {
         &self,
         dispatcher: &ToolDispatcher,
         call: &ToolCall,
+        action: &ToolCall,
         execution: &TurnExecutionContext,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
@@ -3410,8 +3419,8 @@ impl Agent {
             .handle_approval_gate(
                 execution,
                 swage_storage::model::ApprovalKind::Location,
-                Some(call.name.clone()),
-                Some(call.arguments.clone()),
+                Some(action.name.clone()),
+                Some(action.arguments.clone()),
                 None,
                 prompt,
                 Some(context),
@@ -3428,6 +3437,7 @@ impl Agent {
                     .dispatch_into_location(
                         dispatcher,
                         call,
+                        action,
                         execution,
                         event_tx,
                         cancel_token,
@@ -3459,6 +3469,7 @@ impl Agent {
         &self,
         dispatcher: &ToolDispatcher,
         call: &ToolCall,
+        action: &ToolCall,
         execution: &TurnExecutionContext,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
@@ -3470,8 +3481,8 @@ impl Agent {
         if skip_tool_permission_gate {
             self.race_tool_dispatch(
                 dispatcher.dispatch_approved(
-                    &call.name,
-                    call.arguments.clone(),
+                    &action.name,
+                    action.arguments.clone(),
                     approved_ctx,
                     &self.config.agent_id,
                 ),
@@ -3486,8 +3497,8 @@ impl Agent {
         } else {
             self.race_tool_dispatch(
                 dispatcher.dispatch(
-                    &call.name,
-                    call.arguments.clone(),
+                    &action.name,
+                    action.arguments.clone(),
                     approved_ctx,
                     &self.config.agent_id,
                 ),
@@ -3655,24 +3666,33 @@ impl Agent {
         {
             Ok(output) => tool_dispatch_result(Ok(output)),
             Err(swage_core::ToolError::RequiresApproval {
-                name: _,
+                name: gated_name,
+                arguments: gated_arguments,
                 timeout_secs,
                 timeout_policy,
             }) => {
-                // Config-driven approval gate.
+                // Config-driven approval gate. The call the gate paused is
+                // the one the dispatcher's gates saw — a hook may have
+                // rewritten the model's — so the approval, and the approved
+                // dispatch, are of that call rather than the raised one.
                 use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
                 let gate_timeout = std::time::Duration::from_secs(
                     timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
                 );
                 let policy = timeout_policy.unwrap_or_default();
-                let prompt = format!("Approval required to execute tool: {}", call.name);
+                let prompt = format!("Approval required to execute tool: {gated_name}");
+                let gated_call = ToolCall {
+                    name: gated_name.clone(),
+                    arguments: gated_arguments.clone(),
+                    ..call.clone()
+                };
 
                 if approval_scope.runs_granted_calls_unreviewed() {
                     match self
                         .race_tool_dispatch(
                             dispatcher.dispatch_approved(
-                                &call.name,
-                                call.arguments.clone(),
+                                &gated_name,
+                                gated_arguments.clone(),
                                 &ctx,
                                 &self.config.agent_id,
                             ),
@@ -3697,6 +3717,7 @@ impl Agent {
                                 .handle_location_approval_and_dispatch(
                                     dispatcher,
                                     call,
+                                    &gated_call,
                                     execution,
                                     event_tx,
                                     cancel_token,
@@ -3721,8 +3742,8 @@ impl Agent {
                     .handle_approval_gate(
                         execution,
                         swage_storage::model::ApprovalKind::Tool,
-                        Some(call.name.clone()),
-                        Some(call.arguments.clone()),
+                        Some(gated_name.clone()),
+                        Some(gated_arguments.clone()),
                         None,
                         prompt,
                         None,
@@ -3739,8 +3760,8 @@ impl Agent {
                         let result = match self
                             .race_tool_dispatch(
                                 dispatcher.dispatch_approved(
-                                    &call.name,
-                                    call.arguments.clone(),
+                                    &gated_name,
+                                    gated_arguments.clone(),
                                     &ctx,
                                     &self.config.agent_id,
                                 ),
@@ -3764,6 +3785,7 @@ impl Agent {
                                 self.handle_location_approval_and_dispatch(
                                     dispatcher,
                                     call,
+                                    &gated_call,
                                     execution,
                                     event_tx,
                                     cancel_token,
@@ -3804,6 +3826,7 @@ impl Agent {
             }) => {
                 self.handle_location_approval_and_dispatch(
                     dispatcher,
+                    call,
                     call,
                     execution,
                     event_tx,
@@ -4767,6 +4790,118 @@ mod judge_seam_tests {
         assert_eq!(events[0].entity_kind, "turn");
         assert_eq!(events[0].entity_id, execution.turn_id.to_string());
         events[0].metadata.clone()
+    }
+
+    /// A call a hook rewrote into a gated tool, which once approved asks
+    /// for a location, runs as the rewrite: the location is asked for the
+    /// rewritten action, and the model's own call never runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rewritten_call_that_asks_for_a_location_runs_as_rewritten() {
+        struct RewriteToOutsideRead;
+
+        #[async_trait]
+        impl swage_tool::dispatch::ToolCallHook for RewriteToOutsideRead {
+            async fn before_dispatch(
+                &self,
+                tool_name: &str,
+                params: Value,
+                _: &dyn ToolContext,
+            ) -> swage_tool::dispatch::CallHookDecision {
+                if tool_name == "model_choice" {
+                    swage_tool::dispatch::CallHookDecision::Rewrite {
+                        name: "outside_read".into(),
+                        params: json!({ "path": OUTSIDE, "justification": "the rewrite" }),
+                    }
+                } else {
+                    swage_tool::dispatch::CallHookDecision::Continue(params)
+                }
+            }
+        }
+
+        struct ModelChoice(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl Tool for ModelChoice {
+            fn name(&self) -> &str {
+                "model_choice"
+            }
+            fn description(&self) -> &str {
+                "the call the model raised (test double)"
+            }
+            fn parameters(&self) -> Value {
+                json!({ "type": "object" })
+            }
+            async fn execute(&self, _: Value, _: &dyn ToolContext) -> Result<Value, ToolError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({ "ran": "model_choice" }))
+            }
+        }
+
+        let judge = scripted(JudgeVerdict::Allowed, "the task names this plan");
+        let (mut agent, execution, _storage) = unattended_fixture(Some(judge.clone())).await;
+        let original = Arc::new(AtomicUsize::new(0));
+        let mut registry = swage_tool::registry::ToolRegistry::new();
+        registry.register(Arc::new(OutsideReadTool)).unwrap();
+        registry
+            .register(Arc::new(ModelChoice(Arc::clone(&original))))
+            .unwrap();
+        agent.tool_dispatcher = Some(
+            ToolDispatcher::new(
+                Arc::new(registry),
+                swage_tool::permission::PermissionConfig {
+                    allow: vec!["*".into()],
+                    deny: vec![],
+                    bundles: std::collections::HashMap::new(),
+                    require_approval: vec![swage_tool::permission::RequireApprovalEntry {
+                        tool_name: "outside_read".into(),
+                        timeout_secs: None,
+                        timeout_policy: None,
+                    }],
+                },
+                Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+                swage_tool::rate_limit::RateLimitConfig::default(),
+                Arc::new(LeakDetector::default()),
+                false,
+            )
+            .with_call_hook(Arc::new(RewriteToOutsideRead)),
+        );
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut scope = TurnApprovalScope::default();
+        scope.mark_unattended();
+        let result = agent
+            .dispatch_tool_call(
+                &ToolCall {
+                    call_id: "call-1".into(),
+                    name: "model_choice".into(),
+                    arguments: json!({}),
+                },
+                &execution,
+                &[],
+                &event_tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut scope,
+                None,
+            )
+            .await
+            .expect("dispatch settles");
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.content).expect("tool payload"),
+            json!({ "read": OUTSIDE }),
+            "the rewritten action is what ran"
+        );
+        assert_eq!(
+            original.load(Ordering::SeqCst),
+            0,
+            "the model's own call never ran"
+        );
+        let asked = judge.asked.lock().expect("asked");
+        assert_eq!(asked.len(), 1);
+        assert_eq!(
+            asked[0].tool_name, "outside_read",
+            "the location is asked for the rewritten action"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

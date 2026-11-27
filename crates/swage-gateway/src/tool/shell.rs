@@ -1,5 +1,6 @@
 //! Shell execution tool — runs commands in the topic's workspace directory.
 
+use std::collections::VecDeque;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::time::Duration;
@@ -50,11 +51,12 @@ impl Tool for ShellTool {
          starts a new shell: a change of directory or a variable set in one call is gone in \
          the next. A command still running at the installation's time limit is stopped, \
          along with every process it started, and the call fails saying so. The two streams \
-         share the installation's output limit. One that is cut to fit keeps its beginning, \
-         is marked in `output` where it stops and flagged (`stdout_truncated`, \
-         `stderr_truncated`), and the result then gives the path of a file holding the whole \
-         of that stream (`stdout_artifact_path`, `stderr_artifact_path`), which `file_read` \
-         opens. Unless the operator has \
+         share the installation's output limit. One too long to fit keeps its beginning and \
+         its end: a bracketed line in `output` stands where the middle was left out and says \
+         how many bytes that was, the stream is flagged (`stdout_truncated`, \
+         `stderr_truncated`), and the result gives the path of a file holding the whole of \
+         it (`stdout_artifact_path`, `stderr_artifact_path`), which `file_read` opens. \
+         Unless the operator has \
          lifted it, the command runs sandboxed: it can change files under the working \
          directory and little outside it, so a write refused elsewhere is that boundary and \
          not a fault to retry. The file tools read, write, edit and search files directly; \
@@ -196,7 +198,7 @@ impl Tool for ShellTool {
                 // of each is either all of it or flagged as cut, with the
                 // whole stream left in its file.
                 let (stdout_kept, stderr_kept) =
-                    share_output_limit(stdout.bytes.len(), stderr.bytes.len(), cap);
+                    share_output_limit(stdout.total_bytes, stderr.total_bytes, cap);
                 let stdout = stdout.kept_to(stdout_kept).await;
                 let stderr = stderr.kept_to(stderr_kept).await;
 
@@ -209,7 +211,12 @@ impl Tool for ShellTool {
                 } else if stdout_display.is_empty() {
                     format!("stderr: {stderr_display}")
                 } else {
-                    format!("{stdout_display}stderr: {stderr_display}")
+                    let separator = if stdout.truncated && !stdout_display.ends_with('\n') {
+                        "\n"
+                    } else {
+                        ""
+                    };
+                    format!("{stdout_display}{separator}stderr: {stderr_display}")
                 };
 
                 let mut output = json!({ "output": combined });
@@ -244,30 +251,45 @@ impl Tool for ShellTool {
 /// One stream as it was read: at most the limit's worth of its bytes, how
 /// many it produced, and the file that holds all of them.
 struct BoundedRead {
-    bytes: Vec<u8>,
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
     total_bytes: usize,
     artifact_path: Option<ToolOutputArtifactPath>,
 }
 
 /// One stream as the result reports it.
 struct ReportedStream {
-    bytes: Vec<u8>,
+    head: Vec<u8>,
+    tail: Vec<u8>,
     total_bytes: usize,
     truncated: bool,
     reported_artifact_path: Option<String>,
 }
 
 impl BoundedRead {
-    /// Keep the first `kept` bytes. A stream reported whole needs no file,
-    /// so its file is removed; a cut one keeps it and reports its path.
+    /// Fit the stream to its share of the output limit. A cut stream keeps
+    /// its complete file for follow-up reads.
     async fn kept_to(mut self, kept: usize) -> ReportedStream {
-        self.bytes.truncate(kept);
         let truncated = self.total_bytes > kept;
-        if !truncated && let Some(path) = self.artifact_path.as_ref() {
-            let _ = tokio::fs::remove_file(&path.absolute).await;
+        if truncated {
+            let tail_kept = kept / 2;
+            let missing_tail = tail_kept.saturating_sub(self.tail.len());
+            // A tail smaller than its final share is contiguous with the
+            // captured head. Move its missing bytes before shortening the head.
+            for &byte in self.head.iter().rev().take(missing_tail) {
+                self.tail.push_front(byte);
+            }
+            self.tail.drain(..self.tail.len().saturating_sub(tail_kept));
+            self.head.truncate(kept.div_ceil(2));
+        } else {
+            self.head.extend(self.tail.drain(..));
+            if let Some(path) = self.artifact_path.as_ref() {
+                let _ = tokio::fs::remove_file(&path.absolute).await;
+            }
         }
         ReportedStream {
-            bytes: self.bytes,
+            head: self.head,
+            tail: self.tail.into(),
             total_bytes: self.total_bytes,
             truncated,
             reported_artifact_path: truncated
@@ -278,20 +300,31 @@ impl BoundedRead {
 }
 
 impl ReportedStream {
-    /// The stream's text, ending in a note where it was cut so that the
-    /// reader does not take the cut for the stream's end.
+    /// The stream's text, with the cut marked where part of it was left
+    /// out so that the reader does not take what it holds for the whole.
     fn display(&self, stream: &str) -> String {
-        let text = String::from_utf8_lossy(&self.bytes);
+        let head = String::from_utf8_lossy(&self.head);
         if self.truncated {
-            format!(
-                "{text}\n[{stream} cut here: the first {} of {} bytes]\n",
-                self.bytes.len(),
-                self.total_bytes
-            )
+            let marker = cut_marker(
+                stream,
+                self.total_bytes - self.head.len() - self.tail.len(),
+                self.total_bytes,
+            );
+            let tail = String::from_utf8_lossy(&self.tail);
+            format!("{head}{marker}{tail}")
         } else {
-            text.into_owned()
+            head.into_owned()
         }
     }
+}
+
+/// The line that stands in `output` for the part of a cut stream left out,
+/// at the place it was taken from. It sits on a line of its own, in
+/// brackets and naming its stream, so that it is not read as something the
+/// command printed, and counts what is missing so that the reader knows how
+/// much of the stream it has not seen.
+fn cut_marker(stream: &str, omitted_bytes: usize, total_bytes: usize) -> String {
+    format!("\n[{stream} cut here: {omitted_bytes} of {total_bytes} bytes left out]\n")
 }
 
 /// How many bytes of each stream fit under `cap` together. Both are kept
@@ -352,7 +385,10 @@ async fn read_bounded<R>(
 where
     R: AsyncReadExt + Unpin,
 {
-    let mut buf = Vec::with_capacity(cap.min(65536));
+    let head_limit = cap.div_ceil(2);
+    let tail_limit = cap / 2;
+    let mut head = Vec::with_capacity(head_limit.min(32768));
+    let mut tail = VecDeque::new();
     let mut tmp = [0u8; 4096];
     let mut total = 0usize;
     let mut artifact_writer = match artifact_path.as_ref() {
@@ -368,12 +404,12 @@ where
         if let Some(writer) = artifact_writer.as_mut() {
             writer.write_all(&tmp[..n]).await?;
         }
-        // Store bytes up to the cap; keep reading (but discarding) beyond it
-        // so the child's writes never block on a full pipe buffer.
-        if total < cap {
-            let to_store = (cap - total).min(n);
-            buf.extend_from_slice(&tmp[..to_store]);
-        }
+        let prefix_bytes = (head_limit - head.len()).min(n);
+        head.extend_from_slice(&tmp[..prefix_bytes]);
+        let rest = &tmp[prefix_bytes..n];
+        let recent = &rest[rest.len().saturating_sub(tail_limit)..];
+        tail.drain(..(tail.len() + recent.len()).saturating_sub(tail_limit));
+        tail.extend(recent);
         total += n;
     }
 
@@ -381,7 +417,8 @@ where
         writer.flush().await?;
     }
     Ok(BoundedRead {
-        bytes: buf,
+        head,
+        tail,
         total_bytes: total,
         artifact_path,
     })
@@ -608,21 +645,23 @@ mod tests {
         };
         let result = t
             .execute(
-                json!({"command": "printf '%0.s1234567890' $(seq 1 100)"}),
+                json!({"command": "printf start; printf '%0.s0123456789' $(seq 1 99); printf ' final'"}),
                 &ctx(),
             )
             .await;
         let val = result.expect("command should succeed");
         let output = val["output"].as_str().unwrap();
         assert_eq!(val["exit_code"], json!(0));
-        assert_eq!(
-            output, "1234567890\n[stdout cut here: the first 10 of 1000 bytes]\n",
-            "the stream is cut at the limit and marked where it stops"
-        );
+        let (head, tail) = output
+            .split_once("\n[stdout cut here: 991 of 1001 bytes left out]\n")
+            .expect("stdout cut marker");
+        assert!(head.starts_with("start"), "{output}");
+        assert!(tail.ends_with("final"), "{output}");
+        assert_eq!(head.len() + tail.len(), 10);
         assert_eq!(val["truncated"], json!(true));
-        assert_eq!(val["total_bytes"], json!(1000));
+        assert_eq!(val["total_bytes"], json!(1001));
         assert_eq!(val["stdout_truncated"], json!(true));
-        assert_eq!(val["stdout_total_bytes"], json!(1000));
+        assert_eq!(val["stdout_total_bytes"], json!(1001));
     }
 
     /// A command that fills the limit on stdout and then fails keeps its
@@ -656,6 +695,28 @@ mod tests {
             std::fs::read_to_string(dir.path().join(artifact_path)).expect("stdout file"),
             "1234567890".repeat(10)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_cut_streams_keep_their_final_diagnostics() {
+        let tool = ShellTool {
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 100,
+        };
+        let result = tool
+            .execute(
+                json!({"command": "printf '%045dERROR!' 0; printf '%045dFAILED' 0 >&2; exit 1"}),
+                &ctx(),
+            )
+            .await
+            .expect("the command should return both streams");
+
+        let output = result["output"].as_str().expect("shell output");
+        assert_eq!(result["exit_code"], 1);
+        assert_eq!(result["stdout_truncated"], true);
+        assert_eq!(result["stderr_truncated"], true);
+        assert!(output.contains("ERROR!\nstderr:"), "{output}");
+        assert!(output.ends_with("FAILED"), "{output}");
     }
 
     #[test]
@@ -712,17 +773,21 @@ mod tests {
         };
         let result = t
             .execute(
-                json!({"command": "printf '%0.s1234567890' $(seq 1 100) >&2; exit 1"}),
+                json!({"command": "{ printf start; printf '%0.s0123456789' $(seq 1 500); printf ' error'; } >&2; exit 1"}),
                 &ctx(),
             )
             .await;
         let val = result.expect("command should return captured stderr");
         let output = val["output"].as_str().unwrap();
         assert_eq!(val["exit_code"], json!(1));
-        assert_eq!(
-            output,
-            "stderr: 1234567890\n[stderr cut here: the first 10 of 1000 bytes]\n"
-        );
+        let (head, tail) = output
+            .strip_prefix("stderr: ")
+            .expect("stderr label")
+            .split_once("\n[stderr cut here: 5001 of 5011 bytes left out]\n")
+            .expect("stderr cut marker");
+        assert!(head.starts_with("start"), "{output}");
+        assert!(tail.ends_with("error"), "{output}");
+        assert_eq!(head.len() + tail.len(), 10);
         assert_eq!(val["truncated"], json!(true));
         assert_eq!(val["stderr_truncated"], json!(true));
         assert!(val["stderr_total_bytes"].as_u64().unwrap() > 10);

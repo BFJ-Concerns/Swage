@@ -62,6 +62,12 @@ const PROTECTED_NAMES: &[&str] = &[
     "model_list",
 ];
 
+/// Whether `name` is a built-in tool's: reserved on every host, whether or
+/// not that host registers the tool, so no other tool can take it.
+pub fn is_built_in_name(name: &str) -> bool {
+    PROTECTED_NAMES.contains(&name)
+}
+
 /// Registry of tools available for dispatch.
 ///
 /// Maintains a protected namespace of built-in tool names that cannot be
@@ -96,6 +102,20 @@ impl ToolRegistry {
                     tool.platform_holder()
                         .is_none_or(|holder| holder == agent_id)
                 })
+                .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+                .collect(),
+            protected: self.protected.clone(),
+        }
+    }
+
+    /// The registry without the named tools: what a scope that does not
+    /// enable them sees. A name not registered is simply absent.
+    pub fn withholding(&self, names: &[String]) -> Self {
+        Self {
+            tools: self
+                .tools
+                .iter()
+                .filter(|(name, _)| !names.iter().any(|withheld| withheld == *name))
                 .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
                 .collect(),
             protected: self.protected.clone(),
@@ -331,6 +351,27 @@ mod tests {
     // -------------------------------------------------------------------------
     // Registration
     // -------------------------------------------------------------------------
+
+    #[test]
+    fn withholding_removes_the_named_tools_and_nothing_else() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(NamedTool::new("probe_a")))
+            .unwrap();
+        registry
+            .register(Arc::new(NamedTool::new("probe_b")))
+            .unwrap();
+        let narrowed = registry.withholding(&["probe_a".to_owned(), "absent".to_owned()]);
+        assert!(
+            narrowed.get("probe_a").is_none(),
+            "a withheld tool is absent"
+        );
+        assert!(narrowed.get("probe_b").is_some(), "an unnamed tool stays");
+        assert!(
+            registry.get("probe_a").is_some(),
+            "the original registry is untouched"
+        );
+    }
 
     #[test]
     fn register_and_get_tool_by_name() {

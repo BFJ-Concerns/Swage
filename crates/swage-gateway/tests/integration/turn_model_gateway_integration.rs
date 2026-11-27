@@ -15,12 +15,15 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{ContextSnapshotStore, SessionStore, SqliteStorage, Storage, TopicStore};
-use tokio::{net::TcpListener, task::JoinHandle};
+use tokio::{net::TcpListener, sync::Semaphore, task::JoinHandle};
+
+use futures::StreamExt;
 
 use crate::support::{ProcessEnvGuard, scratch_tempdir};
 
 struct CapturingProvider {
     requests: Mutex<Vec<CompletionRequest>>,
+    first_response: Option<Arc<Semaphore>>,
 }
 
 #[async_trait::async_trait]
@@ -44,15 +47,29 @@ impl LlmProvider for CapturingProvider {
         &self,
         request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        self.requests.lock().unwrap().push(request);
-        Box::pin(futures::stream::iter([
+        let first = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request);
+            requests.len() == 1
+        };
+        let gate = self.first_response.clone().filter(|_| first);
+        let response = futures::stream::iter([
             StreamChunk::Delta {
                 content: "done".into(),
             },
             StreamChunk::Done {
                 finish_reason: Some(FinishReason::Stop),
             },
-        ]))
+        ]);
+        Box::pin(
+            futures::stream::once(async move {
+                if let Some(gate) = gate {
+                    gate.acquire().await.unwrap().forget();
+                }
+                response
+            })
+            .flatten(),
+        )
     }
 }
 
@@ -143,6 +160,7 @@ async fn turn_request_alias_uses_the_canonical_provider_model_without_reselectin
     environment.set_swage_home(root.path());
     let provider = Arc::new(CapturingProvider {
         requests: Mutex::new(vec![]),
+        first_response: None,
     });
     let (base, storage, server) = start_server(Arc::clone(&provider)).await;
     let conversation: Value = reqwest::Client::new()
@@ -190,6 +208,7 @@ async fn turn_without_a_model_records_the_persisted_conversation_selection_as_it
     environment.set_swage_home(root.path());
     let provider = Arc::new(CapturingProvider {
         requests: Mutex::new(vec![]),
+        first_response: None,
     });
     let (base, storage, server) = start_server(Arc::clone(&provider)).await;
     let conversation: Value = reqwest::Client::new()
@@ -242,6 +261,83 @@ async fn turn_without_a_model_records_the_persisted_conversation_selection_as_it
         snapshot["provider_visible"]["effective_model"]["catalogue_entry"],
         "alternate"
     );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_turn_uses_its_request_model_at_the_provider() {
+    let root = scratch_tempdir();
+    let mut environment = ProcessEnvGuard::new();
+    environment.set_swage_home(root.path());
+    let first_response = Arc::new(Semaphore::new(0));
+    let provider = Arc::new(CapturingProvider {
+        requests: Mutex::new(vec![]),
+        first_response: Some(first_response.clone()),
+    });
+    let (base, storage, server) = start_server(Arc::clone(&provider)).await;
+    let client = reqwest::Client::new();
+    let conversation: Value = client
+        .post(format!("{base}/api/conversations"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = conversation["id"].as_str().unwrap();
+    let submit = async |message: &str, model: Value| {
+        client
+            .post(format!("{base}/api/turns"))
+            .json(&json!({"conversation_id": id, "message": message, "model": model}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+
+    assert_eq!(submit("first turn", Value::Null).await["status"], "pending");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while provider.requests.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        submit("queued follow-up", json!("fast")).await["status"],
+        "queued"
+    );
+    first_response.add_permits(1);
+
+    let following_model = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(model) = provider
+                .requests
+                .lock()
+                .unwrap()
+                .get(1)
+                .and_then(|request| request.model.clone())
+            {
+                break model;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(following_model, "alternate-wire");
+    let session = storage
+        .get_session(id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.selected_model_id, None);
     server.abort();
 }
 

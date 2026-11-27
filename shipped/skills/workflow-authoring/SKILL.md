@@ -105,7 +105,8 @@ from the session that started the run and can only be narrowed.
 |---|---|
 | `model` | The id of a model in this installation's catalogue (*Choosing a model* below). |
 | `fallbackModel` | A catalogue id used only when `model` is unavailable, or its provider refuses or fails the call before any output. It is not tried after a failure that follows output, or when schema attempts run out. The call's record names the model that served it as `served_model`. |
-| `effort` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. A level the model lacks becomes the nearest lower one it has, or its lowest when none is lower, and the record shows what was used. |
+| `effort` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. A level the model lacks becomes the nearest lower one it has, or its lowest when none is lower, and the record shows what was used. `off` is never what another level becomes: only a call that asks for `off` runs with reasoning switched off. Left out, the call runs at the default effort the model is configured with, or with no effort setting where it has none. |
+| `minEffort` | The least effort the call accepts, from the same seven levels. A call that would be served below it throws `EffortFloorError` before its worker exists: when its model would turn the call's `effort` into a level below this one, when no effort applies to the call, or when the model takes no effort setting. Give `effort` with it. A `fallbackModel` that ends up serving the call is not held to the floor. *Choosing a model* below says when a floor is worth setting. |
 | `schema` | A JSON Schema the reply must satisfy (*What a call returns* below). |
 | `maxAttempts` | How many attempts the worker has to produce a reply that satisfies `schema`. Default 3. |
 | `label` | The worker's name in the run record. |
@@ -419,20 +420,35 @@ closing step.
 ## Choosing a model
 
 Leave `model` out and a worker runs on the configured default, which is right
-whenever the script has no reason to differ. Name a model only by an id this
-installation's catalogue has: one the person gave, or one this session has
-seen in its configuration. Installations differ in which providers and
-models they have, and an id the catalogue lacks fails the call before a
-worker exists unless `fallbackModel` names one it has. A script meant to be
-reused takes its model ids from `args`.
+whenever the script has no reason to differ. To name one, call `model_list`.
+It returns this session's catalogue: each model's `id`, the vendor `family`
+it belongs to, the `effort_levels` it serves as asked, and as `default` the
+id a worker runs on when neither its call nor the script's `defaults` gives a
+`model`, an `agent` or a `task`. Name a model only by an id from that list or
+one the person gave; a session that does not hold `model_list` has only the
+second. Installations differ in which providers and models they have, and an
+id the catalogue lacks fails the call before a worker exists unless
+`fallbackModel` names one it has. A script meant to be reused takes its model
+ids from `args`.
 
 Where the catalogue has more than one tier, a smaller model or a lower
 `effort` suits a leg whose path the brief already decides: reading,
 collecting, a mechanical change. Where it has more than one model family, a
 check is worth more from a different family than the worker it checks,
-because a model tends to accept reasoning shaped like its own. With one
-family, a fresh worker still brings a context that has not seen the first
-worker's reasoning, which is most of the value.
+because a model tends to accept reasoning shaped like its own. The `family`
+of each listed model, the default's included, is what tells them apart. With
+one family, a fresh worker still brings a context that has not seen the
+first worker's reasoning, which is most of the value.
+
+A model serves the levels in its `effort_levels` as asked and turns any other
+level into one of them, so a call can run at less effort than it asked for
+without failing. Where a leg is only worth having at a certain depth, as a
+check or a judgement the script acts on can be, give that level as
+`minEffort` beside the `effort` the leg should run at. On a model that would
+serve it lower the call then throws `EffortFloorError` in place of returning
+shallower work, and the script can catch that and name another model from
+the list. A model whose `effort_levels` is empty takes no effort setting, so
+it fails any floor.
 
 ## Briefing a worker
 
@@ -500,8 +516,9 @@ const verdict = await agent(
 return { finding, verdict, confirmed: verdict?.holds === true };
 ```
 
-`args.checkerModel` is optional. Without it both workers run on the default
-model.
+`args.checkerModel` is optional: an id from `model_list`, of a different
+family from the default's where the catalogue has one. Without it both
+workers run on the default model.
 
 Where a result can be wrong in more than one way, several checkers that each
 ask a different question (is it correct, is it safe, does it reproduce) find

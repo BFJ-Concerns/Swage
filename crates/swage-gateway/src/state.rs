@@ -57,6 +57,12 @@ impl ApprovalWaiter {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct SessionListeners {
+    senders: Vec<mpsc::UnboundedSender<ServerEvent>>,
+    queue_started: Option<ServerEvent>,
+}
+
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
 /// All fields are wrapped in `Arc` so that cloning the state is cheap.
@@ -95,12 +101,8 @@ pub struct AppState {
     /// Set of session_ids that currently have an active WebSocket connection.
     /// Prevents duplicate connections to the same conversation.
     pub active_connections: Arc<AsyncMutex<HashSet<Uuid>>>,
-    /// The connections open on each session, as senders into their own event
-    /// channels. A turn no single connection owns — one the queue started —
-    /// is delivered to every one of them through the same lossless channel
-    /// their own turns use; a closed connection's sender is dropped as it is
-    /// found.
-    pub session_listeners: Arc<AsyncMutex<HashMap<Uuid, Vec<mpsc::UnboundedSender<ServerEvent>>>>>,
+    /// Open views and the queue-start event they may need on connection.
+    pub(crate) session_listeners: Arc<AsyncMutex<HashMap<Uuid, SessionListeners>>>,
     /// Dispatch pipeline: resolves tool lookups, permission checks, rate limiting,
     /// schema validation, execution, and leak detection for every tool call.
     pub tool_dispatcher: Arc<ToolDispatcher>,
@@ -142,6 +144,10 @@ pub struct AppState {
     pub session_approval_grants: Arc<Mutex<HashSet<ApprovalGrantKey>>>,
     /// Optional lifecycle hooks honoured by gateway-owned execution paths.
     pub hook_registry: Option<Arc<HookRegistry>>,
+    /// The installed plugins: their isolates, tools and enablement.
+    pub plugins: Arc<crate::plugin::PluginService>,
+    /// The turn graph's revisions and the one that serves.
+    pub turn_graph: Arc<crate::turn_graph::TurnGraphService>,
     /// Session routing map for external channels.
     pub channel_routes: Arc<AsyncMutex<HashMap<ChannelOrigin, Uuid>>>,
     /// Runtime presence for recent clients and registered devices.
@@ -313,6 +319,15 @@ impl AppState {
         }
         let codex_supervisor = AppServerSupervisor::new(codex_config);
         let worktree_root = config_root.join("worker-worktrees");
+        let plugins = Arc::new(crate::plugin::PluginService::new(
+            storage.clone(),
+            config_root.join(crate::plugin::PLUGINS_DIR),
+        ));
+        let turn_graph = Arc::new(crate::turn_graph::TurnGraphService::new(
+            storage.clone(),
+            topic_store.clone(),
+            Arc::clone(&plugins),
+        ));
         let mut codex_runtime_events = codex_supervisor.subscribe_runtime();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let audit_storage = storage.clone();
@@ -350,6 +365,8 @@ impl AppState {
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
             session_approval_grants: Arc::new(Mutex::new(HashSet::new())),
             hook_registry,
+            plugins,
+            turn_graph,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             devices: Arc::new(AsyncMutex::new(DeviceRuntime::default())),
@@ -431,21 +448,44 @@ impl AppState {
         session_id: Uuid,
         sender: mpsc::UnboundedSender<ServerEvent>,
     ) {
-        self.session_listeners
-            .lock()
-            .await
-            .entry(session_id)
-            .or_default()
-            .push(sender);
+        let mut listeners = self.session_listeners.lock().await;
+        let session = listeners.entry(session_id).or_default();
+        if let Some(event) = &session.queue_started {
+            let _ = sender.send(event.clone());
+        }
+        session.senders.push(sender);
     }
 
-    /// Deliver an event to every connection open on the session. A sender
-    /// whose connection has gone is dropped from the list as it is found.
+    /// Deliver an event to every connection open on the session. Keep the
+    /// queue start and listener registration under one lock so a late view
+    /// knows the thread before it receives live tokens.
     pub async fn send_to_session(&self, session_id: Uuid, event: &ServerEvent) {
         let mut listeners = self.session_listeners.lock().await;
-        if let Some(senders) = listeners.get_mut(&session_id) {
-            senders.retain(|sender| sender.send(event.clone()).is_ok());
-            if senders.is_empty() {
+        let session = listeners.entry(session_id).or_default();
+        match event {
+            ServerEvent::QueueDrained { .. } => session.queue_started = Some(event.clone()),
+            ServerEvent::TurnComplete { .. }
+            | ServerEvent::OutputSchemaFailed { .. }
+            | ServerEvent::Error { .. }
+            | ServerEvent::Cancelled {} => session.queue_started = None,
+            _ => {}
+        }
+        session
+            .senders
+            .retain(|sender| sender.send(event.clone()).is_ok());
+        if session.senders.is_empty() && session.queue_started.is_none() {
+            listeners.remove(&session_id);
+        }
+    }
+
+    pub(crate) async fn finish_queued_turn_events(&self, session_id: Uuid, turn_id: Uuid) {
+        let mut listeners = self.session_listeners.lock().await;
+        if let Some(session) = listeners.get_mut(&session_id)
+            && matches!(session.queue_started, Some(ServerEvent::QueueDrained { turn_id: active, .. }) if active == turn_id)
+        {
+            session.queue_started = None;
+            session.senders.retain(|sender| !sender.is_closed());
+            if session.senders.is_empty() {
                 listeners.remove(&session_id);
             }
         }
@@ -508,6 +548,15 @@ impl AppState {
             .unwrap_or_else(|error| error.into_inner()) = Arc::new(tool_dispatcher);
         self.reschedule_agent_message_expiry_if_needed(previous_communication, next_communication);
         self.clear_restart_required();
+    }
+
+    /// Swap the live tool dispatcher alone — after a plugin install adds
+    /// tools — leaving the configuration and provider as they are.
+    pub fn replace_tool_dispatcher(&self, tool_dispatcher: ToolDispatcher) {
+        *self
+            .runtime_tool_dispatcher
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Arc::new(tool_dispatcher);
     }
 
     pub fn start_agent_message_expiry(&self) {

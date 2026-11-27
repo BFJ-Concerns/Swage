@@ -15,6 +15,8 @@ import type { MessageView as WireMessageView } from "../protocol/MessageView";
 import type { QueuedMessageView as WireQueuedMessageView } from "../protocol/QueuedMessageView";
 import * as api from "../api/conversations";
 
+type QueuedSource = { id: string; clientId?: string | null };
+
 export interface ConversationStore {
   readonly conversations: ConversationSummary[];
   readonly activeConversation: ConversationDetail | null;
@@ -63,10 +65,9 @@ export interface ConversationStore {
    * this client typed, such as a schedule's brief or a delegation's notice —
    * on the conversation it names, exactly as the gateway holds it.
    */
-  appendRecordedMessage(message: WireMessageView, conversationId: string): void;
+  appendRecordedMessage(message: WireMessageView, conversationId: string, queuedSource?: QueuedSource): void;
   /** Show a message the gateway is holding for the conversation's next turn. */
   appendQueuedMessage(queued: WireQueuedMessageView, conversationId: string): void;
-  /** The held messages became the next turn's input: the queue is empty. */
   /** Drop the held messages a drain took, by id; later arrivals stay held. */
   clearQueuedMessages(conversationId: string, queuedIds: string[]): void;
   /**
@@ -167,6 +168,12 @@ export function createConversationStore(): ConversationStore {
     }
   }
 
+  function rememberDrained(conversationId: string, ids: string[]): void {
+    const seen = drainedQueueIds.get(conversationId) ?? new Set<string>();
+    for (const id of ids) seen.add(id);
+    drainedQueueIds.set(conversationId, seen);
+  }
+
   function appendMessage(
     message: {
       attachments?: MessageView["attachments"];
@@ -182,7 +189,9 @@ export function createConversationStore(): ConversationStore {
       tool_calls?: MessageView["tool_calls"];
     },
     conversationId?: string | null,
+    queuedSource?: QueuedSource,
   ): void {
+    if (queuedSource && conversationId) rememberDrained(conversationId, [queuedSource.id]);
     const activeConversation = get(activeConversationStore);
     if (!activeConversation || (conversationId != null && activeConversation.id !== conversationId)) return;
 
@@ -194,7 +203,13 @@ export function createConversationStore(): ConversationStore {
     const threadId = message.thread_id ?? threadInView;
     const belongsToView =
       message.thread_id === undefined || threadInView === undefined || message.thread_id === threadInView;
-    if (!belongsToView) return;
+    const pending = queuedSource
+      ? (activeConversation.queued ?? []).filter((item) => item.id !== queuedSource.id)
+      : activeConversation.queued;
+    if (!belongsToView) {
+      if (queuedSource) activeConversationStore.set({ ...activeConversation, queued: pending });
+      return;
+    }
     const appendedMessage: MessageView = {
       ...(message.attachments?.length ? { attachments: message.attachments } : {}),
       role: message.role,
@@ -209,7 +224,9 @@ export function createConversationStore(): ConversationStore {
       ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
     };
 
-    const messages = [...activeConversation.messages];
+    const messages = activeConversation.messages.filter((existing) =>
+      !queuedSource?.clientId || existing.id !== undefined || existing.client_id !== queuedSource.clientId,
+    );
     const recordedIndex = message.id === undefined
       ? -1
       : messages.findIndex((existing) => existing.id === message.id);
@@ -219,6 +236,7 @@ export function createConversationStore(): ConversationStore {
     activeConversationStore.set({
       ...activeConversation,
       last_activity: message.origin === "platform" ? activeConversation.last_activity : message.timestamp,
+      queued: pending,
       messages,
     });
   }
@@ -423,9 +441,7 @@ export function createConversationStore(): ConversationStore {
     },
 
     clearQueuedMessages(conversationId, queuedIds) {
-      const seen = drainedQueueIds.get(conversationId) ?? new Set<string>();
-      for (const id of queuedIds) seen.add(id);
-      drainedQueueIds.set(conversationId, seen);
+      rememberDrained(conversationId, queuedIds);
       const activeConversation = get(activeConversationStore);
       if (activeConversation?.id !== conversationId) return;
       const drained = new Set(queuedIds);
@@ -435,7 +451,7 @@ export function createConversationStore(): ConversationStore {
       });
     },
 
-    appendRecordedMessage(message, conversationId) {
+    appendRecordedMessage(message, conversationId, queuedSource) {
       // The gateway's own view of the row, installed as recorded: its
       // identity (so it can be branched from), its origin (so it is labelled
       // by its author), and the thread it belongs to.
@@ -456,7 +472,7 @@ export function createConversationStore(): ConversationStore {
         ...(message.tool_calls.length === 0
           ? {}
           : { tool_calls: message.tool_calls as unknown as MessageView["tool_calls"] }),
-      }, conversationId);
+      }, conversationId, queuedSource);
     },
 
     replaceActiveConversationIfCurrent(conversation) {

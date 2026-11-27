@@ -118,6 +118,10 @@ pub(crate) struct GatewayDispatcherRequest<'a> {
     pub(crate) ws_tx: mpsc::UnboundedSender<ServerEvent>,
     pub(crate) session_id: Option<Uuid>,
     pub(crate) turn_id: Option<Uuid>,
+    /// The hook over the model's tool calls the turn's revision attaches at
+    /// `tool_call`, resolved by the turn from the revision it took at its
+    /// start; none when the revision attaches nothing there.
+    pub(crate) call_hook: Option<Arc<dyn swage_tool::dispatch::ToolCallHook>>,
 }
 
 pub(super) struct TurnSandboxBuild {
@@ -1313,6 +1317,7 @@ pub(crate) async fn build_gateway_dispatcher(
         ws_tx,
         session_id,
         turn_id,
+        call_hook,
     } = request;
     #[cfg(test)]
     if state.take_dispatcher_build_failure() {
@@ -1346,15 +1351,30 @@ pub(crate) async fn build_gateway_dispatcher(
 
     // A tool a platform agent holds is withheld from every other agent here,
     // before permissions are consulted: no grant, not even `*`, offers it.
+    // A plugin's tools are withheld the same way from a scope that does not
+    // enable the plugin.
     let base_dispatcher = state.active_tool_dispatcher();
+    let registry = Arc::new(
+        base_dispatcher
+            .registry()
+            .for_agent(&agent_config.agent_id)
+            .withholding(&state.plugins.withheld_tool_names(topic_id)),
+    );
     let dispatcher = ToolDispatcher::new(
-        Arc::new(base_dispatcher.registry().for_agent(&agent_config.agent_id)),
+        Arc::clone(&registry),
         permissions.clone(),
         Arc::new(RateLimiter::new()),
         RateLimitConfig::default(),
         Arc::new(LeakDetector::default()),
         false,
     );
+    // The plugin hooks the turn's revision attaches at `tool_call` see
+    // every call the model raises before the gates — a rewrite is what the
+    // gates then check, as if the model had raised it.
+    let dispatcher = match call_hook {
+        Some(hook) => dispatcher.with_call_hook(hook),
+        None => dispatcher,
+    };
 
     // Where the person has put sandboxed commands behind the recording
     // proxy, what they may reach and the record of it: the listed hosts,
@@ -1438,6 +1458,25 @@ pub(crate) async fn build_gateway_dispatcher(
     } else {
         None
     };
+    // A process started on the session's behalf — a plugin's brokered
+    // process — runs where the turn's commands run: inside the same sandbox
+    // policy under bubblewrap, plainly where the turn itself has no
+    // boundary (declared, disabled, or the permitted fallback).
+    let process_placement = Arc::new(match sandbox_build.backend {
+        SandboxBackend::Bubblewrap | SandboxBackend::Fallback => {
+            let roots = PolicyRoots::from_environment(&state.config_root)?;
+            let config =
+                build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots, config)?;
+            if sandbox_build.backend == SandboxBackend::Bubblewrap {
+                crate::plugin::process::ProcessPlacement::sandboxed(config)
+            } else {
+                crate::plugin::process::ProcessPlacement::fallback(config)
+            }
+        }
+        SandboxBackend::None | SandboxBackend::TestHarness => {
+            crate::plugin::process::ProcessPlacement::plain()
+        }
+    });
     let sandbox = sandbox_build.sandbox;
     let sandbox_guard = sandbox
         .as_ref()
@@ -1455,6 +1494,22 @@ pub(crate) async fn build_gateway_dispatcher(
         None => dispatcher,
     };
 
+    // Calls a host-side tool makes on the session's behalf — a plugin's
+    // `callTool` — run through a dispatcher of the same registry and
+    // permissions over a strategy of the same shape, so they meet the gates
+    // the model's own calls meet. It carries no session dispatcher of its
+    // own: a nested call does not nest further. Nor does it carry the
+    // `tool_call` hook: that point sees the model's calls, and a plugin's
+    // own call waiting on a hook served by the same isolate — which runs
+    // one invocation at a time — would wait on itself.
+    let session_dispatcher_base = ToolDispatcher::new(
+        registry,
+        permissions.clone(),
+        Arc::new(RateLimiter::new()),
+        RateLimitConfig::default(),
+        Arc::new(LeakDetector::default()),
+        false,
+    );
     let mut nested_registry = swage_tool::registry::ToolRegistry::new();
     for name in dispatcher
         .registry()
@@ -1504,6 +1559,19 @@ pub(crate) async fn build_gateway_dispatcher(
         signer,
     };
 
+    let session_dispatcher = Arc::new(
+        session_dispatcher_base.with_execution_strategy(Arc::new(
+            GatewayExecutionStrategy::new(
+                inner_strategy.clone(),
+                ws_tx.clone(),
+                device.clone(),
+                state.secret_manager.clone(),
+                state.storage.clone(),
+                Some(state.clone()),
+            )
+            .with_process_placement(Arc::clone(&process_placement)),
+        )),
+    );
     Ok(GatewayDispatcherBuild {
         dispatcher: dispatcher.with_execution_strategy(Arc::new(
             GatewayExecutionStrategy::new(
@@ -1514,7 +1582,9 @@ pub(crate) async fn build_gateway_dispatcher(
                 state.storage.clone(),
                 Some(state.clone()),
             )
-            .with_python_execution(python_execution),
+            .with_python_execution(python_execution)
+            .with_session_dispatcher(session_dispatcher)
+            .with_process_placement(process_placement),
         )),
         sandbox_guard,
         isolation: sandbox_build.isolation,
@@ -1572,6 +1642,28 @@ pub(crate) async fn record_unsandboxed_execution(
         })
         .await?;
     Ok(())
+}
+
+/// The dispatcher's call hook over the `tool_call` attachments a turn
+/// resolved, in the revision's order, each rewrite recorded to the audit
+/// trail under `session_id`; none when nothing attached serves.
+pub(crate) fn call_hook_for(
+    state: &AppState,
+    hooks: Vec<(
+        swage_protocol::client::turn_graph::HookMode,
+        crate::plugin::slot::PluginSlot,
+    )>,
+    session_id: Option<Uuid>,
+) -> Option<Arc<dyn swage_tool::dispatch::ToolCallHook>> {
+    (!hooks.is_empty()).then(|| {
+        Arc::new(crate::plugin::slot::PluginCallHook::new(
+            hooks,
+            Some(crate::plugin::slot::audit_rewrite_recorder(
+                state.clone(),
+                session_id,
+            )),
+        )) as Arc<dyn swage_tool::dispatch::ToolCallHook>
+    })
 }
 
 /// The tools the model will be offered on this turn, by name, read before
@@ -1638,6 +1730,28 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
 ) -> Result<GatewayDispatcherBuild, swage_core::GatewayError> {
     let session_id = request.session_id;
     let turn_id = request.turn_id;
+    // A build made on a turn's behalf takes the revision serving now: it
+    // has no turn snapshot of its own to read.
+    let request = match request.call_hook {
+        Some(_) => request,
+        None => {
+            let hooks = crate::plugin::slot::hooks_for_turn(
+                state,
+                &state.turn_graph.active().graph,
+                swage_protocol::client::turn_graph::HookPoint::ToolCall,
+                &crate::plugin::slot::slot_context(
+                    session_id,
+                    &request.agent_config.agent_id,
+                    &request.agent_config.working_directory,
+                ),
+                request.topic_id,
+            );
+            GatewayDispatcherRequest {
+                call_hook: call_hook_for(state, hooks.attached, session_id),
+                ..request
+            }
+        }
+    };
     let build = build_gateway_dispatcher(state, request)
         .await
         .map_err(|error| swage_core::GatewayError::ConfigError(error.to_string()))?;
@@ -1732,6 +1846,7 @@ mod tests {
                 ws_tx,
                 session_id: Some(session_id),
                 turn_id: Some(Uuid::new_v4()),
+                call_hook: None,
             },
         )
         .await
@@ -1915,6 +2030,7 @@ mod tests {
                     ws_tx,
                     session_id: Some(session_id),
                     turn_id: Some(turn_id),
+                    call_hook: None,
                 },
             )
             .await
@@ -2217,6 +2333,7 @@ mod tests {
                 ws_tx,
                 session_id: Some(session_id),
                 turn_id: Some(Uuid::new_v4()),
+                call_hook: None,
             },
             "scheduled turn",
         )
@@ -2250,6 +2367,7 @@ mod tests {
                 ws_tx,
                 session_id: Some(session_id),
                 turn_id: Some(Uuid::new_v4()),
+                call_hook: None,
             },
             "delegated turn",
         )

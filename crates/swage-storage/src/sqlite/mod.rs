@@ -15,6 +15,7 @@ pub mod message;
 pub mod migrations;
 pub mod observation;
 pub mod orientation_card;
+pub mod plugin;
 pub mod provider_round;
 mod record_masking;
 pub mod schedule;
@@ -29,6 +30,7 @@ pub mod thread;
 pub mod tool_call;
 pub mod topic;
 pub mod turn;
+pub mod turn_graph;
 pub mod turn_queue;
 pub mod workflow;
 pub mod workspace_attachment;
@@ -393,6 +395,7 @@ mod tests {
             .unwrap();
         storage
             .enqueue_turn_input(NewQueuedTurnInput {
+                requested_model: None,
                 delivery_targets: Vec::new(),
                 client_id: None,
                 attended: true,
