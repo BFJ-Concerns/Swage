@@ -171,6 +171,9 @@ const LOCATION_VARIABLES: &[&str] = &[
     "TMPDIR",
     "CARGO_HOME",
     "GOPATH",
+    "GOMODCACHE",
+    "GOCACHE",
+    "UV_CACHE_DIR",
     "npm_config_cache",
     "NPM_CONFIG_CACHE",
     "npm_config_userconfig",
@@ -420,10 +423,33 @@ const SHARED_CACHES: &[(Place, Option<&str>)] = &[
         },
         Some("pnpm"),
     ),
+    // Tools whose own variable moves their cache out of the shared one
+    // above; unmoved, each is inside it.
+    (
+        Place {
+            home: ".cache/uv",
+            moved_by: &[("UV_CACHE_DIR", ""), ("XDG_CACHE_HOME", "uv")],
+        },
+        Some("uv"),
+    ),
+    (
+        Place {
+            home: ".cache/go-build",
+            moved_by: &[("GOCACHE", ""), ("XDG_CACHE_HOME", "go-build")],
+        },
+        Some("go"),
+    ),
     (
         Place {
             home: "go/pkg",
             moved_by: &[("GOPATH", "pkg")],
+        },
+        Some("go"),
+    ),
+    (
+        Place {
+            home: "go/pkg/mod",
+            moved_by: &[("GOMODCACHE", ""), ("GOPATH", "pkg/mod")],
         },
         Some("go"),
     ),
@@ -2066,6 +2092,11 @@ mod tests {
         let home = root.path().join("home");
         let elsewhere = root.path().join("elsewhere");
         let cache = elsewhere.join("cache");
+        let tool_caches = [
+            ("UV_CACHE_DIR", elsewhere.join("uv")),
+            ("GOCACHE", elsewhere.join("go-build")),
+            ("GOMODCACHE", elsewhere.join("go-mod")),
+        ];
         let config = elsewhere.join("config");
         let data = elsewhere.join("data");
         let gnupg = elsewhere.join("gnupg");
@@ -2082,7 +2113,10 @@ mod tests {
             &gnupg,
             &temporary,
             &runtime,
-        ] {
+        ]
+        .into_iter()
+        .chain(tool_caches.iter().map(|(_, path)| path))
+        {
             std::fs::create_dir_all(directory).unwrap();
         }
         for file in [&config.join("gh/hosts.yml"), &aws, &kube[0], &kube[1]] {
@@ -2090,21 +2124,25 @@ mod tests {
         }
         let workspace = home.join("project");
         std::fs::create_dir_all(&workspace).unwrap();
+        let mut environment: LocationEnvironment = [
+            ("XDG_CACHE_HOME", cache.clone()),
+            ("XDG_CONFIG_HOME", config.clone()),
+            ("XDG_DATA_HOME", data.clone()),
+            ("GNUPGHOME", gnupg.clone()),
+            ("AWS_SHARED_CREDENTIALS_FILE", aws.clone()),
+            ("KUBECONFIG", kube[0].clone()),
+            ("KUBECONFIG", kube[1].clone()),
+            ("TMPDIR", temporary.clone()),
+            ("XDG_RUNTIME_DIR", runtime.clone()),
+        ]
+        .into();
+        for (variable, path) in &tool_caches {
+            environment.0.insert(variable, vec![path.clone()]);
+        }
         let roots = PolicyRoots {
             home: home.clone(),
             data_root: home.join(".swage"),
-            environment: [
-                ("XDG_CACHE_HOME", cache.clone()),
-                ("XDG_CONFIG_HOME", config.clone()),
-                ("XDG_DATA_HOME", data.clone()),
-                ("GNUPGHOME", gnupg.clone()),
-                ("AWS_SHARED_CREDENTIALS_FILE", aws.clone()),
-                ("KUBECONFIG", kube[0].clone()),
-                ("KUBECONFIG", kube[1].clone()),
-                ("TMPDIR", temporary.clone()),
-                ("XDG_RUNTIME_DIR", runtime.clone()),
-            ]
-            .into(),
+            environment,
         };
         let agent_config =
             AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
@@ -2116,7 +2154,10 @@ mod tests {
         )
         .unwrap();
 
-        for writable in [&cache, &temporary] {
+        for writable in [&cache, &temporary]
+            .into_iter()
+            .chain(tool_caches.iter().map(|(_, path)| path))
+        {
             assert!(
                 policy.write_paths.contains(&sandbox_path(writable)),
                 "{writable:?} is writable: {:?}",

@@ -137,9 +137,12 @@ pub fn policy_command(
         "CARGO_HOME",
         "RUSTUP_HOME",
         "RUSTUP_TOOLCHAIN",
-        // Where the operator keeps Go's and npm's caches, which the policy
-        // opens where these name them.
+        // Where the operator keeps Go's, uv's and npm's caches, which the
+        // policy opens where these name them.
         "GOPATH",
+        "GOMODCACHE",
+        "GOCACHE",
+        "UV_CACHE_DIR",
         "npm_config_cache",
         "NPM_CONFIG_CACHE",
         // Which system and global git configuration the operator uses.
