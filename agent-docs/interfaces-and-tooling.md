@@ -7,6 +7,40 @@ description: Provider setup and credentials, protocol selection, Settings, turn 
 CLI examples assume `swage` is on `PATH`; see the build and `PATH` steps in
 the [README quick start](../README.md#quick-start).
 
+## Access gate beyond loopback
+
+`crates/swage-gateway/src/access_gate.rs` is an axum layer on every `/api/`
+route. It applies only when the bound host is not loopback, and admits a
+request that comes from the gateway's own machine (loopback, or the one
+specific address bound) or presents the token: `Authorization: Bearer`,
+`X-Swage-Token`, the `swage_token` cookie, or `token` in a WebSocket
+upgrade's query. `/api/health`, `/api/access`, `/api/pair` and the device
+link `/api/devices/connect` (authenticated by the device's shared token in
+its hello frame) are ungated; assets outside `/api/` are never gated.
+
+- The token is `gateway-token` in the data root, created `0600` at startup
+  when absent.
+- `POST /api/pair/codes` issues a ten-minute one-time code to the
+  gateway's own machine only (`swage gateway pair`); `POST /api/pair`
+  redeems it for the token, also set as a 400-day `HttpOnly` cookie.
+- Clients remember the token per gateway origin: `swage-client`'s
+  `pairing.rs` (`$SWAGE_HOME/client-pairings.json`) for `swage run`,
+  `desktop/src/pairing.mjs` (`gateway-pairings.json` in the Electron
+  profile) for the desktop shell; the web UI shows `PairingDialog.svelte`
+  when a request is refused with `unauthorised`.
+- `[server] access` (`token`, `warn`, `off`) is read per request from the
+  active configuration, so a change from Settings → Security applies at
+  once. `swage run --pairing-code` pairs whenever the gate applies, warn
+  included.
+
+Settings → Security (`security_settings.rs`, `GET`/`PUT
+/api/settings/security` and `/api/topics/{id}/settings/security`) reads
+and writes the sandbox toggle, the approval list and, for the install
+only, the access gate; each save writes one `configuration_change` audit
+event naming the checks left relaxed. Every writer of a configuration file
+— general settings, security settings, permanent approvals — holds
+`AppState::config_updates` for its read-modify-write.
+
 ## Settings memory view
 
 Settings has a **Memory** tab that lists every memory page — general and

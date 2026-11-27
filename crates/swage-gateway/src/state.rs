@@ -68,6 +68,8 @@ pub struct AppState {
     pub(crate) test_root: Option<Arc<tempfile::TempDir>>,
     /// Configuration root selected when this gateway instance was constructed.
     pub config_root: PathBuf,
+    /// Serialises config file updates and their corresponding runtime snapshots.
+    pub(crate) config_updates: Arc<AsyncMutex<()>>,
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
     pub storage: Arc<dyn Storage>,
     /// Topic storage backend. Separate from `storage` because `TopicStore` is
@@ -166,6 +168,9 @@ pub struct AppState {
     pub restart_required: Arc<AtomicBool>,
     /// Whether this process can restart itself via the desktop/runtime wrapper.
     pub managed_gateway: bool,
+    /// The token gate on a binding beyond loopback; open until startup reads
+    /// the binding and the token (crate::access_gate).
+    pub access_gate: crate::access_gate::SharedAccessGate,
     /// Hot-swapped runtime config used by new turns and settings reads.
     pub runtime_config: Arc<RwLock<ResolvedConfig>>,
     /// Hot-swapped provider catalogue used by new turns.
@@ -344,6 +349,7 @@ impl AppState {
             #[cfg(feature = "test-fixtures")]
             test_root: None,
             config_root,
+            config_updates: Arc::new(AsyncMutex::new(())),
             storage: storage.clone(),
             topic_store,
             provider: provider.clone(),
@@ -378,6 +384,7 @@ impl AppState {
             managed_gateway: std::env::var("SWAGE_MANAGED_GATEWAY")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            access_gate: Arc::new(crate::access_gate::AccessGate::open()),
             runtime_config: Arc::new(RwLock::new(config)),
             runtime_provider: Arc::new(RwLock::new(provider)),
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),

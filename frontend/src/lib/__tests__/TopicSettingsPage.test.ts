@@ -6,6 +6,7 @@ import { fromStore, writable } from "svelte/store";
 import TopicSettingsPage from "../components/TopicSettingsPage.svelte";
 import * as topicsApi from "../api/topics";
 import * as surfacesApi from "../api/surfaces";
+import type { SecuritySettingsResponse } from "../protocol/SecuritySettingsResponse";
 import type { ServerEvent, Topic } from "../types";
 
 let onSessionSignal: ((event: ServerEvent) => void) | undefined;
@@ -33,6 +34,12 @@ vi.mock("../api/surfaces", () => ({
   listTopicDefaultSurfaces: vi.fn(),
   removeTopicDefaultSurface: vi.fn(),
 }));
+
+vi.mock("../api/settings", () => ({
+  fetchTopicSecuritySettings: vi.fn(),
+  saveTopicSecuritySettings: vi.fn(),
+}));
+import * as settingsApi from "../api/settings";
 
 type MountedComponent = ReturnType<typeof mount>;
 
@@ -259,6 +266,86 @@ describe("TopicSettingsPage", () => {
     expect(document.body.textContent).toContain("Research");
     expect(document.body.textContent).toContain("Workspaces 1");
     expect(document.body.textContent).toContain("Sessions 1");
+  });
+
+  it("shows the topic's security checks with what stands relaxed and saves its own overrides", async () => {
+    vi.mocked(settingsApi.fetchTopicSecuritySettings).mockResolvedValue({
+      available_tools: ["shell", "file_write"],
+      scope: { kind: "topic", topic_id: "topic-1" },
+      effective: { sandbox_enabled: false, access_gate: "token", require_approval: ["shell", "file_write"] },
+      overrides: {},
+      relaxed: [
+        { check: "sandbox", relaxed_by: { kind: "install" }, detail: "The per-turn sandbox is off." },
+      ],
+    });
+    vi.mocked(settingsApi.saveTopicSecuritySettings).mockResolvedValue({
+      available_tools: ["shell", "file_write"],
+      scope: { kind: "topic", topic_id: "topic-1" },
+      effective: { sandbox_enabled: true, access_gate: "token", require_approval: ["shell", "file_write"] },
+      overrides: { sandbox_enabled: true },
+      relaxed: [],
+    });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "security" } });
+    await flushUi();
+
+    expect(document.body.textContent).toContain("Sandbox — relaxed by the install");
+    expect(document.body.textContent).toContain("The per-turn sandbox is off.");
+    expect(document.body.textContent).toContain("shell, file_write");
+
+    const sandbox = document.querySelector('select[aria-label="Sandbox for this topic"]') as HTMLSelectElement;
+    sandbox.value = "on";
+    sandbox.dispatchEvent(new Event("change", { bubbles: true }));
+    document.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+
+    expect(settingsApi.saveTopicSecuritySettings).toHaveBeenCalledWith("topic-1", {
+      sandbox_enabled: true,
+      require_approval: undefined,
+    });
+    expect(document.body.textContent).toContain("Every shipped check is in force for this topic.");
+  });
+
+  it("edits a topic approval timeout while preserving policy, and removes a tool", async () => {
+    const reading: SecuritySettingsResponse = {
+      available_tools: ["shell", "file_write"], scope: { kind: "topic" as const, topic_id: topic.id },
+      effective: { sandbox_enabled: true, access_gate: "token" as const,
+        require_approval: [{ tool: "shell", timeout: 12, timeout_policy: "interrupt" as const }] },
+      overrides: { require_approval: [{ tool: "shell", timeout: 12, timeout_policy: "interrupt" }] }, relaxed: [],
+    };
+    vi.mocked(settingsApi.fetchTopicSecuritySettings).mockResolvedValue(reading);
+    vi.mocked(settingsApi.saveTopicSecuritySettings).mockImplementation(async (_id, overrides) => {
+      reading.overrides = JSON.parse(JSON.stringify(overrides));
+      reading.effective = { ...reading.effective, ...reading.overrides };
+      return JSON.parse(JSON.stringify(reading));
+    });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "security" } });
+    await flushUi();
+    const mode = document.querySelector<HTMLSelectElement>('[aria-label="Approval prompts for this topic"]')!;
+    mode.value = "own"; mode.dispatchEvent(new Event("change", { bubbles: true })); await flushUi();
+    expect(document.querySelector('[aria-label="Timeout for shell"]')).not.toBeNull();
+    const timeout = document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')!;
+    timeout.value = "27"; timeout.dispatchEvent(new Event("change", { bubbles: true })); await flushUi();
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(settingsApi.saveTopicSecuritySettings).toHaveBeenLastCalledWith(topic.id, {
+      sandbox_enabled: undefined, require_approval: [{ tool: "shell", timeout: 27, timeout_policy: "interrupt" }],
+    });
+    const picker = document.querySelector<HTMLSelectElement>('[aria-label="Tool to require approval"]')!;
+    picker.value = "file_write"; picker.dispatchEvent(new Event("change", { bubbles: true })); await flushUi();
+    Array.from(document.querySelectorAll("button")).find(button => button.textContent?.trim() === "Add tool")!.click();
+    await flushUi();
+    document.querySelector<HTMLButtonElement>('[aria-label="Remove file_write approval"]')!.click(); await flushUi();
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(vi.mocked(settingsApi.saveTopicSecuritySettings).mock.calls.at(-1)![1].require_approval)
+      .toEqual([{ tool: "shell", timeout: 27, timeout_policy: "interrupt" }]);
+    unmount(component);
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "security" } });
+    await flushUi();
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')?.value).toBe("27");
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(vi.mocked(settingsApi.saveTopicSecuritySettings).mock.calls.at(-1)![1]).toEqual({});
   });
 
   it("renders topic workspaces without global settings controls", async () => {

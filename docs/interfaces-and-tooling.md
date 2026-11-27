@@ -48,13 +48,55 @@ is already in use, the gateway exits with a diagnostic. The runtime-metadata
 file written for CLI discovery records the actual bound address, which may
 differ from the configured one when port `0` (OS-assigned) is used.
 
-### Security boundary
+### Pairing beyond loopback
 
-The gateway has no authentication layer. Binding to any address other than
-loopback exposes the full API — including every configured provider key — to
-every host that can reach the port. The intended use is trusted
-private-network addresses (a LAN segment, a tailnet, or similar).
-Public-internet binding is not supported until authentication exists.
+Bound to loopback, the gateway asks nothing of a request. Bound to any other
+address, it serves a request from another machine only when the request
+carries the gateway's token; requests from the gateway's own machine —
+over loopback, or from the one address it is bound to — never need it.
+Liveness (`/api/health`), the access status (`/api/access`) and pairing
+itself (`/api/pair`) answer anyone, and the web UI's own files load
+unpaired so the page can ask to pair. A device's link
+(`/api/devices/connect`) needs no gateway token either: the device proves
+itself with its registered shared token, and the gateway refuses the link
+without it.
+
+The gateway generates the token on its first start, in `gateway-token` in
+the data root, readable only by its owner. A client gets it by pairing
+once:
+
+1. On the gateway's machine, run `swage gateway pair`. It prints a one-time
+   code that expires after ten minutes; codes are issued only to requests
+   from that machine.
+2. Enter the code on the other device:
+   - **Web UI** — the page shows a pairing prompt when the gateway refuses
+     it. Pairing sets a cookie the browser keeps for 400 days.
+   - **Command line** — `swage run --url http://<gateway>:<port>` asks for
+     the code on its terminal, or takes it as `--pairing-code <code>`.
+   - **Desktop app** — it shows the web UI's pairing prompt when it opens a
+     network gateway unpaired.
+
+Each client remembers the token for that gateway and sends it with every
+request, HTTP and WebSocket alike: the command line in `client-pairings.json`
+in its own data root (`SWAGE_HOME`, by default `~/.swage`), the desktop app
+in `gateway-pairings.json` in its profile directory, and the browser as its
+cookie. Nothing is asked again.
+
+The gate is one setting for the whole install, `[server] access`, set under
+**Settings → Security**:
+
+| Value | A request from another machine without the token |
+|---|---|
+| `token` (default) | is refused with `401` |
+| `warn` | is admitted and logged as a warning |
+| `off` | is admitted |
+
+A change applies at once, without a restart, and is recorded in the audit
+trail when it is saved. A client given a pairing code while the gate warns
+still pairs, so it stays admitted when the gate goes back to `token`.
+
+The gate is not authentication for the public internet: bind only to a
+trusted private network, such as a LAN segment or a tailnet.
 
 The host machine's own firewall must also permit inbound connections on the
 chosen port — a correctly bound gateway is unreachable from the LAN if the

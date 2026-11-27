@@ -289,6 +289,7 @@
         <button class:active={settingsTab === "agents"} onclick={() => onNavigate?.("/settings/agents")}>Agents</button>
         <button class:active={settingsTab === "commands"} onclick={() => onNavigate?.("/settings/commands")}>Commands</button>
         <button class:active={settingsTab === "skills"} onclick={() => onNavigate?.("/settings/skills")}>Skills</button>
+        <button class:active={settingsTab === "security"} onclick={() => onNavigate?.("/settings/security")}>Security</button>
         <button class:active={settingsTab === "automation"} onclick={() => onNavigate?.("/settings/automation")}>Automation</button>
         <button class:active={settingsTab === "voice"} onclick={() => onNavigate?.("/settings/voice")}>Voice</button>
         <button class:active={settingsTab === "channels"} onclick={() => onNavigate?.("/settings/channels")}>Channels</button>
