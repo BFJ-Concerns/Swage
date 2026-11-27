@@ -371,7 +371,7 @@ impl TurnGraphService {
                     from.slot.as_str()
                 ));
             }
-            let [step] = branch.steps.as_slice() else {
+            let Some(step) = branch.steps.first().filter(|_| branch.steps.len() == 1) else {
                 return Err(format!(
                     "branch '{}' must carry exactly one step, the shadow of '{}'",
                     branch.id, branch.from

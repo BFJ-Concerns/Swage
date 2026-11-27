@@ -1385,7 +1385,7 @@ async fn succession_shadows(
     for branch in graph.branches_from(&live.id) {
         // Validation admits a branch as exactly one step of the live step's
         // slot; a recorded revision shaped otherwise shadows nothing.
-        let [step] = branch.steps.as_slice() else {
+        let Some(step) = branch.steps.first().filter(|_| branch.steps.len() == 1) else {
             continue;
         };
         let location = format!("turn_graph.{}", branch.id);

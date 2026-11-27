@@ -108,7 +108,7 @@ describe("PluginsPanel", () => {
     const enabled = plugin("echo", { enabled_topics: ["topic-1"] });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
       if (init?.method === "PUT") return jsonResponse(enabled);
-      return jsonResponse({ plugins: [echo] });
+      return jsonResponse({ plugins: Array.of(echo) });
     });
     component = mount(PluginsPanel, { target: document.body, props: { topicId: "topic-1" } });
     await vi.waitFor(() => expect(document.querySelector('[aria-label="echo details"]')).not.toBeNull());
@@ -132,7 +132,7 @@ describe("PluginsPanel", () => {
       if (init?.method === "PUT") {
         return new Response(JSON.stringify({ error: "enablement is read-only here" }), { status: 409, headers: { "Content-Type": "application/json" } });
       }
-      return jsonResponse({ plugins: [echo] });
+      return jsonResponse({ plugins: Array.of(echo) });
     });
     component = mount(PluginsPanel, { target: document.body, props: { topicId: null } });
     await vi.waitFor(() => expect(document.querySelector('[aria-label="echo details"]')).not.toBeNull());
