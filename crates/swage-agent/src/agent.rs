@@ -5017,7 +5017,7 @@ mod judge_seam_tests {
             assert!(
                 result
                     .content
-                    .contains("nobody is watching this session to allow it"),
+                    .contains("in this turn nobody is asked to allow a request beyond them"),
                 "{}",
                 result.content
             );

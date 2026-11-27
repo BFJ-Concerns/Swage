@@ -32,9 +32,9 @@ pub const JUSTIFICATION_PARAMETER: &str = "justification";
 /// every session that reads it, whoever answers for its requests: the
 /// person, the judge when one is switched on, or nobody, when none is.
 pub const JUSTIFICATION_DESCRIPTION: &str = "Why this file is needed, in one or two sentences, \
-     when it lies outside the session's granted locations. It is shown with the request to \
-     whoever is asked to allow it; a request outside the granted locations that nobody can be \
-     asked about is refused, whatever it says.";
+     when it lies outside the session's granted locations. It is kept in the session's record \
+     with the request, and a judge configured to answer such requests weighs it; a person asked \
+     to allow the request sees the location, not this reason.";
 
 /// The reach a request asks for beyond the session's grants.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,8 +226,8 @@ pub(crate) fn refused_feedback(
 pub(crate) fn unanswered_location_feedback(tool_name: &str, path: &str, access: &str) -> String {
     format!(
         "Tool error: `{tool_name}` may not {access} `{path}`: the location lies outside this \
-         session's granted locations, and nobody is watching this session to allow it. The call \
-         did not run. Work within the session's granted locations; if the task cannot be done \
+         session's granted locations, and in this turn nobody is asked to allow a request beyond \
+         them. The call did not run. Work within the session's granted locations; if the task cannot be done \
          without this location, say so in your reply, naming the location and why it is needed."
     )
 }
