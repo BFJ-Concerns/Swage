@@ -1144,8 +1144,22 @@ mod approval_tests {
                                 TurnState::Processing,
                                 "a durable result must no longer select the parent for restart resumption"
                             );
-                            assert!(call.result.as_deref().unwrap().contains("survey complete"));
-                            assert!(call.model_result.is_some());
+                            let result = call.result.as_deref().unwrap();
+                            assert!(result.contains("survey complete"));
+                            assert!(
+                                !result.contains("[Delivered material:"),
+                                "the stored result stays bare: {result}"
+                            );
+                            let replay: swage_core::CompactToolReplay = serde_json::from_str(
+                                call.model_result.as_deref().expect("model result"),
+                            )
+                            .expect("compact replay");
+                            assert!(
+                                replay.preview.starts_with("[Delivered material:")
+                                    && replay.preview.contains("survey complete"),
+                                "a delegated agent's result reaches the model framed: {}",
+                                replay.preview
+                            );
                             assert_eq!(
                                 call.execution,
                                 Some(
@@ -2197,6 +2211,13 @@ impl Agent {
 
                     // Leak detection on tool result before feeding back to the model.
                     let scanned_result = self.scan_output(result_content);
+                    // Framed before compaction, so the replay's preview opens
+                    // with the same frame the immediate result carries.
+                    let scanned_result = if dispatch_result.delivered {
+                        swage_core::frame_delivered_material(&scanned_result)
+                    } else {
+                        scanned_result
+                    };
                     let model_result = compact_tool_result_for_model_with_reference(
                         &scanned_result,
                         is_error,
@@ -3596,6 +3617,7 @@ impl Agent {
                         is_error: true,
                         status: "error".to_string(),
                         approval_note: None,
+                        delivered: false,
                         execution: swage_protocol::client::conversation::ToolExecution::refused(),
                     });
                 }
@@ -3644,7 +3666,10 @@ impl Agent {
                             success: incomplete_reason.is_none(),
                         });
                         let result_str = serde_json::to_string(&result).unwrap_or_default();
-                        Ok((result_str, false, "success".to_string()).into())
+                        let mut delivered: ToolDispatchResult =
+                            (result_str, false, "success".to_string()).into();
+                        delivered.delivered = true;
+                        Ok(delivered)
                     }
                     Ok(crate::delegation::DelegationOutcome::Detached(detached)) => {
                         // The delegate has started, not completed. The actual

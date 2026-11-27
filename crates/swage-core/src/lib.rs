@@ -8,6 +8,7 @@
 //! as the foundation that all other crates build upon.
 
 pub mod config;
+pub mod delivered_material;
 pub mod dispatch;
 pub mod effort;
 pub mod error;
@@ -40,6 +41,7 @@ pub fn json_schema_validator(schema: &serde_json::Value) -> Result<jsonschema::V
 // Convenience re-exports
 // ---------------------------------------------------------------------------
 
+pub use delivered_material::frame_delivered_material;
 pub use dispatch::{DispatchContextComposition, validate_context_assembly_name};
 pub use effort::{EffortControl, ResolvedEffort, resolve_effort};
 pub use error::{

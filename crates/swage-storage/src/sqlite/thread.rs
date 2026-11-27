@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use swage_core::{
-    StorageError, compact_tool_result_for_model_with_reference, tool_result_reference,
+    CompactToolReplay, StorageError, compact_tool_result_for_model_with_reference,
+    tool_result_reference,
 };
 
 use crate::model::{NewThread, Thread, ThreadBranch, ThreadState};
@@ -79,7 +80,7 @@ fn copy_tool_calls_for_branch(
     let mut stmt = conn.prepare(
         "SELECT agent_id, call_id, tool, arguments, model_arguments, result, status,
                 duration_ms, truncated, total_bytes, provider_round, position, created_at,
-                parent_call_id, display_summary
+                parent_call_id, display_summary, model_result
          FROM tool_calls
          WHERE turn_id = ?1
          ORDER BY provider_round ASC, position ASC",
@@ -101,6 +102,7 @@ fn copy_tool_calls_for_branch(
             row.get::<_, String>(12)?,
             row.get::<_, Option<String>>(13)?,
             row.get::<_, Option<String>>(14)?,
+            row.get::<_, Option<String>>(15)?,
         ))
     })?;
     let calls = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -122,14 +124,28 @@ fn copy_tool_calls_for_branch(
         created_at,
         parent_call_id,
         display_summary,
+        source_model_result,
     ) in calls
     {
-        let model_result = result.as_deref().map(|result| {
-            compact_tool_result_for_model_with_reference(
-                result,
-                status.as_deref() != Some("success"),
-                tool_result_reference(child_turn_id, &call_id),
-            )
+        // The source's model-facing replay is what the model read, which may
+        // differ from the raw result (a delivered result carries its frame),
+        // so the branch keeps it and points it at the branch's own copy. A
+        // replay that is not a compact envelope is rebuilt from the result.
+        let kept_replay = source_model_result
+            .as_deref()
+            .and_then(|replay| serde_json::from_str::<CompactToolReplay>(replay).ok())
+            .map(|mut replay| {
+                replay.full_result_ref = Some(tool_result_reference(child_turn_id, &call_id));
+                replay.to_stable_json()
+            });
+        let model_result = kept_replay.or_else(|| {
+            result.as_deref().map(|result| {
+                compact_tool_result_for_model_with_reference(
+                    result,
+                    status.as_deref() != Some("success"),
+                    tool_result_reference(child_turn_id, &call_id),
+                )
+            })
         });
 
         conn.execute(

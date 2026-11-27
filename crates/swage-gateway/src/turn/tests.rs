@@ -12640,7 +12640,13 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
             _ => None,
         })
         .expect("resumed parent request should contain the delegated result");
-    let delegated_result: serde_json::Value = serde_json::from_str(delegated_result)
+    let framed_payload = delegated_result
+        .strip_suffix("\n\n[End of delivered material.]")
+        .and_then(|rest| rest.split_once("]\n\n"))
+        .filter(|(opening, _)| opening.starts_with("[Delivered material:"))
+        .map(|(_, payload)| payload)
+        .expect("the delegated result reaches the parent inside the delivered-material frame");
+    let delegated_result: serde_json::Value = serde_json::from_str(framed_payload)
         .expect("delegated result payload should be valid JSON");
     assert_eq!(
         delegated_result["structured_output"],
