@@ -101,7 +101,7 @@ pub use turn_input::TurnInput;
 pub(crate) use turn_input::*;
 use turn_release::{
     record_agent_call_attempt_before_execution, record_failed_turn_and_release_on_error,
-    record_terminal_state_and_release, release_active_turn,
+    record_inbound_refusal_and_release, record_terminal_state_and_release, release_active_turn,
 };
 pub(crate) use workspace::*;
 
@@ -461,16 +461,19 @@ pub(super) async fn process_turn_with_composition_and_focus(
                     .extend(outcome.rewritten_by);
             }
             Err(reason) => {
-                record_terminal_state_and_release(
+                let refusal = GatewayError::ConfigError(format!(
+                    "a plugin hook vetoed the inbound message: {reason}"
+                ));
+                record_inbound_refusal_and_release(
                     state,
                     session_id,
+                    thread_id,
                     prepared_turn_id,
-                    TurnState::Failed,
+                    &session.agent_id,
+                    &refusal.to_string(),
                 )
                 .await?;
-                return Err(GatewayError::ConfigError(format!(
-                    "a plugin hook vetoed the inbound message: {reason}"
-                )));
+                return Err(refusal);
             }
         }
     }

@@ -66,6 +66,61 @@ pub(crate) async fn record_terminal_state_and_release(
     Ok(())
 }
 
+/// What the conversation keeps of a message a plugin refused: the message
+/// itself is not recorded, so that it never reaches the agent's history.
+const REFUSED_INBOUND_ACCOUNT: &str = "Your message was refused before it reached the agent, and it was not kept in this conversation.";
+
+/// Fail a turn whose inbound message was refused, so that the refusal reads
+/// the same after a reload as it did live. The refused text is never
+/// recorded, so a platform account stands in the conversation where it would
+/// have been, and carries the turn's failed state and `explanation` — the
+/// error the open view was sent.
+pub(super) async fn record_inbound_refusal_and_release(
+    state: &AppState,
+    session_id: Uuid,
+    thread_id: Uuid,
+    turn_id: Uuid,
+    agent_id: &str,
+    explanation: &str,
+) -> Result<(), GatewayError> {
+    if let Some(reason) =
+        super::projection::record_failure_explanation(state, session_id, turn_id, explanation).await
+    {
+        tracing::error!(%reason, %turn_id, "turn record integrity lost");
+    }
+    // The account's view is read from the turn, so the turn is failed first.
+    // A write that fails here is retried, and reported, by the release below.
+    if state
+        .storage
+        .update_turn_state(turn_id, TurnState::Failed)
+        .await
+        .is_ok()
+        && let Err(error) = crate::service::append_platform_message(
+            state,
+            crate::service::PlatformMessage {
+                session_id,
+                thread_id,
+                turn_id: Some(turn_id),
+                agent_id: agent_id.to_owned(),
+                origin: swage_storage::MessageOrigin::Platform,
+                content: REFUSED_INBOUND_ACCOUNT.to_owned(),
+            },
+        )
+        .await
+    {
+        tracing::error!(%error, %turn_id, "failed to record the refused message's account");
+        let _ = crate::record_durability::record_reconstruction_gap(
+            state.storage.as_ref(),
+            Some(session_id),
+            turn_id,
+            "refusal_account",
+            &error,
+        )
+        .await;
+    }
+    record_terminal_state_and_release(state, session_id, turn_id, TurnState::Failed).await
+}
+
 /// Persist the resolved dispatch before a provider can execute it.
 ///
 /// Both provider runtimes share this refusal path so neither can make a call
