@@ -168,6 +168,36 @@ mod tests {
             .unwrap()
     }
 
+    /// Identifiers are never rewritten: a short registered value that
+    /// happens to occur inside a generated key leaves the key, and every
+    /// reference to it, as it was, while the row's text is still masked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_registered_value_inside_an_identifier_leaves_it_whole() {
+        use crate::store::SecretStore;
+
+        let storage = SqliteStorage::in_memory().unwrap();
+        storage
+            .registered_secret_values()
+            .replace(vec!["4821".into()]);
+        let (id, description) = storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO topics (id, name, description, slug, created_at, updated_at)
+                     VALUES ('0f4821aa', 'pin topic', 'pin 4821', 'pin', 'now', 'now')",
+                    [],
+                )?;
+                conn.query_row(
+                    "SELECT id, description FROM topics WHERE slug = 'pin'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(id, "0f4821aa");
+        assert_eq!(description, "pin [REDACTED_SECRET]");
+    }
+
     /// A record that is a JSON column stays readable when a registered value
     /// is the whole of it, or a number in it, or a description that looks
     /// like a document: the audit trail still lists its events.
