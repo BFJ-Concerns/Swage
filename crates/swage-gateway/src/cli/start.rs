@@ -111,7 +111,7 @@ pub(super) async fn run_with_environment(
         Some((&mut child, &log_path, log_offset)),
     )
     .await
-    .map_err(|reason| ClientError::GatewayNotRunning { reason })?;
+    .map_err(|reason| ClientError::GatewayStartFailed { reason })?;
 
     // Step 5: Report success to the user.
     println!("Gateway started on {address}");

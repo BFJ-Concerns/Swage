@@ -76,11 +76,12 @@ release: fetch-v8
 release-force: fetch-v8
     cargo run -p xtask -- release --force-frontend
 
-install prefix="${HOME}/.local/bin": fetch-v8
-    cargo run -p xtask -- install --prefix {{ prefix }}
+install prefix=(env("HOME") / ".local/bin"): fetch-v8
+    cargo run -p xtask -- install --prefix {{ quote(prefix) }}
 
-install-lan prefix=(env("HOME") / ".local/bin") host="0.0.0.0" port="3000": fetch-v8
-    cargo run -p xtask -- install --prefix {{ quote(prefix) }} --lan --host {{ quote(host) }} --port {{ quote(port) }}
+# Omitted flags let the installer keep a saved binding or initialise it.
+install-lan prefix=(env("HOME") / ".local/bin") host="" port="": fetch-v8
+    cargo run -p xtask -- install --prefix {{ quote(prefix) }} --lan {{ if host == "" { "" } else { "--host " + quote(host) } }} {{ if port == "" { "" } else { "--port " + quote(port) } }}
 
 install-hooks:
     git config core.hooksPath .githooks

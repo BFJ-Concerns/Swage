@@ -5,7 +5,12 @@
 //! Consumed by both `--server-mode` (background daemon) and `--foreground`
 //! (inline execution).
 
-use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use tracing::{info, warn};
@@ -17,6 +22,20 @@ use swage_storage::{ChannelQueueStore, WorkflowStore};
 use tokio_util::sync::CancellationToken;
 
 const CODEX_COMPLETION_UNSUPPORTED_REASON: &str = "Codex turns run through the App Server harness";
+
+pub(crate) fn gateway_bind_address(
+    host: &str,
+    port: u16,
+) -> Result<SocketAddr, swage_client::error::ClientError> {
+    if let Ok(ip) = host.parse::<Ipv6Addr>() {
+        return Ok(SocketAddr::new(ip.into(), port));
+    }
+    format!("{host}:{port}").parse().map_err(|_| {
+        swage_client::error::ClientError::InvalidBindHost {
+            host: host.to_owned(),
+        }
+    })
+}
 
 /// Run the gateway to completion.
 ///
@@ -53,6 +72,12 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
     if let Some(h) = host {
         config.server.host = h;
     }
+
+    let addr =
+        gateway_bind_address(&config.server.host, config.server.port).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
 
     // Step 2: Initialise logging from (possibly overridden) configuration.
     init_logging(&config);
@@ -333,16 +358,6 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
     });
 
     // Step 10: Bind the TCP listener.
-    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
-        .parse()
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "Invalid address {}:{}: {e}",
-                config.server.host, config.server.port
-            );
-            std::process::exit(1);
-        });
-
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -356,12 +371,18 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
 
     // Step 11: Write runtime metadata so the CLI can discover this process.
     //
-    // Uses the actual bound address (which may differ from the configured one
-    // when port 0 is used for OS-assigned ports). A failure here is logged as
-    // a warning rather than aborting — the gateway can still serve, but `swage
-    // gateway status` and `swage gateway stop` will not find it.
+    // Use the bound port, including an OS-assigned port, with an address
+    // clients on this machine can open.
     let bound_addr = listener.local_addr().unwrap_or(addr);
-    let metadata = RuntimeMetadata::new(std::process::id(), format!("http://{bound_addr}"));
+    let mut connect_addr = bound_addr;
+    if bound_addr.ip().is_unspecified() {
+        connect_addr.set_ip(if bound_addr.is_ipv4() {
+            Ipv4Addr::LOCALHOST.into()
+        } else {
+            Ipv6Addr::LOCALHOST.into()
+        });
+    }
+    let metadata = RuntimeMetadata::new(std::process::id(), format!("http://{connect_addr}"));
     if let Err(e) = metadata.save() {
         warn!("Failed to write runtime metadata: {e} — CLI discovery will not work");
     }
