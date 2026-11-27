@@ -483,6 +483,7 @@ mod tests {
                 input_tokens: 40,
                 output_tokens: 8,
                 finish_reason: FinishReason::Length,
+                provider_stop_reason: None,
                 cost: None,
             })
         }

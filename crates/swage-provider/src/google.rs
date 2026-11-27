@@ -742,6 +742,7 @@ impl LlmProvider for GoogleProvider {
             input_tokens: usage.map_or(0, |u| u.prompt_token_count),
             output_tokens: usage.map_or(0, |u| u.candidates_token_count),
             finish_reason,
+            provider_stop_reason: None,
             cost: None,
         })
     }

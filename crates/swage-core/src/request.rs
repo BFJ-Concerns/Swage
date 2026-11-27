@@ -250,6 +250,10 @@ pub struct CompletionResponse {
     pub output_tokens: u32,
     /// Reason the model stopped generating.
     pub finish_reason: FinishReason,
+    /// The provider's own explanation for stopping, including any reported
+    /// blocking categories. Absent when the provider gives no explanation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_stop_reason: Option<String>,
     /// Estimated cost in USD, if the provider reports it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
@@ -524,6 +528,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            provider_stop_reason: None,
             cost: Some(0.001),
         };
 
@@ -544,6 +549,7 @@ mod tests {
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: FinishReason::Length,
+            provider_stop_reason: None,
             cost: None,
         };
 

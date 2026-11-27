@@ -700,6 +700,7 @@ impl LlmProvider for ResponsesProvider {
                     .and_then(|details| details.reason.as_deref()),
                 !calls.is_empty(),
             ),
+            provider_stop_reason: None,
             cost: None,
         })
     }

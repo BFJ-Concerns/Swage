@@ -850,6 +850,7 @@ impl LlmProvider for OpenAiProvider {
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
             finish_reason: Self::parse_finish_reason(choice.finish_reason.as_deref()),
+            provider_stop_reason: None,
             cost: None,
         })
     }

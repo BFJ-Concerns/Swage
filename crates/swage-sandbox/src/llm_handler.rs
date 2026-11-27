@@ -130,6 +130,7 @@ mod tests {
                 input_tokens: 8,
                 output_tokens: 3,
                 finish_reason: FinishReason::Stop,
+                provider_stop_reason: None,
                 cost: None,
             })
         };
@@ -155,6 +156,7 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 50,
                 finish_reason: FinishReason::Length,
+                provider_stop_reason: None,
                 cost: Some(0.002),
             })
         };
@@ -178,6 +180,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                provider_stop_reason: None,
                 cost: None,
             })
         };
@@ -233,6 +236,7 @@ mod tests {
                     input_tokens: 1,
                     output_tokens: 1,
                     finish_reason: FinishReason::Stop,
+                    provider_stop_reason: None,
                     cost: None,
                 })
             }

@@ -369,6 +369,7 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 50,
                 finish_reason: FinishReason::Stop,
+                provider_stop_reason: None,
                 cost: None,
             })
         }

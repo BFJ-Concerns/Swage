@@ -48,6 +48,7 @@ impl LlmProvider for CountingProvider {
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: FinishReason::Stop,
+            provider_stop_reason: None,
             cost: None,
         })
     }

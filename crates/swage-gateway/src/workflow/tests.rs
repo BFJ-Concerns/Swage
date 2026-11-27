@@ -7234,6 +7234,7 @@ impl swage_provider::LlmProvider for RecordingGateProvider {
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: swage_core::FinishReason::Stop,
+            provider_stop_reason: None,
             cost: None,
         })
     }
@@ -7275,6 +7276,7 @@ impl swage_provider::LlmProvider for ScriptedGateProvider {
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: swage_core::FinishReason::Stop,
+            provider_stop_reason: None,
             cost: None,
         })
     }
@@ -9760,6 +9762,7 @@ impl swage_provider::LlmProvider for BlockingGateProvider {
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: swage_core::FinishReason::Stop,
+            provider_stop_reason: None,
             cost: None,
         })
     }

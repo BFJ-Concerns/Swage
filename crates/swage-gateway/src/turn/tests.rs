@@ -1365,6 +1365,7 @@ impl LlmProvider for TranscriptSummarisingProvider {
             input_tokens: 10,
             output_tokens: 10,
             finish_reason: FinishReason::Stop,
+            provider_stop_reason: None,
             cost: None,
         })
     }
@@ -1730,6 +1731,7 @@ impl LlmProvider for SummarisingCapturingProvider {
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: FinishReason::Stop,
+            provider_stop_reason: None,
             cost: None,
         })
     }
@@ -1975,6 +1977,7 @@ impl LlmProvider for MockProvider {
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: FinishReason::Stop,
+            provider_stop_reason: None,
             cost: None,
         })
     }

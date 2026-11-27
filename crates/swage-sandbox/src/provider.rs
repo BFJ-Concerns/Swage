@@ -66,6 +66,7 @@ impl IpcCompletionProvider {
             input_tokens: response.token_usage.prompt_tokens,
             output_tokens: response.token_usage.completion_tokens,
             finish_reason: response.finish_reason,
+            provider_stop_reason: None,
             cost: None, // cost information is not forwarded over IPC
         })
     }

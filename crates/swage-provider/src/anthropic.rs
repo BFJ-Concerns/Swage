@@ -1253,6 +1253,7 @@ impl LlmProvider for AnthropicProvider {
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
             finish_reason: map_stop_reason(response.stop_reason.as_deref()),
+            provider_stop_reason: None,
             cost: None,
         })
     }

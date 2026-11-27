@@ -225,6 +225,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 20,
                 finish_reason: FinishReason::Stop,
+                provider_stop_reason: None,
                 cost: None,
             })
         }

@@ -94,6 +94,7 @@ async fn llm_proxy_completion_through_ipc() {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            provider_stop_reason: None,
             cost: Some(0.001),
         })
     });

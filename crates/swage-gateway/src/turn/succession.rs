@@ -1803,6 +1803,7 @@ mod tests {
                 } else {
                     swage_core::FinishReason::Stop
                 },
+                provider_stop_reason: None,
                 cost: Some(0.25),
             })
         }

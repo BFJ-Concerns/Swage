@@ -45,6 +45,7 @@ impl LlmProvider for StubProvider {
             input_tokens: 0,
             output_tokens: 0,
             finish_reason: FinishReason::Stop,
+            provider_stop_reason: None,
             cost: None,
         })
     }

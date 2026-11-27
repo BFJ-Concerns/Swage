@@ -97,6 +97,7 @@ impl LlmProvider for CompactionStreamingProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            provider_stop_reason: None,
             cost: None,
         })
     }
@@ -188,6 +189,7 @@ impl LlmProvider for NativeCountCompactionProvider {
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: FinishReason::Stop,
+            provider_stop_reason: None,
             cost: None,
         })
     }
