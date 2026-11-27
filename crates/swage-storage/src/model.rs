@@ -1328,12 +1328,10 @@ pub struct Turn {
     /// The explanation the person was shown when the turn ended without a
     /// reply; `None` for a turn that never failed with one.
     pub failure_message: Option<String>,
-    /// How the turn was started, as the queue drain that created it
-    /// recorded: whether a person attends it and where its reply is
-    /// delivered. `None` for a turn created outside the queue — an
-    /// automation's placeholder, an API call's, a delegation child's —
-    /// which runs unattended and delivers to no channel of its own.
-    pub attribution: Option<TurnAttribution>,
+    /// How the turn was started and who continues it after a restart.
+    pub attribution: TurnAttribution,
+    /// A graceful shutdown interrupted this turn while it was delegating.
+    pub resume_delegation: bool,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -2255,16 +2253,34 @@ pub struct NewThread {
     pub agent_id: String,
 }
 
-/// What the queue drain recorded about the inputs a turn was started
-/// from, kept on the turn so a resumption after a restart runs as the
-/// original did.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Attendance, delivery and ownership recorded when a turn starts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnAttribution {
     /// A batch is attended if any of its inputs was attended at its source.
     pub attended: bool,
+    /// The automation that started this turn owns its recovery.
+    pub automation_owned: bool,
     /// The channel destinations the turn's reply is delivered to, as the
     /// inputs named them; empty for a turn that delivers to none.
     pub delivery_targets: Vec<serde_json::Value>,
+}
+
+impl TurnAttribution {
+    pub fn from_queue(queued: &[QueuedTurnInput]) -> Self {
+        Self {
+            attended: queued.iter().any(|input| input.attended),
+            automation_owned: queued.iter().all(|input| {
+                matches!(
+                    input.origin,
+                    MessageOrigin::Schedule | MessageOrigin::Workflow
+                )
+            }),
+            delivery_targets: queued
+                .iter()
+                .flat_map(|input| input.delivery_targets.clone())
+                .collect(),
+        }
+    }
 }
 
 /// Input for creating a new turn within a thread.
@@ -3446,7 +3462,8 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
-            attribution: None,
+            attribution: TurnAttribution::default(),
+            resume_delegation: false,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3504,7 +3521,8 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
-            attribution: None,
+            attribution: TurnAttribution::default(),
+            resume_delegation: false,
         };
         assert_eq!(turn_with_cost.cost_microcents, Some(42));
 
@@ -3536,7 +3554,8 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
-            attribution: None,
+            attribution: TurnAttribution::default(),
+            resume_delegation: false,
         };
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
         assert!(
@@ -3571,7 +3590,8 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
-            attribution: None,
+            attribution: TurnAttribution::default(),
+            resume_delegation: false,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3604,7 +3624,8 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
-            attribution: None,
+            attribution: TurnAttribution::default(),
+            resume_delegation: false,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");

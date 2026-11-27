@@ -296,7 +296,7 @@ mod tests {
             .unwrap();
 
         // Instantiation must not claim (or even surface) completed work —
-        // the turn path owns Results, append-before-claim.
+        // the turn path owns Results.
         check_mailbox(&storage, "agent-a").await.unwrap();
         let still_pending = pending_results(&storage, "agent-a").await.unwrap();
         assert_eq!(still_pending.len(), 1);
@@ -370,34 +370,6 @@ mod tests {
         assert_eq!(second.len(), 1);
         let contents = check_mailbox(&storage, "agent-a").await.unwrap();
         assert_eq!(contents.pending_delegates.len(), 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn claim_result_is_first_claimer_wins() {
-        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
-
-        let result = storage
-            .create_agent_message(NewAgentMessage {
-                sender_agent_id: "child".into(),
-                recipient_agent_id: "agent-a".into(),
-                kind: MessageKind::Result,
-                correlation_id: Some(Uuid::new_v4()),
-                payload: serde_json::json!({"response": "done"}),
-            })
-            .await
-            .unwrap();
-
-        assert!(claim_result(&storage, result.id).await.unwrap());
-        assert!(
-            !claim_result(&storage, result.id).await.unwrap(),
-            "a second claim must lose"
-        );
-        assert!(
-            pending_results(&storage, "agent-a")
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

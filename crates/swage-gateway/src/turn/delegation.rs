@@ -30,14 +30,6 @@ pub(super) const DELEGATED_CHILD_SKILLS_METADATA_KEY: &str = "delegated_child_sk
 pub(super) const DELEGATED_CHILD_COMPOSITION_METADATA_KEY: &str = "delegated_child_composition";
 pub(super) const DELEGATED_CHILD_REQUESTED_CWD_METADATA_KEY: &str = "delegated_child_requested_cwd";
 const DELEGATED_CHILD_ISOLATION_METADATA_KEY: &str = "delegated_child_isolation";
-const DELEGATION_BOUND_METADATA_KEY: &str = "delegation_bound";
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct DelegationBound {
-    depth: u64,
-    limit: u64,
-}
-
 const DELEGATED_CHILD_SELECTION_METADATA_KEY: &str = "delegated_child_selection";
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -846,123 +838,27 @@ impl GatewayDelegationHandler {
         }
     }
 
-    pub(crate) async fn for_external_child(
-        state: AppState,
-        location: &swage_core::ScopeLocation,
-        sender_agent_id: &str,
-        sender_turn_id: Option<Uuid>,
-    ) -> Result<Self, AgentError> {
-        let mut handler = Self::new(state);
-        if let Some(turn_id) = sender_turn_id {
-            handler = handler.for_turn(turn_id).await?;
-        }
-        if handler.depth_limit.is_none() {
-            handler.depth_limit = Some(
-                load_session_config(&handler.state, location, sender_agent_id)
-                    .map_err(|error| AgentError::InvalidConfig(error.to_string()))?
-                    .sessions
-                    .max_delegation_depth,
-            );
-        }
-        handler.depth = handler.depth.saturating_add(1);
-        Ok(handler)
-    }
-
-    fn restore_bound(&mut self, metadata: Option<&serde_json::Value>) -> Result<(), AgentError> {
-        if let Some(bound) =
-            metadata.and_then(|metadata| metadata.get(DELEGATION_BOUND_METADATA_KEY))
-        {
-            let bound: DelegationBound =
-                serde_json::from_value(bound.clone()).map_err(|error| {
-                    AgentError::InvalidConfig(format!("invalid delegation bound: {error}"))
-                })?;
-            self.depth = bound.depth;
-            self.depth_limit = Some(bound.limit);
-        }
-        Ok(())
-    }
-
-    async fn for_turn(&self, turn_id: Uuid) -> Result<Self, AgentError> {
-        let turn = self.state.storage.get_turn(turn_id).await?.ok_or_else(|| {
-            swage_core::StorageError::NotFound {
-                entity: "turn".into(),
-                id: turn_id.to_string(),
-            }
-        })?;
-        let thread =
-            swage_storage::store::ThreadStore::get(self.state.storage.as_ref(), turn.thread_id)
-                .await?
-                .ok_or(AgentError::ThreadNotFound(turn.thread_id))?;
-        let session = self
-            .state
-            .storage
-            .get_session(thread.session_id)
-            .await?
-            .ok_or(AgentError::SessionNotFound(thread.session_id))?;
-        let mut handler = Self {
-            state: self.state.clone(),
-            active_delegations: self.active_delegations.clone(),
-            depth: self.depth,
-            depth_limit: self.depth_limit,
-        };
-        handler.restore_bound(session.metadata.as_ref())?;
-        Ok(handler)
-    }
-
     async fn check_depth(
         &self,
         depth: u64,
         limit: u64,
         target_agent_id: &str,
         delegate_call_id: &str,
-        sender_turn_id: Option<Uuid>,
+        sender_turn_id: Uuid,
+        sender_session_id: Uuid,
     ) -> Result<(), AgentError> {
         if depth <= limit {
             return Ok(());
         }
         let reason = format!("delegation depth {depth} exceeds the limit {limit}");
-        let sender_session_id = match sender_turn_id {
-            Some(turn_id) => Some(
-                self.filesystem_authority_for_turn(turn_id)
-                    .await?
-                    .session_id,
-            ),
-            None => None,
-        };
         self.state.storage.create_audit_event(swage_storage::NewAuditEvent {
-            id: Uuid::new_v4().to_string(), session_id: sender_session_id,
+            id: Uuid::new_v4().to_string(), session_id: Some(sender_session_id),
             entity_kind: "delegation".into(), entity_id: delegate_call_id.to_owned(),
             event_kind: "delegation_refused".into(), summary: reason.clone(),
             metadata: serde_json::json!({"turn_id": sender_turn_id, "target_agent_id": target_agent_id,
                 "depth": depth, "limit": limit, "reason": reason}),
         }).await?;
         Err(AgentError::InvalidConfig(reason))
-    }
-
-    pub(crate) async fn check_external_depth(
-        &self,
-        target_agent_id: &str,
-        delegate_call_id: &str,
-        sender_turn_id: Option<Uuid>,
-    ) -> Result<(), AgentError> {
-        self.check_depth(
-            self.depth,
-            self.depth_limit
-                .expect("external child has a settled limit"),
-            target_agent_id,
-            delegate_call_id,
-            sender_turn_id,
-        )
-        .await
-    }
-
-    pub(crate) fn record_bound(&self, metadata: &mut serde_json::Value) {
-        if let Some(limit) = self.depth_limit {
-            metadata[DELEGATION_BOUND_METADATA_KEY] = serde_json::json!(DelegationBound {
-                depth: self.depth,
-                limit,
-            });
-        }
     }
 }
 
@@ -1009,9 +905,8 @@ impl DelegationHandler for GatewayDelegationHandler {
         let active_workspace_attachment_id =
             sender_filesystem_authority.active_workspace_attachment_id;
         let sender_session_id = sender_filesystem_authority.session_id;
-        let handler = self.for_turn(sender_turn_id).await?;
         let depth_limit =
-            match handler.depth_limit {
+            match self.depth_limit {
                 Some(limit) => limit,
                 None => load_session_config(&self.state, &topic.location(), sender_agent_id)
                     .map_err(|error| {
@@ -1022,8 +917,8 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .sessions
                     .max_delegation_depth,
             };
-        let child_depth = handler.depth.saturating_add(1);
-        let mut child_handler = Self {
+        let child_depth = self.depth + 1;
+        let child_handler = Self {
             state: self.state.clone(),
             active_delegations: self.active_delegations.clone(),
             depth: child_depth,
@@ -1035,17 +930,13 @@ impl DelegationHandler for GatewayDelegationHandler {
             }
             None => None,
         };
-        if let Some(child) = &existing_named_child {
-            child_handler.restore_bound(Some(&child.metadata))?;
-        }
         self.check_depth(
-            child_handler.depth,
-            child_handler
-                .depth_limit
-                .expect("child has a settled limit"),
+            child_depth,
+            depth_limit,
             target_agent_id,
             delegate_call_id,
-            Some(sender_turn_id),
+            sender_turn_id,
+            sender_session_id,
         )
         .await?;
         let fixed_selection: Option<DelegatedSelection> = existing_named_child
@@ -1237,7 +1128,6 @@ impl DelegationHandler for GatewayDelegationHandler {
         let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
             .expect("a delegated session always has at least its sender bound");
         add_dispatch_bound_task_definition_ids(&mut session_metadata, &bound_task_definition_ids);
-        child_handler.record_bound(&mut session_metadata);
         if let Some(workflow_call_tools) = &sender_filesystem_authority.workflow_call_tools {
             session_metadata[WORKFLOW_CALL_TOOLS_METADATA_KEY] = workflow_call_tools.clone();
         }
@@ -1445,6 +1335,7 @@ impl DelegationHandler for GatewayDelegationHandler {
 
         let router = Arc::new(self.state.message_router());
         let executor = DelegationExecutor {
+            execution_isolation: Some(super::turn_isolation(&target_dispatcher_build.isolation)),
             storage: self.state.storage.clone(),
             provider: child_provider,
             hook_registry: self.state.hook_registry.clone(),
@@ -1482,11 +1373,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         if let Some(context) = context {
             payload["context"] = context;
         }
-        // The parent's own tool call for this delegation, so a reader of
-        // the record — recovery after a restart — can tell whether the
-        // child's result reached the parent's thread as that call's
-        // result, not only its mailbox.
-        payload["_call_id"] = serde_json::json!(delegate_call_id);
+        payload["parent_thread_id"] = serde_json::json!(sender_filesystem_authority.thread_id);
 
         let delegate_msg = match router
             .send_message(NewAgentMessage {
@@ -1720,23 +1607,17 @@ impl DelegationHandler for GatewayDelegationHandler {
                     tracing::warn!(%error, child = name, "could not record the named child");
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                #[cfg(test)]
-                crate::workflow::workflow_pause_test_hook::pause(
-                    "detached-snapshot-pending",
-                    sender_session_id,
-                )
-                .await;
-                let (observed, status_as_of) = self
+                let observed = self
                     .state
                     .storage
-                    .get_turn_observation(detached.child_turn_id)
+                    .get_turn(detached.child_turn_id)
                     .await?
                     .ok_or_else(|| {
                         AgentError::InvalidConfig("delegated child turn disappeared".into())
                     })?;
                 detached.status = Some(observed.state.to_string());
                 detached.error_message = observed.failure_message;
-                detached.status_as_of = Some(status_as_of);
+                detached.status_as_of = Some(chrono::Utc::now());
                 Ok(DelegationOutcome::Detached(detached))
             }
         }
@@ -1831,6 +1712,7 @@ impl GatewayDelegationHandler {
             None => None,
         };
         Ok(DispatchFilesystemAuthority {
+            thread_id: thread.id,
             session_id: session.id,
             active_workspace_attachment_id: session.active_workspace_attachment_id,
             placement,
@@ -1844,6 +1726,7 @@ impl GatewayDelegationHandler {
 }
 
 struct DispatchFilesystemAuthority {
+    thread_id: Uuid,
     session_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
     placement: Option<ResolvedWorkerDirectory>,

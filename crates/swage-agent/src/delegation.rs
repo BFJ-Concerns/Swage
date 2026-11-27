@@ -111,6 +111,8 @@ pub fn active_delegations() -> ActiveDelegations {
 
 /// Dependencies needed to instantiate and execute target agents for delegation.
 pub struct DelegationExecutor {
+    /// The boundary supplied by the runner that built the child dispatcher.
+    pub execution_isolation: Option<swage_storage::TurnIsolation>,
     pub storage: Arc<dyn Storage>,
     pub provider: Arc<dyn LlmProvider>,
     pub hook_registry: Option<Arc<HookRegistry>>,
@@ -337,6 +339,11 @@ impl DelegationExecutor {
             })
             .await?;
         let turn_id = turn.id;
+        if let Some(isolation) = &self.execution_isolation {
+            self.storage
+                .record_turn_isolation(turn_id, isolation)
+                .await?;
+        }
         // The child's own thread records everything this turn was told, so a
         // later delegation that returns to it rebuilds the original inherited
         // background as well as both halves of every task exchange.
@@ -526,6 +533,12 @@ impl DelegationExecutor {
             payload: {
                 payload["child_session_id"] = serde_json::json!(session.id);
                 payload["child_thread_id"] = serde_json::json!(thread.id);
+                if let Some(parent_session_id) = sender_session_id {
+                    payload["parent_session_id"] = serde_json::json!(parent_session_id);
+                    if let Some(thread_id) = delegate_msg.payload.get("parent_thread_id") {
+                        payload["parent_thread_id"] = thread_id.clone();
+                    }
+                }
                 payload
             },
         };
@@ -611,6 +624,18 @@ impl DelegationExecutor {
                 Ok(result_msg)
             }
             Err(e) => {
+                // Startup sends the interrupted child's result when a
+                // conversation is marked for resumption after shutdown.
+                if matches!(e, AgentError::Cancelled)
+                    && let Some(parent_turn_id) = sender_turn_id
+                    && self
+                        .storage
+                        .get_turn(parent_turn_id)
+                        .await?
+                        .is_some_and(|parent| parent.resume_delegation)
+                {
+                    return Err(e);
+                }
                 let mut failure_payload = serde_json::json!({
                     "error": e.to_string(),
                 });
@@ -875,6 +900,7 @@ mod tests {
             .await
             .expect("create delegate message");
         let executor = DelegationExecutor {
+            execution_isolation: None,
             storage: storage_trait,
             provider: Arc::new(NeverCalledProvider),
             hook_registry: None,
@@ -965,6 +991,7 @@ mod tests {
             .await
             .expect("install write failure");
         let executor = DelegationExecutor {
+            execution_isolation: None,
             storage: storage_trait,
             provider: Arc::new(NeverCalledProvider),
             hook_registry: None,

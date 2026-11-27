@@ -43,13 +43,19 @@ pub async fn create_placeholder_turn(
 
     let turn = state
         .storage
-        .create_turn(NewTurn {
-            thread_id: thread.id,
-            agent_id: agent_id.to_string(),
-            state: swage_storage::TurnState::Pending,
-            user_input: Some(message.to_string()),
-            parent_turn_id: None,
-        })
+        .create_attributed_turn(
+            NewTurn {
+                thread_id: thread.id,
+                agent_id: agent_id.to_string(),
+                state: swage_storage::TurnState::Pending,
+                user_input: Some(message.to_string()),
+                parent_turn_id: None,
+            },
+            swage_storage::model::TurnAttribution {
+                automation_owned: true,
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|error| map_placeholder_turn_creation_error(error, session_id))?;
     Ok(turn.id)

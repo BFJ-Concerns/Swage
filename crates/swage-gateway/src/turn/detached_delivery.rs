@@ -1,9 +1,4 @@
 //! Delivery of completed detached delegations into the parent's thread.
-//!
-//! Placed here because it has one responsibility a reader can hold without
-//! the coordinator: carrying each detached child's Result from this agent's
-//! mailbox into the thread record, append-before-claim, before history is
-//! rebuilt. Failing the turn when delivery fails stays the coordinator's.
 
 use swage_agent::AgentError;
 use swage_storage::MessageOrigin;
@@ -22,16 +17,9 @@ use crate::service::{PlatformMessage, append_platform_message};
 /// recorded tool call (providers reject orphaned tool results), so a
 /// platform-delivered notification rides the same role a channel or
 /// scheduled message would, with the recorded origin naming its real sender.
-/// Append-before-claim: a failure between the two re-delivers next
-/// turn rather than losing the result, and a lost claim race leaves a
-/// duplicate row, not a gap.
-///
-/// Each Result is put to the message router's delivery hooks first, as a
-/// Result the synchronous path hands straight to its parent is: a hook
-/// that blocks it ends it — the router marks it failed with the reason,
-/// nothing of it enters the thread, and the thread is told the result was
-/// blocked, so the parent knows the child answered and why it cannot read
-/// the answer.
+/// Record the result before claiming it so a failed write leaves it available
+/// for the next turn. If a delivery hook blocks a result, the thread records
+/// the refusal without exposing the child's output.
 pub(super) async fn deliver_detached_results(
     state: &AppState,
     session_id: Uuid,

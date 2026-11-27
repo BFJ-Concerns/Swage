@@ -307,14 +307,6 @@ mod tests {
             unimplemented!()
         }
 
-        async fn reissue_agent_message(
-            &self,
-            _id: Uuid,
-            _payload: serde_json::Value,
-        ) -> Result<(), StorageError> {
-            unimplemented!()
-        }
-
         async fn list_by_correlation(
             &self,
             _correlation_id: Uuid,
@@ -332,7 +324,11 @@ mod tests {
 
     #[async_trait]
     impl TurnStore for FailingCancellationStorage {
-        async fn create_turn(&self, _turn: NewTurn) -> Result<swage_storage::Turn, StorageError> {
+        async fn create_attributed_turn(
+            &self,
+            _turn: NewTurn,
+            _: swage_storage::model::TurnAttribution,
+        ) -> Result<swage_storage::Turn, StorageError> {
             unimplemented!()
         }
 

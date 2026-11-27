@@ -1,5 +1,5 @@
 //! The turn queue: messages accepted while a session's turn was running,
-//! held durably in arrival order until the next turn takes them as its input.
+//! held durably in enqueue order until the next turn takes them as its input.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -102,23 +102,9 @@ fn enqueue_inputs(
     let mut queued = Vec::with_capacity(inputs.len());
     for input in inputs {
         let id = Uuid::new_v4();
-        // Destination resolution can finish after a newer direct input has
-        // queued. Inbox arrival, rather than resolution, determines its place.
-        let mut inbox_arrival: Option<DateTime<Utc>> = None;
-        for message_id in &input.channel_message_ids {
-            let received: String = tx.query_row(
-                "SELECT received_at FROM channel_inbound_messages WHERE id = ?1",
-                params![message_id.to_string()],
-                |row| row.get(0),
-            )?;
-            let received = parse_dt(&received)?;
-            inbox_arrival = Some(inbox_arrival.map_or(received, |first| first.min(received)));
-        }
-        let arrived_at = inbox_arrival.unwrap_or_else(Utc::now);
+        let created_at = Utc::now();
         let attachments = serde_json::to_string(&input.attachments)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        // Allocate under the connection's lock for a stable tie-breaker
-        // when arrivals share the same instant.
         let seq: i64 = tx.query_row(
             "SELECT COALESCE(MAX(seq) + 1, 0) FROM turn_queue WHERE session_id = ?1",
             params![input.session_id.to_string()],
@@ -136,7 +122,7 @@ fn enqueue_inputs(
                     input.origin.as_str(),
                     &input.content,
                     attachments,
-                    arrived_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                    created_at.to_rfc3339(),
                     input.schedule_run_id.map(|id| id.to_string()),
                     input.attended,
                     input.client_id.map(|id| id.to_string()),
@@ -166,7 +152,7 @@ fn enqueue_inputs(
             origin: input.origin,
             content: input.content,
             attachments: input.attachments,
-            created_at: arrived_at,
+            created_at,
             schedule_run_id: input.schedule_run_id,
             channel_message_ids: input.channel_message_ids,
         });
@@ -213,8 +199,8 @@ impl TurnQueueStore for SqliteStorage {
             // Consume the recovery mark in the same transaction as the queue
             // write, so a second startup cannot enqueue this parent again.
             let interrupted = tx.execute(
-                "UPDATE turns SET state = 'interrupted', completed_at = ?2
-                 WHERE id = ?1 AND state = 'delegating' AND parent_turn_id IS NULL
+                "UPDATE turns SET state = 'interrupted', completed_at = COALESCE(completed_at, ?2), resume_delegation = 0
+                 WHERE id = ?1 AND (state = 'delegating' OR resume_delegation) AND parent_turn_id IS NULL
                    AND thread_id = ?3
                    AND EXISTS (SELECT 1 FROM threads WHERE id = ?3 AND session_id = ?4)",
                 params![parent_turn_id.to_string(), Utc::now().to_rfc3339(),
@@ -248,7 +234,7 @@ impl TurnQueueStore for SqliteStorage {
     ) -> Result<Vec<QueuedTurnInput>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY created_at ASC, seq ASC"
+                "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY seq ASC"
             ))?;
             let rows = stmt.query_map(params![session_id.to_string()], row_to_queued)?;
             let mut queued = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -270,7 +256,7 @@ impl TurnQueueStore for SqliteStorage {
             let tx = conn.unchecked_transaction()?;
             let mut queued = {
                 let mut stmt = tx.prepare(&format!(
-                    "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY created_at ASC, seq ASC"
+                    "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY seq ASC"
                 ))?;
                 let rows = stmt.query_map(params![session_id.to_string()], row_to_queued)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -300,18 +286,12 @@ impl TurnQueueStore for SqliteStorage {
                 .map(|item| item.content.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            let attribution = crate::model::TurnAttribution {
-                attended: queued.iter().any(|input| input.attended),
-                delivery_targets: queued
-                    .iter()
-                    .flat_map(|input| input.delivery_targets.clone())
-                    .collect(),
-            };
+            let attribution = crate::model::TurnAttribution::from_queue(&queued);
             let delivery_targets_json = serde_json::to_string(&attribution.delivery_targets)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             match tx.execute(
-                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at, parent_turn_id, attended, delivery_targets)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)",
+                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at, parent_turn_id, attended, delivery_targets, automation_owned)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9)",
                 params![
                     turn_id.to_string(),
                     thread_id.to_string(),
@@ -321,6 +301,7 @@ impl TurnQueueStore for SqliteStorage {
                     &now_str,
                     attribution.attended,
                     &delivery_targets_json,
+                    attribution.automation_owned,
                 ],
             ) {
                 Ok(_) => {}
@@ -332,7 +313,7 @@ impl TurnQueueStore for SqliteStorage {
                 Err(error) => return Err(error),
             }
 
-            // One recorded message per queued input, in arrival order, each
+            // One recorded message per queued input, in enqueue order, each
             // with the origin it arrived with.
             let mut messages = Vec::with_capacity(queued.len());
             for (index, item) in queued.iter().enumerate() {
@@ -423,8 +404,9 @@ impl TurnQueueStore for SqliteStorage {
                     delegated_output_tokens: None,
                     execution_isolation: None,
                     failure_message: None,
-                                    attribution: Some(attribution),
-},
+                    attribution,
+                    resume_delegation: false,
+                },
                 messages,
                 inputs: queued,
                 schedule_run_ids,
