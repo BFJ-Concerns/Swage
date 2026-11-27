@@ -2,6 +2,7 @@
 
 use crate::support::ProcessEnvGuard;
 use serde_json::json;
+use std::path::Path;
 use std::sync::Arc;
 use swage_gateway::{
     git_credential::CredentialServer,
@@ -1401,6 +1402,59 @@ async fn a_masked_token_inside_a_writable_cache_reads_as_empty() {
     let output = result.output["output"].as_str().unwrap_or_default();
     assert!(!output.contains("fixture-registry-token"), "{output}");
     assert!(output.contains("cache-written"), "{:?}", result.output);
+}
+
+/// The operator's OpenPGP program is found as their git finds it: named in a
+/// file their global configuration includes, by a path under `~`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_operators_signing_program_is_read_through_includes_and_home() {
+    use std::os::unix::fs::PermissionsExt;
+    use swage_gateway::git_signer::{SigningConfig, SigningKey};
+
+    let mut env = ProcessEnvGuard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("operator-gpg");
+    std::fs::write(&program, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        home.join("signing.gitconfig"),
+        "[gpg \"openpgp\"]\n\tprogram = ~/bin/operator-gpg\n",
+    )
+    .unwrap();
+    let global = home.join(".gitconfig");
+    std::fs::write(&global, "[include]\n\tpath = ~/signing.gitconfig\n").unwrap();
+    env.set_var("HOME", &home);
+    env.set_var("GIT_CONFIG_GLOBAL", &global);
+    env.set_var("GIT_CONFIG_NOSYSTEM", "1");
+
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["config", "commit.gpgsign", "true"],
+        &["config", "gpg.format", "openpgp"],
+        &["config", "user.signingkey", "0xOPERATOR"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&workspace)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    let signing = SigningConfig::from_host_git(&workspace)
+        .await
+        .expect("the workspace signs");
+    match signing.material {
+        Ok(SigningKey::Openpgp(key)) => {
+            assert_eq!(Path::new(&key.program), program.as_path());
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 /// An operator who signs with OpenPGP commits from the sandbox signed with

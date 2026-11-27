@@ -185,11 +185,18 @@ async fn openpgp_key(workspace: &Path, signing_key: Option<String>) -> Result<Op
     };
     // The host runs this program unsandboxed, so it comes only from the
     // operator's own global or system configuration: the workspace's
-    // repository configuration is writable from the sandbox.
+    // repository configuration is writable from the sandbox. Within those,
+    // it is found as git finds it: through the files they include, with a
+    // path under `~` expanded.
     let mut configured = None;
     'scopes: for scope in ["--global", "--system"] {
         for name in ["gpg.openpgp.program", "gpg.program"] {
-            if let Some(program) = host_git_config(workspace, &[scope, "--get", name]).await {
+            if let Some(program) = host_git_config(
+                workspace,
+                &[scope, "--includes", "--type=path", "--get", name],
+            )
+            .await
+            {
                 configured = Some(program);
                 break 'scopes;
             }

@@ -493,7 +493,8 @@ a passphrase — fails the commit with the cause rather than leaving it
 unsigned. An operator who signs with OpenPGP is served the same way: the
 sandboxed git's signing program forwards each payload, and the gateway
 signs with the operator's own `gpg` (`gpg.openpgp.program` or
-`gpg.program`) and key — `user.signingkey`, or the committer identity git
+`gpg.program`, read from their global or system configuration and the
+files it includes, never from the repository's) and key — `user.signingkey`, or the committer identity git
 signs as without one — through their gpg-agent; the keyring stays masked.
 A format the host cannot forward (`x509`) fails the commit with that
 cause, which the gateway log also gives at the turn's start.
