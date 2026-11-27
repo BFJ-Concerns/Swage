@@ -662,6 +662,9 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // hitting walls, the turn runs on a successor: the same elements rendered
     // afresh, the older history summarised against them or diagnosed from
     // outside (turn/succession.rs). Otherwise the first assembly stands.
+    // The summary is written on the selected entry's own provider, as the
+    // turn is.
+    let succession_provider = crate::startup::selected_model_provider(state, &config).await;
     let output = COMPLETION_ATTRIBUTION
         .scope(
             CompletionAttribution {
@@ -670,7 +673,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
             },
             succession::succeed_over_threshold(
                 succession::SuccessionSite {
-                    provider: state.provider.as_ref(),
+                    provider: succession_provider.as_ref(),
                     threshold: &compaction_threshold(&config),
                     model: Some(config.default_model_id()).filter(|model| !model.is_empty()),
                     focus: compaction_focus.as_deref(),

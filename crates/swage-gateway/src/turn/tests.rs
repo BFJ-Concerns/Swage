@@ -670,14 +670,15 @@ async fn token_threshold_triggers_succession_for_a_turn() {
     let mut config = swage_config::ResolvedConfig::default();
     config.context.compaction_threshold =
         Some(swage_protocol::client::settings::CompactionThresholdConfig::Tokens(600));
-    let (mut state, session_id) =
+    let (state, session_id) =
         make_state_with_config_and_storage(provider_witness_chunks(), config, Arc::clone(&storage))
             .await;
-    state.provider = Arc::new(crate::completion_record::RecordingProvider::new(
-        Arc::clone(&state.provider),
-        Arc::clone(&state.storage),
-        (*state.secret_manager).clone(),
-    ));
+    *state.runtime_provider.write().unwrap() =
+        Arc::new(crate::completion_record::RecordingProvider::new(
+            state.active_provider(),
+            Arc::clone(&state.storage),
+            (*state.secret_manager).clone(),
+        ));
     seed_history(&storage, session_id, 90).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
