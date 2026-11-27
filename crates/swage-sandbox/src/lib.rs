@@ -82,7 +82,7 @@ pub fn governed_command(
 }
 pub use bubblewrap::BubblewrapSandbox;
 pub use bubblewrap::{build_bwrap_command_for, find_bwrap, policy_command};
-pub use config::{SandboxConfig, SandboxConfigError};
+pub use config::{SandboxConfig, SandboxConfigError, SubstitutedFile};
 pub use egress::{
     EgressConnection, EgressPolicy, EgressRecorder, EgressRequest, EgressSetup, EgressVerdict,
 };

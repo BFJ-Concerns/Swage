@@ -154,14 +154,95 @@ pub(super) fn sandbox_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The operator's home and the gateway's data root, as the policy needs them:
-/// the private paths to mask and the shared caches to open hang off both.
+/// The operator's home, the gateway's data root and the variables that move
+/// places out of the home, as the policy needs them: the private paths to
+/// mask and the shared caches to open hang off all three.
 pub(crate) struct PolicyRoots {
     pub(crate) home: PathBuf,
     pub(crate) data_root: PathBuf,
-    /// The operator's `CARGO_HOME`, where they set one; `~/.cargo`
-    /// otherwise.
-    pub(crate) cargo_home: Option<PathBuf>,
+    /// The gateway's values of [`LOCATION_VARIABLES`], absolute paths only.
+    pub(crate) environment: LocationEnvironment,
+}
+
+/// The variables in the gateway's environment that move a cache, a
+/// credential store, the temporary directory or the runtime directory
+/// away from its place in the home.
+const LOCATION_VARIABLES: &[&str] = &[
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "TMPDIR",
+    "CARGO_HOME",
+    "GOPATH",
+    "GOMODCACHE",
+    "GOCACHE",
+    "UV_CACHE_DIR",
+    "npm_config_cache",
+    "NPM_CONFIG_CACHE",
+    "npm_config_userconfig",
+    "NPM_CONFIG_USERCONFIG",
+    "GNUPGHOME",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "AZURE_CONFIG_DIR",
+    "CLOUDSDK_CONFIG",
+    "KUBECONFIG",
+    "GH_CONFIG_DIR",
+    "DOCKER_CONFIG",
+    "PASSWORD_STORE_DIR",
+];
+
+/// Of [`LOCATION_VARIABLES`], those that hold a list of paths, as `PATH`
+/// does, rather than one path.
+const PATH_LIST_VARIABLES: &[&str] = &["GOPATH", "KUBECONFIG"];
+
+/// The paths each location variable names in the gateway's environment.
+/// A relative path names no place a mount can, so it is left out.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LocationEnvironment(std::collections::BTreeMap<&'static str, Vec<PathBuf>>);
+
+impl LocationEnvironment {
+    fn from_process() -> Self {
+        Self(
+            LOCATION_VARIABLES
+                .iter()
+                .filter_map(|variable| {
+                    let value = std::env::var_os(variable)?;
+                    let paths: Vec<PathBuf> = if PATH_LIST_VARIABLES.contains(variable) {
+                        std::env::split_paths(&value).collect()
+                    } else {
+                        vec![PathBuf::from(value)]
+                    };
+                    let paths: Vec<PathBuf> = paths
+                        .into_iter()
+                        .filter(|path| path.is_absolute())
+                        .collect();
+                    (!paths.is_empty()).then_some((*variable, paths))
+                })
+                .collect(),
+        )
+    }
+
+    /// The paths `variable` names, first the one a tool reads first.
+    fn paths(&self, variable: &str) -> &[PathBuf] {
+        self.0.get(variable).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// The one path `variable` names, when it names one.
+    fn path(&self, variable: &str) -> Option<&Path> {
+        self.paths(variable).first().map(PathBuf::as_path)
+    }
+}
+
+impl<const N: usize> From<[(&'static str, PathBuf); N]> for LocationEnvironment {
+    fn from(values: [(&'static str, PathBuf); N]) -> Self {
+        let mut environment = Self::default();
+        for (variable, path) in values {
+            environment.0.entry(variable).or_default().push(path);
+        }
+        environment
+    }
 }
 
 impl PolicyRoots {
@@ -177,101 +258,284 @@ impl PolicyRoots {
                           and shared caches; start the gateway with HOME set"
                     .into(),
             })?;
-        let cargo_home = std::env::var_os("CARGO_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute());
         Ok(Self {
             home,
             data_root: sandbox_path(data_root),
-            cargo_home,
+            environment: LocationEnvironment::from_process(),
         })
     }
 
-    /// Cargo's home: its registry cache, and its registry tokens.
-    pub(crate) fn cargo_home(&self) -> PathBuf {
-        self.cargo_home
-            .clone()
-            .unwrap_or_else(|| self.home.join(".cargo"))
+    /// Where `place` is: the path the first of its variables set in the
+    /// environment names, or its place in the home where none is set.
+    fn resolve(&self, place: &Place) -> PathBuf {
+        place
+            .moved_by
+            .iter()
+            .find_map(|(variable, beneath)| {
+                self.environment
+                    .path(variable)
+                    .map(|path| join_beneath(path, beneath))
+            })
+            .unwrap_or_else(|| self.home.join(place.home))
+    }
+
+    /// Every path `place` may be at: its place in the home, and each path
+    /// any of its variables names.
+    fn every_location(&self, place: &Place) -> Vec<PathBuf> {
+        std::iter::once(self.home.join(place.home))
+            .chain(place.moved_by.iter().flat_map(|(variable, beneath)| {
+                self.environment
+                    .paths(variable)
+                    .iter()
+                    .map(|path| join_beneath(path, beneath))
+            }))
+            .collect()
     }
 }
 
-/// Under the home, what a sandboxed command never sees: key material, cloud
-/// and cluster credentials, plaintext token files. Forge and registry
-/// authentication goes through the operator's SSH agent and their git
-/// credential helpers run on the host, so none of these is needed to build,
-/// commit, push or fetch; of `~/.ssh`, the files that hold no key reopen
-/// (`ssh_files_without_keys`).
-const MASKED_HOME_PATHS: &[&str] = &[
-    ".ssh",
-    ".gnupg",
-    ".aws",
-    ".azure",
-    ".config/gcloud",
-    ".kube",
-    ".netrc",
-    ".git-credentials",
-    ".config/git/credentials",
-    ".config/gh/hosts.yml",
-    ".config/forgejo",
-    // Registry tokens. Cargo's live in its home, wherever that is
-    // (`CARGO_TOKEN_FILES`).
-    ".npmrc",
-    ".pypirc",
-    ".gem/credentials",
-    ".docker/config.json",
-    ".local/share/keyrings",
-    ".password-store",
+fn join_beneath(path: &Path, beneath: &str) -> PathBuf {
+    if beneath.is_empty() {
+        path.to_path_buf()
+    } else {
+        path.join(beneath)
+    }
+}
+
+/// A place the policy treats specially, under the home unless the
+/// operator's environment moves it: `home` is where it is relative to the
+/// home, and each of `moved_by` is a variable that moves it and where the
+/// place is beneath the path that variable names (`""` for the path itself).
+struct Place {
+    home: &'static str,
+    moved_by: &'static [(&'static str, &'static str)],
+}
+
+const fn at_home(home: &'static str) -> Place {
+    Place {
+        home,
+        moved_by: &[],
+    }
+}
+
+/// What a sandboxed command never sees: key material, cloud and cluster
+/// credentials, plaintext token files, wherever the operator's environment
+/// keeps them. A store is masked at its place in the home and at every path
+/// its variables name. Forge and registry authentication goes through the
+/// operator's SSH agent and their git credential helpers run on the host,
+/// so none of these is needed to build, commit, push or fetch; of `~/.ssh`,
+/// the files that hold no key reopen (`ssh_files_without_keys`).
+const MASKED_PLACES: &[Place] = &[
+    at_home(".ssh"),
+    Place {
+        home: ".gnupg",
+        moved_by: &[("GNUPGHOME", "")],
+    },
+    at_home(".aws"),
+    Place {
+        home: ".aws/credentials",
+        moved_by: &[("AWS_SHARED_CREDENTIALS_FILE", "")],
+    },
+    Place {
+        home: ".aws/config",
+        moved_by: &[("AWS_CONFIG_FILE", "")],
+    },
+    Place {
+        home: ".azure",
+        moved_by: &[("AZURE_CONFIG_DIR", "")],
+    },
+    Place {
+        home: ".config/gcloud",
+        moved_by: &[("CLOUDSDK_CONFIG", "")],
+    },
+    at_home(".kube"),
+    Place {
+        home: ".kube/config",
+        moved_by: &[("KUBECONFIG", "")],
+    },
+    at_home(".netrc"),
+    at_home(".git-credentials"),
+    Place {
+        home: ".config/git/credentials",
+        moved_by: &[("XDG_CONFIG_HOME", "git/credentials")],
+    },
+    Place {
+        home: ".config/gh/hosts.yml",
+        moved_by: &[
+            ("GH_CONFIG_DIR", "hosts.yml"),
+            ("XDG_CONFIG_HOME", "gh/hosts.yml"),
+        ],
+    },
+    Place {
+        home: ".config/forgejo",
+        moved_by: &[("XDG_CONFIG_HOME", "forgejo")],
+    },
+    // Registry tokens.
+    Place {
+        home: ".cargo/credentials",
+        moved_by: &[("CARGO_HOME", "credentials")],
+    },
+    Place {
+        home: ".cargo/credentials.toml",
+        moved_by: &[("CARGO_HOME", "credentials.toml")],
+    },
+    Place {
+        home: ".npmrc",
+        moved_by: &[("npm_config_userconfig", ""), ("NPM_CONFIG_USERCONFIG", "")],
+    },
+    at_home(".pypirc"),
+    at_home(".gem/credentials"),
+    Place {
+        home: ".docker/config.json",
+        moved_by: &[("DOCKER_CONFIG", "config.json")],
+    },
+    Place {
+        home: ".local/share/keyrings",
+        moved_by: &[("XDG_DATA_HOME", "keyrings")],
+    },
+    Place {
+        home: ".password-store",
+        moved_by: &[("PASSWORD_STORE_DIR", "")],
+    },
 ];
 
-/// Cargo's registry tokens in its home, which the sandbox reads broadly.
-const CARGO_TOKEN_FILES: &[&str] = &["credentials", "credentials.toml"];
-
-/// The caches inside Cargo's home that a sandboxed build fills: the
-/// registry's index and crates, and git dependencies. The rest of the home
-/// is not a cache — `bin/` holds the binaries on the operator's PATH and
-/// `config.toml` steers every host cargo — so it stays read-only.
-const CARGO_CACHE_DIRS: &[&str] = &["registry", "git"];
-
-/// Under the home, the shared build and package caches a sandboxed command
-/// may write, so a dependency fetched once is fetched once, each with the
-/// tool that fills it; `.cache` is every tool's. Cargo's are inside its
-/// home (`CARGO_CACHE_DIRS`).
-const SHARED_CACHE_PATHS: &[(&str, Option<&str>)] = &[
-    (".cache", None),
-    (".npm", Some("npm")),
+/// The shared build and package caches a sandboxed command may write, so a
+/// dependency fetched once is fetched once, each with the tool that fills
+/// it; `.cache` is every tool's. Each is where the operator's environment
+/// puts it, which is where the same tool finds it in the sandbox, since its
+/// variables are among those the sandbox passes in.
+const SHARED_CACHES: &[(Place, Option<&str>)] = &[
+    (
+        Place {
+            home: ".cache",
+            moved_by: &[("XDG_CACHE_HOME", "")],
+        },
+        None,
+    ),
+    (
+        Place {
+            home: ".npm",
+            moved_by: &[("npm_config_cache", ""), ("NPM_CONFIG_CACHE", "")],
+        },
+        Some("npm"),
+    ),
     // pnpm's store only: its home beside it holds the global binaries on
     // the operator's PATH.
-    (".local/share/pnpm/store", Some("pnpm")),
-    ("go/pkg", Some("go")),
+    (
+        Place {
+            home: ".local/share/pnpm/store",
+            moved_by: &[("XDG_DATA_HOME", "pnpm/store")],
+        },
+        Some("pnpm"),
+    ),
+    // Tools whose own variable moves their cache out of the shared one
+    // above; unmoved, each is inside it.
+    (
+        Place {
+            home: ".cache/uv",
+            moved_by: &[("UV_CACHE_DIR", ""), ("XDG_CACHE_HOME", "uv")],
+        },
+        Some("uv"),
+    ),
+    (
+        Place {
+            home: ".cache/go-build",
+            moved_by: &[("GOCACHE", ""), ("XDG_CACHE_HOME", "go-build")],
+        },
+        Some("go"),
+    ),
+    (
+        Place {
+            home: "go/pkg",
+            moved_by: &[("GOPATH", "pkg")],
+        },
+        Some("go"),
+    ),
+    (
+        Place {
+            home: "go/pkg/mod",
+            moved_by: &[("GOMODCACHE", ""), ("GOPATH", "pkg/mod")],
+        },
+        Some("go"),
+    ),
+    // Of Cargo's home, the registry's index and crates and git
+    // dependencies. The rest is not a cache — `bin/` holds the binaries on
+    // the operator's PATH and `config.toml` steers every host cargo — so it
+    // stays read-only.
+    (
+        Place {
+            home: ".cargo/registry",
+            moved_by: &[("CARGO_HOME", "registry")],
+        },
+        Some("cargo"),
+    ),
+    (
+        Place {
+            home: ".cargo/git",
+            moved_by: &[("CARGO_HOME", "git")],
+        },
+        Some("cargo"),
+    ),
 ];
 
-/// The shared caches a turn's sandbox may write. A cache that does not
-/// exist yet is created first where its tool is installed, since the
-/// sandbox can write inside a cache but cannot create one in the home; a
-/// cache with no tool to fill it is left uncreated.
-pub(crate) fn shared_caches(roots: &PolicyRoots, installed: impl Fn(&str) -> bool) -> Vec<PathBuf> {
-    SHARED_CACHE_PATHS
-        .iter()
-        .map(|(cache, tool)| (roots.home.join(cache), *tool))
-        .chain(
-            CARGO_CACHE_DIRS
-                .iter()
-                .map(|cache| (roots.cargo_home().join(cache), Some("cargo"))),
-        )
-        .filter_map(|(path, tool)| {
-            if !path.is_dir()
-                && tool.is_none_or(&installed)
-                && let Err(error) = std::fs::create_dir_all(&path)
-            {
-                tracing::warn!(
-                    path = %path.display(),
-                    %error,
-                    "the shared cache could not be created; sandboxed commands cannot write it"
-                );
-            }
-            path.is_dir().then(|| sandbox_path(&path))
-        })
-        .collect()
+/// The shared caches a turn's sandbox may write, beside the paths it
+/// already writes (`writable`). A cache that does not exist yet is created
+/// first where its tool is installed, since the sandbox can write inside a
+/// cache but cannot create one in the home; a cache with no tool to fill it
+/// is left uncreated. A cache within a writable path, the shared cache
+/// included, is written through that path and granted nothing of its own
+/// (`within_writable`).
+pub(crate) fn shared_caches(
+    roots: &PolicyRoots,
+    writable: &[PathBuf],
+    installed: impl Fn(&str) -> bool,
+) -> Vec<PathBuf> {
+    let mut caches: Vec<PathBuf> = Vec::new();
+    for (cache, tool) in SHARED_CACHES {
+        let path = roots.resolve(cache);
+        if within_writable(&path, writable.iter().chain(&caches)) {
+            continue;
+        }
+        if !path.is_dir()
+            && tool.is_none_or(&installed)
+            && let Err(error) = std::fs::create_dir_all(&path)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "the shared cache could not be created; sandboxed commands cannot write it"
+            );
+        }
+        if path.is_dir() {
+            caches.push(sandbox_path(&path));
+        }
+    }
+    caches
+}
+
+/// Whether `path`, or any directory above it, is within a path the sandbox
+/// writes. Such a path is the sandbox's to shape: a command can make it,
+/// or a directory on the way to it, a link to anywhere, so its target is
+/// never granted on its say; what is really there is already writable.
+fn within_writable<'a>(path: &Path, writable: impl Iterator<Item = &'a PathBuf> + Clone) -> bool {
+    path.ancestors().any(|ancestor| {
+        let ancestor = sandbox_path(ancestor);
+        writable
+            .clone()
+            .any(|granted| ancestor.starts_with(granted))
+    })
+}
+
+/// The temporary directory the operator's environment names, when it is
+/// one a sandboxed command needs granted: the sandbox's own `/tmp` hides
+/// everything the host keeps under `/tmp`, and the host's root is read-only,
+/// so a `TMPDIR` anywhere but `/tmp` itself is written only through a grant.
+fn temporary_directory(roots: &PolicyRoots, writable: &[PathBuf]) -> Option<PathBuf> {
+    let named = roots.environment.path("TMPDIR")?;
+    let directory = sandbox_path(named);
+    (directory.is_dir()
+        && directory != Path::new("/tmp")
+        && !within_writable(named, writable.iter()))
+    .then_some(directory)
 }
 
 /// Whether a command is installed: an executable of that name on `PATH`.
@@ -401,6 +665,7 @@ pub(crate) fn build_sandbox_config(
         .host_network(host_network);
     let mut granted: Vec<PathBuf> = Vec::new();
     let masked = masked_paths(roots);
+    let mut writable: Vec<PathBuf> = Vec::new();
 
     let active_grant = workspace_policy
         .and_then(|policy| policy.active_workspace.as_ref())
@@ -409,6 +674,7 @@ pub(crate) fn build_sandbox_config(
     granted.push(working_directory.clone());
     if active_can_write {
         builder = builder.write_path(&working_directory);
+        writable.push(working_directory.clone());
         for path in git_metadata_outside(&working_directory) {
             if !path.exists() {
                 continue;
@@ -429,6 +695,7 @@ pub(crate) fn build_sandbox_config(
                 continue;
             }
             builder = builder.write_path(&path);
+            writable.push(path.clone());
             granted.push(path);
         }
     } else {
@@ -458,6 +725,7 @@ pub(crate) fn build_sandbox_config(
             }
             if grant.can_write {
                 builder = builder.write_path(&path);
+                writable.push(path.clone());
                 granted.push(path);
             } else if grant.can_read {
                 builder = builder.read_only_path(&path);
@@ -466,14 +734,27 @@ pub(crate) fn build_sandbox_config(
         }
     }
 
-    for cache in shared_caches(roots, on_path) {
-        builder = builder.write_path(cache);
+    for cache in shared_caches(roots, &writable, on_path) {
+        builder = builder.write_path(&cache);
+        writable.push(cache);
+    }
+    if let Some(directory) = temporary_directory(roots, &writable) {
+        builder = builder.write_path(directory);
     }
     for private in &masked {
         builder = builder.masked_path(private);
     }
     for path in ssh_files_without_keys(&roots.home) {
         builder = builder.read_only_path(path);
+    }
+    let ssh_configuration = ssh_configuration(roots);
+    // The operator's own files ssh includes as configuration — host entries
+    // kept in `~/.ssh/config.d`, say — show at the names ssh opens them by
+    // where a mask hides them.
+    for path in &ssh_configuration.included {
+        if masked.iter().any(|private| path.starts_with(private)) {
+            builder = builder.read_only_path(path);
+        }
     }
     let ssh_agent = operator_ssh_agent();
     if let Some(socket) = &ssh_agent {
@@ -499,13 +780,11 @@ pub(crate) fn build_sandbox_config(
         .map_err(|error| swage_core::SandboxError::SpawnFailed {
             message: format!("failed to build sandbox config: {error}"),
         })?;
+    policy.substituted_files = ssh_configuration.substitutes;
     if let Some(socket) = ssh_agent {
         policy
             .environment
             .insert("SSH_AUTH_SOCK".into(), socket.display().to_string());
-    }
-    if let Some(command) = sandboxed_git_ssh_command(&working_directory, &roots.home) {
-        policy.environment.insert("GIT_SSH_COMMAND".into(), command);
     }
     // On the host's network a command uses the operator's own proxy, as it
     // would unsandboxed.
@@ -517,6 +796,214 @@ pub(crate) fn build_sandbox_config(
         }
     }
     Ok(policy)
+}
+
+/// The system's ssh configuration, and the directory its relative includes
+/// are read from.
+const SYSTEM_SSH_CONFIGURATION: &str = "/etc/ssh/ssh_config";
+const SYSTEM_SSH_DIRECTORY: &str = "/etc/ssh";
+
+/// How many configuration files the walk of ssh's includes reads at most.
+const SSH_CONFIGURATION_FILE_LIMIT: usize = 256;
+
+/// What the sandbox shows of ssh's configuration beyond `~/.ssh/config`
+/// and the system's own file.
+struct SshConfiguration {
+    /// Every file the configuration includes, at the path ssh opens it by,
+    /// except a private key.
+    included: Vec<PathBuf>,
+    /// The included files the gateway's user does not own, each with a copy
+    /// they own to show in its place.
+    substitutes: Vec<swage_sandbox::SubstitutedFile>,
+}
+
+/// The files ssh's configuration includes, walked from the system's file
+/// and the operator's `~/.ssh/config`.
+///
+/// Inside the sandbox's user namespace the host's root-owned files show as
+/// owned by nobody, and OpenSSH refuses an included configuration file owned
+/// by anyone but root or the user — the system's drop-ins, or a file the
+/// operator's own configuration includes — so ssh, and git over ssh, would
+/// stop at the first such include. A copy with the same content, owned by
+/// the user, reads as theirs. The copies are kept beneath the gateway's data
+/// root, which the sandbox masks, and are refreshed each time a policy is
+/// built.
+fn ssh_configuration(roots: &PolicyRoots) -> SshConfiguration {
+    use std::os::unix::fs::MetadataExt;
+
+    // Safety: geteuid has no preconditions and cannot fail.
+    let user = unsafe { libc::geteuid() };
+    let user_directory = roots.home.join(".ssh");
+    let copies = roots.data_root.join("sandbox").join("ssh-configuration");
+    // Each file with the directory its relative includes are read from, and
+    // whether it was included (the top-level files are never checked).
+    let mut pending = vec![
+        (
+            PathBuf::from(SYSTEM_SSH_CONFIGURATION),
+            PathBuf::from(SYSTEM_SSH_DIRECTORY),
+            false,
+        ),
+        (user_directory.join("config"), user_directory.clone(), false),
+    ];
+    // Each file walked, by its own path, with whether it shows as included
+    // configuration.
+    let mut read: Vec<(PathBuf, bool)> = Vec::new();
+    let mut configuration = SshConfiguration {
+        included: Vec::new(),
+        substitutes: Vec::new(),
+    };
+    // The link's own name in a directory resolved as the sandbox sees it,
+    // so a linked file shows where ssh looks for it.
+    let show = |included: &mut Vec<PathBuf>, opened: &Path| {
+        if let (Some(directory), Some(name)) = (opened.parent(), opened.file_name()) {
+            let path = sandbox_path(directory).join(name);
+            if !included.contains(&path) {
+                included.push(path);
+            }
+        }
+    };
+    while let Some((opened, base, included)) = pending.pop() {
+        let Ok(file) = opened.canonicalize() else {
+            continue;
+        };
+        // A file already walked is not walked again, but every name an
+        // include opens it by shows, as ssh may open it by any of them.
+        if let Some((_, shown)) = read.iter().find(|(seen, _)| *seen == file) {
+            if included && *shown {
+                show(&mut configuration.included, &opened);
+            }
+            continue;
+        }
+        if read.len() >= SSH_CONFIGURATION_FILE_LIMIT {
+            continue;
+        }
+        let Ok(content) = std::fs::read(&file) else {
+            read.push((file, false));
+            continue;
+        };
+        // A private key is never configuration, whatever an include matches.
+        let shown = included && !String::from_utf8_lossy(&content).contains("PRIVATE KEY-----");
+        read.push((file.clone(), shown));
+        for pattern in ssh_includes(&String::from_utf8_lossy(&content)) {
+            let Some(pattern) = expand_ssh_environment(&pattern) else {
+                continue;
+            };
+            let pattern = if let Some(rest) = pattern.strip_prefix("~/") {
+                roots.home.join(rest)
+            } else {
+                base.join(pattern)
+            };
+            let Ok(matches) = glob::glob(&pattern.to_string_lossy()) else {
+                continue;
+            };
+            for path in matches.filter_map(Result::ok).filter(|path| path.is_file()) {
+                pending.push((path, base.clone(), true));
+            }
+        }
+        if !shown {
+            continue;
+        }
+        show(&mut configuration.included, &opened);
+        let owned = std::fs::metadata(&file).is_ok_and(|metadata| metadata.uid() == user);
+        if owned {
+            continue;
+        }
+        let copy = copies.join(file.strip_prefix("/").unwrap_or(&file));
+        match write_owned_copy(&copy, &content) {
+            Ok(()) => configuration
+                .substitutes
+                .push(swage_sandbox::SubstitutedFile {
+                    path: file,
+                    source: copy,
+                }),
+            Err(error) => tracing::warn!(
+                path = %file.display(),
+                %error,
+                "the ssh configuration file could not be copied; sandboxed ssh will refuse it"
+            ),
+        }
+    }
+    configuration
+}
+
+/// The patterns of every `Include` directive in an ssh configuration, each
+/// a word as ssh splits it: quotes group, a backslash escapes, and an
+/// unquoted `#` starting a word ends the line.
+fn ssh_includes(configuration: &str) -> Vec<String> {
+    configuration
+        .lines()
+        .flat_map(|line| {
+            let line = line.trim_start();
+            let (keyword, rest) = line.split_at(line.find([' ', '\t', '=']).unwrap_or(line.len()));
+            if keyword.eq_ignore_ascii_case("include") {
+                ssh_words(rest.trim_start_matches([' ', '\t', '=']))
+            } else {
+                Vec::new()
+            }
+        })
+        .collect()
+}
+
+fn ssh_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote: Option<char> = None;
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        match (quote, character) {
+            (None, ' ' | '\t') => words.extend(word.take()),
+            (None, '#') if word.is_none() => break,
+            (None, '"' | '\'') => {
+                quote = Some(character);
+                word.get_or_insert_default();
+            }
+            (Some(open), _) if character == open => quote = None,
+            (Some('\''), _) => word.get_or_insert_default().push(character),
+            (_, '\\') => {
+                if let Some(escaped) = characters.next() {
+                    word.get_or_insert_default().push(escaped);
+                }
+            }
+            _ => word.get_or_insert_default().push(character),
+        }
+    }
+    words.extend(word);
+    words
+}
+
+/// An `Include` pattern with its `${NAME}` references replaced from the
+/// gateway's environment, as ssh replaces them from its own; `None` where a
+/// reference names an unset variable, which ssh refuses.
+fn expand_ssh_environment(pattern: &str) -> Option<String> {
+    let mut expanded = String::new();
+    let mut rest = pattern;
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let end = rest[start..].find('}')? + start;
+        expanded.push_str(&std::env::var(&rest[start + 2..end]).ok()?);
+        rest = &rest[end + 1..];
+    }
+    expanded.push_str(rest);
+    Some(expanded)
+}
+
+/// Write `content` to `path` as a file the user owns that only they may
+/// write, replacing what is there only when it differs.
+fn write_owned_copy(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|existing| existing == content) {
+        return Ok(());
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let directory = path.parent().unwrap_or(Path::new("/"));
+    std::fs::create_dir_all(directory)?;
+    // Staged beside it and renamed over it, so a turn building its policy
+    // at the same time never reads half a file.
+    let staged = directory.join(format!(".{}.staged", Uuid::new_v4()));
+    std::fs::write(&staged, content)?;
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&staged, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&staged);
+    })
 }
 
 /// The operator's network proxy settings, which a command on the host's
@@ -532,33 +1019,6 @@ const PROXY_ENVIRONMENT: &[&str] = &[
     "no_proxy",
 ];
 
-/// The ssh command sandboxed git runs, unless the operator names their own
-/// (`core.sshCommand`, as the workspace's git configuration reads it).
-///
-/// Inside the sandbox's user namespace the host's root-owned files show as
-/// owned by nobody, and OpenSSH refuses a configuration file, the system's
-/// included ones among them, owned by anyone but root or the user. So git's
-/// ssh reads the operator's own configuration alone (`-F`), which is theirs
-/// and passes, or none where they have none.
-fn sandboxed_git_ssh_command(working_directory: &Path, home: &Path) -> Option<String> {
-    let configured = std::process::Command::new("git")
-        .args(["config", "--get", "core.sshCommand"])
-        .current_dir(working_directory)
-        .stderr(std::process::Stdio::null())
-        .output()
-        .is_ok_and(|output| output.status.success() && !output.stdout.trim_ascii().is_empty());
-    if configured {
-        return None;
-    }
-    let user_config = home.join(".ssh").join("config");
-    let file = if user_config.is_file() {
-        user_config.display().to_string()
-    } else {
-        "/dev/null".to_owned()
-    };
-    Some(format!("ssh -F '{}'", file.replace('\'', "'\\''")))
-}
-
 /// The operator's SSH agent socket, when one is running: a sandboxed ssh
 /// authenticates through it and never reads a key.
 fn operator_ssh_agent() -> Option<PathBuf> {
@@ -571,16 +1031,18 @@ fn operator_ssh_agent() -> Option<PathBuf> {
 
 /// The files under the masked `~/.ssh` that hold no key and that ssh needs
 /// to reach a forge: its configuration, the known hosts and the public
-/// halves of the operator's keys. Each reopens read-only through the mask.
+/// halves of the operator's keys. Each reopens read-only through the mask
+/// at its own name, a symbolic link — as dotfile managers leave them —
+/// showing the file it points at.
 pub(crate) fn ssh_files_without_keys(home: &Path) -> Vec<PathBuf> {
-    let directory = home.join(".ssh");
+    let directory = sandbox_path(&home.join(".ssh"));
     let Ok(entries) = std::fs::read_dir(&directory) else {
         return Vec::new();
     };
     let mut files: Vec<PathBuf> = entries
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-        .map(|entry| entry.path())
+        .map(|entry| directory.join(entry.file_name()))
+        .filter(|path| path.is_file())
         .filter(|path| {
             // Exactly ssh's own names: a public half is `<key>.pub`.
             path.extension().is_some_and(|extension| extension == "pub")
@@ -588,29 +1050,40 @@ pub(crate) fn ssh_files_without_keys(home: &Path) -> Vec<PathBuf> {
                     name == "config" || name == "known_hosts" || name == "known_hosts2"
                 })
         })
-        .map(|path| sandbox_path(&path))
         .collect();
     files.sort();
     files
 }
 
 /// The private paths a turn's sandbox masks, each only where it exists: the
-/// operator's secrets under the home, and the gateway's own data root — its
-/// store, secrets and token — masked unless a grant names it (C64). A grant
+/// operator's secrets wherever their environment keeps them, the host's
+/// runtime directory — the operator's session sockets, which a sandboxed
+/// command's own runtime directory replaces — and the gateway's own data
+/// root — its store, secrets and token — masked unless a grant names it
+/// (C64). A grant
 /// beneath a mask (the managed scratch workspace lives under the data root)
 /// reopens only its own subtree: the mount layer applies the deeper path
 /// last, so the grant shows through the mask without the rest; a grant equal
 /// to the root, or to any masked private path, binds after the mask and
 /// reopens what it names.
 fn masked_paths(roots: &PolicyRoots) -> Vec<PathBuf> {
-    let cargo_home = roots.cargo_home();
-    let mut masked: Vec<PathBuf> = MASKED_HOME_PATHS
+    let mut masked: Vec<PathBuf> = Vec::new();
+    for path in MASKED_PLACES
         .iter()
-        .map(|private| roots.home.join(private))
-        .chain(CARGO_TOKEN_FILES.iter().map(|file| cargo_home.join(file)))
+        .flat_map(|place| roots.every_location(place))
+        .chain(
+            roots
+                .environment
+                .path("XDG_RUNTIME_DIR")
+                .map(Path::to_path_buf),
+        )
         .filter(|path| path.exists())
         .map(|path| sandbox_path(&path))
-        .collect();
+    {
+        if !masked.contains(&path) {
+            masked.push(path);
+        }
+    }
     if roots.data_root.exists() {
         masked.push(roots.data_root.clone());
     }
@@ -1679,41 +2152,6 @@ mod tests {
 
     /// An egress setup for tests of backend selection: nothing is reachable
     /// and nothing is recorded, since no command runs.
-    /// Git's ssh in the sandbox reads the operator's own configuration
-    /// alone, unless the operator names their own ssh command.
-    #[test]
-    fn sandboxed_git_ssh_reads_the_operators_configuration_unless_they_name_a_command() {
-        let root = tempfile::tempdir().unwrap();
-        let home = root.path().join("home");
-        std::fs::create_dir_all(home.join(".ssh")).unwrap();
-        let workspace = root.path().join("o'brien");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let git = |args: &[&str]| {
-            let status = std::process::Command::new("git")
-                .args(args)
-                .current_dir(&workspace)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .status()
-                .unwrap();
-            assert!(status.success());
-        };
-        git(&["init", "-q"]);
-
-        assert_eq!(
-            sandboxed_git_ssh_command(&workspace, &home).as_deref(),
-            Some("ssh -F '/dev/null'"),
-            "an operator with no ssh configuration has none read"
-        );
-        std::fs::write(home.join(".ssh/config"), "Host forge\n").unwrap();
-        assert_eq!(
-            sandboxed_git_ssh_command(&workspace, &home),
-            Some(format!("ssh -F '{}'", home.join(".ssh/config").display()))
-        );
-        git(&["config", "core.sshCommand", "ssh -i key"]);
-        assert_eq!(sandboxed_git_ssh_command(&workspace, &home), None);
-    }
-
     fn test_egress() -> Option<swage_sandbox::EgressSetup> {
         struct Closed;
         #[async_trait::async_trait]
@@ -1997,6 +2435,387 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["execution_sandbox_disabled"],
             "a sandbox switched off on purpose is recorded as that and never as degraded"
+        );
+    }
+
+    /// A cache, a credential store, the temporary directory or the runtime
+    /// directory the operator's environment moves out of the home is where
+    /// the policy opens or masks it.
+    #[test]
+    fn places_the_environment_moves_are_opened_and_masked_where_it_puts_them() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let elsewhere = root.path().join("elsewhere");
+        let cache = elsewhere.join("cache");
+        let tool_caches = [
+            ("UV_CACHE_DIR", elsewhere.join("uv")),
+            ("GOCACHE", elsewhere.join("go-build")),
+            ("GOMODCACHE", elsewhere.join("go-mod")),
+        ];
+        let config = elsewhere.join("config");
+        let data = elsewhere.join("data");
+        let gnupg = elsewhere.join("gnupg");
+        let aws = elsewhere.join("aws-credentials");
+        let kube = [elsewhere.join("kube-a"), elsewhere.join("kube-b")];
+        let temporary = elsewhere.join("tmp");
+        let runtime = elsewhere.join("run");
+        for directory in [
+            &home.join(".gnupg"),
+            &cache,
+            &config.join("gh"),
+            &config.join("forgejo"),
+            &data.join("keyrings"),
+            &gnupg,
+            &temporary,
+            &runtime,
+        ]
+        .into_iter()
+        .chain(tool_caches.iter().map(|(_, path)| path))
+        {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        for file in [&config.join("gh/hosts.yml"), &aws, &kube[0], &kube[1]] {
+            std::fs::write(file, "secret").unwrap();
+        }
+        let workspace = home.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut environment: LocationEnvironment = [
+            ("XDG_CACHE_HOME", cache.clone()),
+            ("XDG_CONFIG_HOME", config.clone()),
+            ("XDG_DATA_HOME", data.clone()),
+            ("GNUPGHOME", gnupg.clone()),
+            ("AWS_SHARED_CREDENTIALS_FILE", aws.clone()),
+            ("KUBECONFIG", kube[0].clone()),
+            ("KUBECONFIG", kube[1].clone()),
+            ("TMPDIR", temporary.clone()),
+            ("XDG_RUNTIME_DIR", runtime.clone()),
+        ]
+        .into();
+        for (variable, path) in &tool_caches {
+            environment.0.insert(variable, vec![path.clone()]);
+        }
+        let roots = PolicyRoots {
+            home: home.clone(),
+            data_root: home.join(".swage"),
+            environment,
+        };
+        let agent_config =
+            AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+        let policy = build_sandbox_config(
+            &agent_config,
+            None,
+            &roots,
+            &swage_config::ResolvedConfig::default(),
+        )
+        .unwrap();
+
+        for writable in [&cache, &temporary]
+            .into_iter()
+            .chain(tool_caches.iter().map(|(_, path)| path))
+        {
+            assert!(
+                policy.write_paths.contains(&sandbox_path(writable)),
+                "{writable:?} is writable: {:?}",
+                policy.write_paths
+            );
+        }
+        assert!(
+            !home.join(".cache").exists(),
+            "the cache the environment moved is not made in the home"
+        );
+        for masked in [
+            &config.join("gh/hosts.yml"),
+            &config.join("forgejo"),
+            &data.join("keyrings"),
+            &gnupg,
+            &home.join(".gnupg"),
+            &aws,
+            &kube[0],
+            &kube[1],
+            &runtime,
+        ] {
+            assert!(
+                policy.masked_paths.contains(&sandbox_path(masked)),
+                "{masked:?} is masked: {:?}",
+                policy.masked_paths
+            );
+        }
+    }
+
+    /// A link a command plants where a cache would be, inside a cache or a
+    /// workspace it already writes, never turns into a grant of the link's
+    /// target on the next turn.
+    #[test]
+    fn a_link_planted_in_a_writable_path_is_never_granted_its_target() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = home.join("project");
+        let ssh = home.join(".ssh");
+        for directory in [&home.join(".cache"), &home.join("go/pkg"), &workspace, &ssh] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        for planted in [
+            home.join(".cache/uv"),
+            home.join(".cache/go-build"),
+            home.join("go/pkg/mod"),
+            workspace.join("tmp"),
+        ] {
+            std::os::unix::fs::symlink(&ssh, planted).unwrap();
+        }
+        let roots = PolicyRoots {
+            home: home.clone(),
+            data_root: home.join(".swage"),
+            environment: [("TMPDIR", workspace.join("tmp"))].into(),
+        };
+        let agent_config =
+            AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+        let policy = build_sandbox_config(
+            &agent_config,
+            None,
+            &roots,
+            &swage_config::ResolvedConfig::default(),
+        )
+        .unwrap();
+
+        assert!(
+            !policy.write_paths.contains(&sandbox_path(&ssh)),
+            "{:?}",
+            policy.write_paths
+        );
+        assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
+        assert!(
+            policy
+                .write_paths
+                .contains(&sandbox_path(&home.join(".cache")))
+        );
+    }
+
+    /// ssh's configuration and known hosts linked into `~/.ssh` from
+    /// elsewhere, as dotfile managers leave them, reopen at their own names;
+    /// a key does not.
+    #[test]
+    fn ssh_files_linked_into_place_reopen_at_their_own_names() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let dotfiles = root.path().join("dotfiles");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        for name in ["config", "known_hosts"] {
+            std::fs::write(dotfiles.join(name), "Host forge\n").unwrap();
+            std::os::unix::fs::symlink(dotfiles.join(name), home.join(".ssh").join(name)).unwrap();
+        }
+        std::fs::write(dotfiles.join("id_ed25519"), "key").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("id_ed25519"), home.join(".ssh/id_ed25519"))
+            .unwrap();
+
+        let ssh = sandbox_path(&home.join(".ssh"));
+        assert_eq!(
+            ssh_files_without_keys(&home),
+            vec![ssh.join("config"), ssh.join("known_hosts")]
+        );
+    }
+
+    /// In the sandbox a policy builds, ssh reads the operator's
+    /// configuration linked into place, and the root-owned files it
+    /// includes, as it does outside; and a command
+    /// writes the cache and the temporary directory the environment names
+    /// and a runtime directory of its own, with the host's out of sight.
+    #[tokio::test]
+    async fn a_sandboxed_command_finds_ssh_caches_and_runtime_where_the_environment_puts_them() {
+        let Ok(bwrap) = swage_sandbox::find_bwrap() else {
+            eprintln!("skipping: bwrap is not installed");
+            return;
+        };
+        if !on_path("ssh") {
+            eprintln!("skipping: ssh is not installed");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let dotfiles = root.path().join("dotfiles");
+        let cache = root.path().join("cache");
+        let temporary = root.path().join("tmp");
+        let runtime = root.path().join("run");
+        let workspace = home.join("project");
+        for directory in [
+            &home.join(".ssh"),
+            &dotfiles,
+            &cache,
+            &temporary,
+            &runtime,
+            &workspace,
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        // The system's configuration is root-owned, and includes its
+        // drop-ins: an include the sandbox must show as the user's, here
+        // reached through a link at a quoted path with a space in it.
+        // In the workspace, so the sandbox sees the link itself.
+        let linked = workspace.join("system ssh");
+        std::os::unix::fs::symlink(SYSTEM_SSH_CONFIGURATION, &linked).unwrap();
+        // The operator's own host entries, kept in `~/.ssh/config.d` and
+        // included from the configuration; one linked into place.
+        std::fs::create_dir_all(home.join(".ssh/config.d")).unwrap();
+        std::fs::write(
+            home.join(".ssh/config.d/extra"),
+            "Host extra\n  Port 3333\n",
+        )
+        .unwrap();
+        std::fs::write(dotfiles.join("linked"), "Host linked\n  Port 4444\n").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("linked"), home.join(".ssh/config.d/linked"))
+            .unwrap();
+        // One file linked under two names, each included from its own host.
+        std::fs::write(dotfiles.join("shared"), "Port 5555\n").unwrap();
+        for name in ["first", "second"] {
+            std::os::unix::fs::symlink(dotfiles.join("shared"), home.join(".ssh").join(name))
+                .unwrap();
+        }
+        std::fs::write(
+            dotfiles.join("ssh_config"),
+            format!(
+                "Include {}/*\nHost forge\n  Port 2222\nInclude \"{}\"\n\
+                 Host first\n  Include {}\nHost second\n  Include {}\n",
+                home.join(".ssh/config.d").display(),
+                linked.display(),
+                home.join(".ssh/first").display(),
+                home.join(".ssh/second").display(),
+            ),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("ssh_config"), home.join(".ssh/config")).unwrap();
+        std::fs::write(runtime.join("session.sock"), "").unwrap();
+        let roots = PolicyRoots {
+            home: home.clone(),
+            data_root: home.join(".swage"),
+            environment: [
+                ("XDG_CACHE_HOME", cache.clone()),
+                ("TMPDIR", temporary.clone()),
+                ("XDG_RUNTIME_DIR", runtime.clone()),
+            ]
+            .into(),
+        };
+        let agent_config =
+            AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+        let policy = build_sandbox_config(
+            &agent_config,
+            None,
+            &roots,
+            &swage_config::ResolvedConfig::default(),
+        )
+        .unwrap();
+        // `.host` is a name the systemd drop-in, where installed, matches.
+        let hosts = ["forge", ".host", "extra", "linked", "first", "second"];
+        let mut outside = Vec::new();
+        for host in hosts {
+            let output = tokio::process::Command::new("ssh")
+                .arg("-F")
+                .arg(home.join(".ssh/config"))
+                .args(["-G", host])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await
+                .unwrap();
+            assert!(output.status.success());
+            outside.push(output.stdout);
+        }
+        let script = format!(
+            "ssh -F {config} -G forge > {cache}/forge && ssh -F {config} -G .host > {cache}/.host \
+             && ssh -F {config} -G extra > {cache}/extra \
+             && ssh -F {config} -G linked > {cache}/linked \
+             && ssh -F {config} -G first > {cache}/first \
+             && ssh -F {config} -G second > {cache}/second && touch {cache}/written && TMPDIR={temporary} mktemp >/dev/null \
+             && mkdir \"$XDG_RUNTIME_DIR/pnpm\" && test ! -e {runtime}/session.sock",
+            config = home.join(".ssh/config").display(),
+            cache = cache.display(),
+            temporary = temporary.display(),
+            runtime = runtime.display(),
+        );
+        let mut command = swage_sandbox::policy_command(&bwrap, &policy, &[], &[], None).unwrap();
+        let output = command
+            .arg("--")
+            .args(["sh", "-c", &script])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(cache.join("written").is_file());
+        for (host, outside) in hosts.into_iter().zip(&outside) {
+            let inside = std::fs::read(cache.join(host)).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&inside),
+                String::from_utf8_lossy(outside),
+                "ssh resolves {host} in the sandbox as it does outside"
+            );
+        }
+        assert!(String::from_utf8_lossy(&outside[0]).contains("port 2222"));
+        assert!(String::from_utf8_lossy(&outside[2]).contains("port 3333"));
+        assert!(String::from_utf8_lossy(&outside[3]).contains("port 4444"));
+        assert!(String::from_utf8_lossy(&outside[4]).contains("port 5555"));
+        assert!(String::from_utf8_lossy(&outside[5]).contains("port 5555"));
+    }
+
+    /// A file the operator's configuration includes shows in the sandbox,
+    /// and a private key an include happens to match does not.
+    #[test]
+    fn an_included_private_key_is_never_shown_as_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let included = home.join(".ssh/config.d");
+        std::fs::create_dir_all(&included).unwrap();
+        std::fs::write(
+            home.join(".ssh/config"),
+            format!("Include {}/*\n", included.display()),
+        )
+        .unwrap();
+        std::fs::write(included.join("hosts"), "Host forge\n").unwrap();
+        std::fs::write(
+            included.join("id_forge"),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let roots = PolicyRoots {
+            home: home.clone(),
+            data_root: home.join(".swage"),
+            environment: Default::default(),
+        };
+
+        let shown = ssh_configuration(&roots).included;
+
+        let included = sandbox_path(&included);
+        assert!(shown.contains(&included.join("hosts")), "{shown:?}");
+        assert!(!shown.contains(&included.join("id_forge")), "{shown:?}");
+    }
+
+    #[test]
+    fn ssh_includes_are_read_from_every_include_directive() {
+        assert_eq!(
+            ssh_includes(
+                "# Include commented\nInclude /etc/ssh/ssh_config.d/*.conf\n\
+                 Host forge\n  include=\"config.d/a\" ~/b\nIncludeFoo x\n"
+            ),
+            vec!["/etc/ssh/ssh_config.d/*.conf", "config.d/a", "~/b"]
+        );
+        assert_eq!(
+            ssh_includes("Include \"/opt/my configs/a.conf\" 'b c' d\\ e ${HOME}/f # g\n"),
+            vec!["/opt/my configs/a.conf", "b c", "d e", "${HOME}/f"]
+        );
+    }
+
+    #[test]
+    fn an_ssh_include_reads_environment_references_from_the_environment() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            expand_ssh_environment("${HOME}/.config/ssh").as_deref(),
+            Some(format!("{home}/.config/ssh").as_str())
+        );
+        assert_eq!(
+            expand_ssh_environment("${SWAGE_SURELY_UNSET_VARIABLE}/x"),
+            None
         );
     }
 }
