@@ -345,6 +345,28 @@ test("stops generating when reconnect recovers an output-limited reply", async (
   await expect(reply).toContainText("Response incomplete");
 });
 
+test("clears a stopped approval and keeps the tool under its partial reply", async ({ page, context }) => {
+  await send(page, "partial then approval");
+  const approval = page.getByRole("dialog", { name: "Approval required" });
+  await expect(approval).toBeVisible();
+
+  const other = await context.newPage();
+  try {
+    await other.goto(page.url());
+    await other.getByRole("button", { name: "Stop", exact: true }).click();
+    await expect(approval).toBeHidden();
+    const reply = page.getByLabel("Assistant message").filter({ hasText: "Partial response before approval." });
+    await expect(reply).toContainText("Response cancelled");
+    await expect(reply).toContainText("tool call was cancelled when its turn was stopped");
+    await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+    await page.reload();
+    await expect(reply).toContainText("Response cancelled");
+    await expect(reply).toContainText("tool call was cancelled when its turn was stopped");
+  } finally {
+    await other.close();
+  }
+});
+
 test("clears the approval when reconnect recovers a stopped request with no reply", async ({ page, context }) => {
   let openingSocket: WebSocketRoute | undefined;
   await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {

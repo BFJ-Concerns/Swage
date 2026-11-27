@@ -102,6 +102,15 @@ export interface StreamingStore {
 // Cancellation records the stop decision without asserting completed effects.
 const CANCELLED_TOOL_RESULT = "tool call was cancelled when its turn was stopped";
 
+function settleCancelledCall(call: ToolCallView): ToolCallView {
+  const cancelled = call.status === null || (call.status === "cancelled" && call.result == null);
+  return {
+    ...call,
+    ...(cancelled ? { status: "cancelled", result: CANCELLED_TOOL_RESULT } : {}),
+    ...(call.sub_calls ? { sub_calls: call.sub_calls.map(settleCancelledCall) } : {}),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Injected dependencies
 // ---------------------------------------------------------------------------
@@ -525,21 +534,21 @@ export function createStreamingStore(
         }
 
         case "cancelled": {
-          const settledCalls = get(stream.activeToolCallsStore).map((call) =>
-            call.status === null || (call.status === "cancelled" && call.result == null)
-              ? { ...call, status: "cancelled", result: CANCELLED_TOOL_RESULT }
-              : call,
-          );
+          const settledCalls = get(stream.activeToolCallsStore).map(settleCancelledCall);
           if (get(stream.streamedContentStore)) {
             // Preserve partial content (they may want to read what was
             // generated before they stopped it); the calls stay beside it.
-            settleResponse(ownerId, stream, "cancelled");
-            stream.activeToolCallsStore.set(settledCalls);
+            settleResponse(ownerId, stream, "cancelled", stream.queuedTurnId ?? undefined, settledCalls);
+            stream.activeToolCallsStore.set([]);
           } else if (options?.conversationStore?.settleUnansweredRequest) {
             // No reply: the turn's account rides on its request, where the
             // conversation shows it after a reload too.
             options.conversationStore.settleUnansweredRequest(
-              { turn_state: "cancelled", tool_calls: settledCalls },
+              {
+                turn_state: "cancelled",
+                tool_calls: settledCalls,
+                ...(stream.queuedTurnId ? { turn_id: stream.queuedTurnId } : {}),
+              },
               ownerId,
             );
             stream.activeToolCallsStore.set([]);
@@ -549,6 +558,7 @@ export function createStreamingStore(
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
           stream.providerRetryStore.set(null);
+          stream.pendingApprovalStore.set(null);
           break;
         }
 

@@ -29,11 +29,17 @@ function hasSuccessfulApprovalResult(messages) {
       && block.content.includes("approval-ok")));
 }
 
-function definitionToolResponse(response, id, input) {
+function toolResponse(response, id, name, input, text) {
   event(response, "message_start", { type: "message_start", message: { usage: { input_tokens: 4, output_tokens: 0 } } });
-  event(response, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id, name: "agent_definition", input: {} } });
-  event(response, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } });
-  event(response, "content_block_stop", { type: "content_block_stop", index: 0 });
+  const index = text ? 1 : 0;
+  if (text) {
+    event(response, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    event(response, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
+    event(response, "content_block_stop", { type: "content_block_stop", index: 0 });
+  }
+  event(response, "content_block_start", { type: "content_block_start", index, content_block: { type: "tool_use", id, name, input: {} } });
+  event(response, "content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } });
+  event(response, "content_block_stop", { type: "content_block_stop", index });
   event(response, "message_delta", { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } });
   event(response, "message_stop", { type: "message_stop" });
   response.end();
@@ -86,27 +92,24 @@ async function handle(request, response) {
   } else if (definitionResult) {
     await textResponse(response, ["Definition tool returned to the provider."]);
   } else if (lastText === "Create a preferred agent") {
-    definitionToolResponse(response, "create-e2e-agent", {
+    toolResponse(response, "create-e2e-agent", "agent_definition", {
       action: "create", id: "preferred-agent", display_name: "Preferred agent",
       description: "A fixture for model selection", instructions: "Answer plainly.",
       model_id: "preferred-model",
     });
   } else if (lastText === "Set an unknown preferred model") {
-    definitionToolResponse(response, "refuse-e2e-agent", {
+    toolResponse(response, "refuse-e2e-agent", "agent_definition", {
       action: "update", id: "preferred-agent", model_id: "unknown-model",
     });
   } else if (hasSuccessfulApprovalResult(body.messages)) {
     await textResponse(response, ["Approval ", "completed through the gateway."]);
   } else if (serialised.includes("tool_result")) {
     await textResponse(response, ["Approval did not execute the tool."]);
-  } else if (serialised.includes("approve a tool")) {
-    event(response, "message_start", { type: "message_start", message: { usage: { input_tokens: 4, output_tokens: 0 } } });
-    event(response, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "e2e-tool-call", name: "shell", input: {} } });
-    event(response, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"command\":\"printf approval-ok\"}" } });
-    event(response, "content_block_stop", { type: "content_block_stop", index: 0 });
-    event(response, "message_delta", { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } });
-    event(response, "message_stop", { type: "message_stop" });
-    response.end();
+  } else if (serialised.includes("approve a tool") || lastText === "partial then approval") {
+    toolResponse(
+      response, "e2e-tool-call", "shell", { command: "printf approval-ok" },
+      lastText === "partial then approval" ? "Partial response before approval." : undefined,
+    );
   } else if (serialised.includes("render code and links")) {
     await textResponse(response, [[
       "Fixture **bold** <em>markup</em>",
