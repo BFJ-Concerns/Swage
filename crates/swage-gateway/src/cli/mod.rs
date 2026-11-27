@@ -128,7 +128,7 @@ pub struct GatewayArgs {
 /// Gateway lifecycle subcommands.
 #[derive(Debug, clap::Subcommand)]
 pub enum GatewayCommand {
-    /// Save host, port, and configuration defaults for lifecycle commands.
+    /// Save bind host and port defaults for lifecycle commands.
     SetDefaults(InstallArgs),
     /// Remove saved lifecycle defaults.
     ClearDefaults(UninstallArgs),
@@ -475,7 +475,7 @@ mod tests {
             .expect("gateway command")
             .render_long_help()
             .to_string();
-        assert!(gateway_help.contains("Save host, port, and configuration defaults"));
+        assert!(gateway_help.contains("Save bind host and port defaults"));
         assert!(gateway_help.contains("Remove saved lifecycle defaults"));
     }
 

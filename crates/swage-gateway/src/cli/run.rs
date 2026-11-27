@@ -66,7 +66,7 @@ async fn read_message(args: &RunArgs, client: &GatewayClient) -> Result<String, 
 
     let trimmed = stdin_bytes.trim();
     if trimmed.is_empty() {
-        return Err(ClientError::GatewayNotRunning {
+        return Err(ClientError::RunFailed {
             reason: "run command requires a prompt argument or non-empty stdin".to_string(),
         });
     }
@@ -158,7 +158,7 @@ pub async fn run(args: &RunArgs) -> Result<(), ClientError> {
                 return Ok(());
             }
             Some(ServerEvent::Error { message, .. }) => {
-                return Err(ClientError::GatewayNotRunning { reason: message });
+                return Err(ClientError::RunFailed { reason: message });
             }
             Some(ServerEvent::Cancelled {}) => {
                 return Err(ClientError::GatewayNotRunning {

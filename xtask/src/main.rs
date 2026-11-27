@@ -1426,13 +1426,11 @@ fn write_install_next_steps(
 ) -> std::io::Result<()> {
     writeln!(output)?;
     writeln!(output, "Next steps:")?;
-    if path_contains(prefix) {
-        writeln!(output, "  1. Start the gateway: swage gateway start")?;
-    } else {
-        writeln!(output, "  1. {} is not on PATH yet.", prefix.display())?;
+    if !path_contains(prefix) {
+        writeln!(output, "  {} is not on PATH yet.", prefix.display())?;
         writeln!(
             output,
-            "     fish: set -U fish_user_paths {} $fish_user_paths",
+            "     fish: set -U fish_user_paths \"{}\" $fish_user_paths",
             prefix.display()
         )?;
         writeln!(
@@ -1440,42 +1438,49 @@ fn write_install_next_steps(
             "     bash: echo 'export PATH=\"{}:$PATH\"' >> ~/.bashrc",
             prefix.display()
         )?;
-        writeln!(output, "  2. Start the gateway: swage gateway start")?;
+        writeln!(output, "     Open a new shell after updating PATH.")?;
     }
+    writeln!(output, "  Start the gateway with swage gateway start.")?;
 
     if lan_mode {
         if let (Some(host), Some(port)) = (host, port)
             && port != 0
         {
-            let host = if host == "0.0.0.0" {
-                lan_ip().unwrap_or_else(|| "<this-machine-ip>".to_string())
-            } else {
-                host.to_owned()
+            let bare_host = host.trim_start_matches('[').trim_end_matches(']');
+            let local_host = match bare_host.parse::<std::net::IpAddr>() {
+                Ok(std::net::IpAddr::V4(ip)) if ip.is_unspecified() => "127.0.0.1",
+                Ok(std::net::IpAddr::V6(ip)) if ip.is_unspecified() => "::1",
+                _ => bare_host,
             };
-            writeln!(output, "  2. Open the UI:")?;
-            writeln!(
-                output,
-                "     LAN:   http://{}:{port}",
-                if host.contains(':') {
-                    format!("[{}]", host.trim_start_matches('[').trim_end_matches(']'))
-                } else {
-                    host.to_owned()
-                }
-            )?;
-            writeln!(output)?;
+            let url_host = if local_host.contains(':') {
+                format!("[{local_host}]")
+            } else {
+                local_host.to_owned()
+            };
+            writeln!(output, "  Open http://{url_host}:{port} in a browser.")?;
         } else {
             writeln!(
                 output,
-                "  2. Find the bound address after startup: swage gateway status"
+                "  Find the browser address after startup with swage gateway status."
             )?;
         }
-        writeln!(output, "LAN exposure warning:")?;
         writeln!(
             output,
-            "  The gateway has no authentication. Only use --lan on networks you trust."
+            "  Use network bindings only on trusted private networks."
+        )?;
+        writeln!(
+            output,
+            "  For a wildcard binding, use this machine's LAN IP address and the gateway's port from another device."
+        )?;
+        writeln!(
+            output,
+            "  If the UI asks you to pair, run swage gateway pair on this machine."
         )?;
     } else {
-        writeln!(output, "  2. Open http://127.0.0.1:3000 in a browser.")?;
+        writeln!(
+            output,
+            "  Open the address printed at startup in a browser."
+        )?;
     }
     Ok(())
 }
