@@ -220,6 +220,7 @@ describe("startTurn", () => {
       id: "q-1",
       origin: "user" as const,
       content: "a second thought",
+      thread_id: "root-1",
       queued_at: "2026-10-04T10:00:00Z",
     };
     store.handleServerEvent({ type: "message_queued", session_id: "conv-9", queued });

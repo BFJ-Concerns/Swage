@@ -187,6 +187,7 @@ pub struct QueuedMessageView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<Uuid>,
     pub id: Uuid,
+    pub thread_id: Uuid,
     pub origin: MessageOrigin,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

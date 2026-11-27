@@ -301,6 +301,9 @@ pub(super) fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEv
         | ServerEvent::MessageQueued {
             session_id: target, ..
         }
+        | ServerEvent::QueuedMessageSent {
+            session_id: target, ..
+        }
         | ServerEvent::QueueDrained {
             session_id: target, ..
         } => *target == session_id,

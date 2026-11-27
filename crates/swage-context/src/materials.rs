@@ -218,6 +218,22 @@ mod tests {
     }
 
     #[test]
+    fn quotes_a_material_containing_its_own_fence_and_trailing_whitespace() {
+        let body = "Build notes\n\n```sh\njust check\n```\n\nMore notes.  \n\n";
+        let element = MaterialsElement::new(
+            vec![material(
+                "Build notes",
+                ReferenceMaterialScope::Session,
+                Some(body),
+            )],
+            MaterialReach::ReadByTool,
+        );
+        let text = element.content()[0].text_content();
+
+        assert!(text.ends_with(&format!("````text\n{body}````")), "{text}");
+    }
+
+    #[test]
     fn a_session_without_the_read_tool_is_never_sent_to_it() {
         let element =
             MaterialsElement::new(launch_plan_and_style_guide(), MaterialReach::QuotedOnly);

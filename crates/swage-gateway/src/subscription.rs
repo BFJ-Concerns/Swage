@@ -138,6 +138,7 @@ impl SubscriptionState {
             // never observability: always delivered.
             ServerEvent::MessageAppended { .. }
             | ServerEvent::MessageQueued { .. }
+            | ServerEvent::QueuedMessageSent { .. }
             | ServerEvent::QueueDrained { .. } => true,
 
             // Surface and library updates and the work-surface lag signal are

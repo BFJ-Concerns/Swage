@@ -644,6 +644,11 @@ pub fn continuable_output_value(
         .and_then(Value::as_str)
         .map(str::len)
         .unwrap_or(0);
+    if output_len == 0 && !remaining.is_empty() {
+        return Err(
+            "the installation's output limit is too small to return the next character".to_owned(),
+        );
+    }
     let next_offset = offset_bytes + output_len;
 
     if offset_bytes > 0 || next_offset < content.len() {

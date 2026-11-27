@@ -1253,6 +1253,7 @@ async fn run_body(
                 thread.id,
                 crate::turn::TurnInput::text(&input)
                     .with_origin(swage_storage::MessageOrigin::Schedule),
+                None,
                 Some(run.id),
                 Vec::new(),
                 crate::turn::TurnAttendance::Unattended,

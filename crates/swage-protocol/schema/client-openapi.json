@@ -3700,10 +3700,15 @@
           "queued_at": {
             "format": "date-time",
             "type": "string"
+          },
+          "thread_id": {
+            "format": "uuid",
+            "type": "string"
           }
         },
         "required": [
           "id",
+          "thread_id",
           "origin",
           "content",
           "queued_at"
@@ -5302,7 +5307,41 @@
             "type": "object"
           },
           {
-            "description": "The session's queue became the next turn's input: the queued\nmessages are now recorded messages (each announced) and the queue is\nempty.\nThe queue ran as the next turn: the held messages whose ids are\nlisted are now recorded rows (each announced on its own); a message\nqueued after the drain took its batch is not among them and stays\nheld.",
+            "description": "A queued input has become a recorded message. Its queue id and\noriginating client id let the view replace either pending copy.",
+            "properties": {
+              "client_id": {
+                "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "$ref": "#/components/schemas/MessageView"
+              },
+              "queued_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "session_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "queued_message_sent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "queued_id",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A batch of queued messages became a turn. A view joining while\nthat turn is active receives this event before its live output.",
             "properties": {
               "queued_ids": {
                 "items": {

@@ -168,13 +168,17 @@ pub enum ServerEvent {
         session_id: Uuid,
         queued: super::conversation::QueuedMessageView,
     },
-    /// The session's queue became the next turn's input: the queued
-    /// messages are now recorded messages (each announced) and the queue is
-    /// empty.
-    /// The queue ran as the next turn: the held messages whose ids are
-    /// listed are now recorded rows (each announced on its own); a message
-    /// queued after the drain took its batch is not among them and stays
-    /// held.
+    /// A queued input has become a recorded message. Its queue id and
+    /// originating client id let the view replace either pending copy.
+    QueuedMessageSent {
+        session_id: Uuid,
+        queued_id: Uuid,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<Uuid>,
+        message: super::conversation::MessageView,
+    },
+    /// A batch of queued messages became a turn. A view joining while
+    /// that turn is active receives this event before its live output.
     QueueDrained {
         session_id: Uuid,
         turn_id: Uuid,

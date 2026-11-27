@@ -10,6 +10,7 @@ import type { Effort } from "../protocol/Effort";
 import type { MessageAttachment } from "../protocol/MessageAttachment";
 import { stopConversationTurn } from "../api/conversations";
 import type { MessageView, ServerEvent, ToolCallView } from "../types";
+import type { ConversationStore } from "./conversations";
 
 // Approval state surfaced for the ApprovalCard / MessageInput swap.
 // Fields match the `approval_required` server event so the UI can render
@@ -145,10 +146,7 @@ export interface StreamingStoreOptions {
       conversationId?: string | null,
     ): void;
     /** Installs a message the gateway recorded and announced on its conversation. */
-    appendRecordedMessage?(
-      message: import("../protocol/MessageView").MessageView,
-      conversationId: string,
-    ): void;
+    appendRecordedMessage?: ConversationStore["appendRecordedMessage"];
     /** Shows a message the gateway holds for the conversation's next turn. */
     appendQueuedMessage?(
       queued: import("../protocol/QueuedMessageView").QueuedMessageView,
@@ -633,6 +631,13 @@ export function createStreamingStore(
           stream.activeTurnGeneration += 1;
           stream.turnStartedAtStore.set(new Date().toISOString());
           setStreamActive(ownerId, stream, true);
+          break;
+
+        case "queued_message_sent":
+          options?.conversationStore?.appendRecordedMessage?.(event.message, event.session_id, {
+            id: event.queued_id,
+            clientId: event.client_id,
+          });
           break;
 
         case "message_appended":

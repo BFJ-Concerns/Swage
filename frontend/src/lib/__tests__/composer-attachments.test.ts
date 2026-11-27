@@ -88,10 +88,11 @@ function inFolder(path: string, contents: BlobPart, type = ""): File {
   return file;
 }
 
-function paste(file = new File(["picture"], "pasted.png", { type: "image/png" })) {
+function paste(file = new File(["picture"], "pasted.png", { type: "image/png" }), text = "") {
   const event = new Event("paste", { bubbles: true, cancelable: true });
-  Object.defineProperty(event, "clipboardData", { value: { items: [{ kind: "file", type: file.type, getAsFile: () => file }] } });
+  Object.defineProperty(event, "clipboardData", { value: { getData: () => text, items: [{ kind: "file", type: file.type, getAsFile: () => file }] } });
   flushSync(() => document.querySelector("textarea")!.dispatchEvent(event));
+  return event;
 }
 
 function send(text = "") {
@@ -132,10 +133,32 @@ describe("composer attachments", () => {
     expect(sendMessage.mock.calls[0]?.[3]).toBeUndefined();
   });
 
+  it("leaves a paste of spreadsheet cells to the textarea when it also carries an image", async () => {
+    await setup();
+    const event = paste(undefined, "row 1\tcolumn 2");
+    expect(event.defaultPrevented).toBe(false);
+    await previews(0);
+  });
+
+  it("attaches the rest of a file selection and names each rejected file", async () => {
+    const { created } = await setup();
+    choose([
+      new File(["first"], "first.txt"),
+      new File(["\u0000"], "binary.bin"),
+      new File([], "empty.txt"),
+      new File(["last"], "last.txt"),
+    ]);
+    await vi.waitFor(() => expect(document.body.textContent).toContain("last.txt · reference for this session"));
+    expect(created.map(({ title }) => title)).toEqual(["first.txt", "last.txt"]);
+    const error = document.querySelector('[role="alert"]')?.textContent;
+    expect(error).toContain("binary.bin");
+    expect(error).toContain("empty.txt");
+  });
+
   it("refuses an image that is not PNG or JPEG", async () => {
     const { created } = await setup();
     paste(new File(["gif"], "moving.gif", { type: "image/gif" }));
-    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toContain("moving.gif is not a PNG or JPEG image."));
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toContain("moving.gif: Choose a PNG or JPEG image."));
     expect(created).toEqual([]);
   });
 
@@ -265,7 +288,7 @@ describe("images in the conversation", () => {
     conversations.replaceActiveConversationIfCurrent!({ ...conversations.activeConversation!, messages: [{ role: "user", origin: "user", content: "look at this", timestamp: "2026-10-15T00:00:00Z", turn_id: "turn" }] });
     const display = mount(MessageDisplay, { target: document.body, props: { store: conversations, streamingStore: stream } });
     mounted.push(() => { void unmount(display); });
-    flushSync(() => stream.handleServerEvent({ type: "message_queued", session_id: "session-one", queued: { id: "held", origin: "user", content: "and this", attachments: [image], queued_at: "2026-10-15T00:00:00Z" } }, "session-one"));
+    flushSync(() => stream.handleServerEvent({ type: "message_queued", session_id: "session-one", queued: { id: "held", origin: "user", content: "and this", attachments: [image], thread_id: "root-1", queued_at: "2026-10-15T00:00:00Z" } }, "session-one"));
     const queued = document.querySelector('[aria-label="Queued message"]');
     expect(queued?.querySelector<HTMLImageElement>("img")?.src).toBe(image.url);
   });

@@ -185,6 +185,9 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- The composer keeps the text of a clipboard paste that also carries an image. Choosing several files attaches the usable ones and names each file it could not attach.
+- Queued messages move into the transcript once, on the thread where they were sent. A view joining a queued turn sees its reply on that thread, and a queued API request runs on the model it named.
+- Short reference materials keep their own Markdown code fences and trailing whitespace when quoted in the agent's context.
 - `shell` no longer drops a command's standard error from its result when standard output fills the output limit. The two streams share the limit, so a short error after a long build log is reported whole, and each stream that is cut is flagged (`stdout_truncated`, `stderr_truncated`) with the path of the file holding all of it.
 - A conversation summary is no longer requested under an output limit smaller than the length it is asked for. The hand-over notes of a long session, the agent runtime's summary of older messages, the summary passed to a delegated agent, the structured record and the choice of messages to drop each set no output limit of their own, so a reply is not cut mid-sentence, or inside its JSON, and then used as though it were whole. A summary the model itself reports as cut at its output limit is treated as a failed summary: the conversation falls back as it does when the summariser fails, and a delegated agent is told it has no summary. A delegation's `summary_budget` is stated to the summariser as a length to keep to.
 - The agent runtime's summary of older messages is written from a transcript that says who each message is from and includes tool calls and their results, so a rule the user set is not mistaken for a remark of the assistant's.

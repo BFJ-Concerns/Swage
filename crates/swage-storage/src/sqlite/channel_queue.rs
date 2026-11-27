@@ -344,6 +344,7 @@ mod tests {
             .enqueue_turn_inputs(
                 rows.iter()
                     .map(|row| NewQueuedTurnInput {
+                        requested_model: None,
                         session_id,
                         thread_id,
                         origin: MessageOrigin::User,

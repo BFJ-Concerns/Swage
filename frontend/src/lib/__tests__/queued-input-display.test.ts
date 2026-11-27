@@ -81,11 +81,64 @@ describe("queued input display", () => {
     streaming.startTurn("ping");
     streaming.startTurn("ping");
     flushSync(() => streaming.handleServerEvent({ type: "message_queued", session_id: "conv-1", queued: {
-      id: "second-ping", client_id: connection.sendMessage.mock.calls[1][5], content: "ping", origin: "user", attachments: [], queued_at: "2026-10-04T20:25:00Z",
+      id: "second-ping", client_id: connection.sendMessage.mock.calls[1][5], content: "ping", origin: "user", attachments: [], thread_id: "root-1", queued_at: "2026-10-04T20:25:00Z",
     }}));
     const contents = (label: string) => Array.from(document.querySelectorAll(`[aria-label="${label}"]`)).map(row => row.querySelector(".message-content")?.textContent?.trim());
     expect({ messages: contents("Your message"), queued: contents("Queued message"), labelled: document.body.textContent?.includes("You · queued") })
       .toEqual({ messages: ["ping"], queued: ["ping"], labelled: true });
+  });
+
+  it("replaces the optimistic send when its queued acknowledgement arrives after drain", async () => {
+    const { streaming, connection } = await openConversation();
+    streaming.startTurn("a late acknowledgement");
+    const clientId = connection.sendMessage.mock.calls[0][5];
+    const queued = {
+      id: "held", client_id: clientId, thread_id: "root-1", content: "a late acknowledgement",
+      origin: "user" as const, queued_at: "2026-10-04T20:25:00Z",
+    };
+    const message: MessageView = {
+      id: "recorded", thread_id: "root-1", turn_id: "next-turn", role: "user",
+      origin: "user", content: queued.content, timestamp: queued.queued_at,
+      turn_state: "pending", tool_calls: [],
+    };
+    flushSync(() => streaming.handleServerEvent({
+      type: "queued_message_sent", session_id: "conv-1", queued_id: queued.id, client_id: clientId, message,
+    }));
+    expect(document.querySelectorAll('[aria-label="Your message"]')).toHaveLength(1);
+    flushSync(() => {
+      streaming.handleServerEvent({
+        type: "queue_drained", session_id: "conv-1", thread_id: "root-1",
+        turn_id: "next-turn", queued_ids: [queued.id],
+      });
+      streaming.handleServerEvent({ type: "message_queued", session_id: "conv-1", queued });
+    });
+    expect(document.querySelectorAll('[aria-label="Your message"]')).toHaveLength(1);
+    expect(document.querySelector('[aria-label="Queued message"]')).toBeNull();
+    expect(document.body.textContent?.match(/a late acknowledgement/g)).toHaveLength(1);
+  });
+
+  it("shows each held message only on its own thread", async () => {
+    const { conversation, streaming } = await openConversation();
+    vi.mocked(api.getThread).mockResolvedValue({
+      id: "branch-1", session_id: "conv-1", agent_id: "gateway", state: "idle",
+      messages: [{ id: "ancestor", thread_id: "branch-1", role: "user", content: "Previous message", timestamp: "2026-10-04T20:24:00Z", turn_state: null, tool_calls: [] }],
+    });
+    streaming.startTurn("First question");
+    flushSync(() => {
+      for (const [thread_id, content] of [["root-1", "Follow up on main"], ["branch-1", "Follow up on branch"]]) {
+        streaming.handleServerEvent({
+          type: "message_queued", session_id: "conv-1",
+          queued: { id: thread_id, thread_id, content, origin: "user", queued_at: "2026-10-04T20:25:00Z" },
+        });
+      }
+    });
+    const held = () => document.querySelector('[aria-label="Queued message"]')?.textContent;
+    expect(held()).toContain("Follow up on main");
+    expect(document.body.textContent).not.toContain("Follow up on branch");
+    await conversation.selectThread!("branch-1");
+    flushSync();
+    expect(held()).toContain("Follow up on branch");
+    expect(document.body.textContent).not.toContain("Follow up on main");
   });
 
   it("shows a send once as queued when the page opened during a turn has no local stream", async () => {
@@ -93,7 +146,7 @@ describe("queued input display", () => {
     expect(streaming.isStreaming).toBe(false);
     streaming.startTurn("follow up");
     expect(connection.sendMessage).toHaveBeenCalledWith("conv-1", "follow up", undefined, undefined, null, expect.any(String));
-    const queued = { id: "queued-1", client_id: connection.sendMessage.mock.calls[0][5], content: "follow up", origin: "user" as const, attachments: [], queued_at: "2026-10-04T20:25:00Z" };
+    const queued = { id: "queued-1", client_id: connection.sendMessage.mock.calls[0][5], content: "follow up", origin: "user" as const, attachments: [], thread_id: "root-1", queued_at: "2026-10-04T20:25:00Z" };
     flushSync(() => {
       streaming.handleServerEvent({ type: "message_queued", session_id: "conv-1", queued });
       streaming.handleServerEvent({ type: "message_queued", session_id: "conv-1", queued });

@@ -2358,6 +2358,8 @@ pub struct QueuedTurnInput {
     pub id: Uuid,
     pub session_id: Uuid,
     pub thread_id: Uuid,
+    /// A model explicitly requested for this input.
+    pub requested_model: Option<String>,
     /// Arrival order within the session's queue.
     pub seq: i64,
     pub origin: MessageOrigin,
@@ -2379,6 +2381,8 @@ pub struct NewQueuedTurnInput {
     pub attended: bool,
     pub session_id: Uuid,
     pub thread_id: Uuid,
+    /// A model explicitly requested for this input.
+    pub requested_model: Option<String>,
     pub origin: MessageOrigin,
     pub content: String,
     pub attachments: Vec<serde_json::Value>,
@@ -2388,8 +2392,7 @@ pub struct NewQueuedTurnInput {
     pub channel_message_ids: Vec<Uuid>,
 }
 
-/// The queue's first consecutive thread group: its turn and one recorded message
-/// per queued input in arrival order.
+/// The queue's first consecutive group for one thread and model choice.
 #[derive(Debug, Clone)]
 pub struct DrainedTurnQueue {
     /// A batch is attended if any of its inputs was attended at its source.
@@ -2399,8 +2402,8 @@ pub struct DrainedTurnQueue {
     pub channel_origins: Vec<PendingChannelOrigin>,
     pub turn: Turn,
     pub messages: Vec<Message>,
-    /// The queue rows this drain took, by id — what a view clears.
-    pub queued_ids: Vec<Uuid>,
+    /// The inputs corresponding, in order, to the recorded messages.
+    pub inputs: Vec<QueuedTurnInput>,
 }
 
 /// Input for appending a new message at the end of a thread.

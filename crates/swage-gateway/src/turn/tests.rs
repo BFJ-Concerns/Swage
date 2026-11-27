@@ -5913,6 +5913,7 @@ fn enqueue_mock_turn_input(
         .min()
         .unwrap_or_else(chrono::Utc::now);
     let queued = swage_storage::QueuedTurnInput {
+        requested_model: input.requested_model,
         delivery_targets: input.delivery_targets,
         attended: input.attended,
         client_id: input.client_id,
@@ -6019,11 +6020,18 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
         session_id: Uuid,
         agent_id: &str,
     ) -> Result<Option<swage_storage::DrainedTurnQueue>, StorageError> {
-        let queued = self.list_queued_turn_inputs(session_id).await?;
+        let mut queued = self.list_queued_turn_inputs(session_id).await?;
         let Some(first) = queued.first() else {
             return Ok(None);
         };
         let thread_id = first.thread_id;
+        let group_len = queued
+            .iter()
+            .take_while(|item| {
+                item.thread_id == thread_id && item.requested_model == first.requested_model
+            })
+            .count();
+        queued.truncate(group_len);
         let user_input = queued
             .iter()
             .map(|item| item.content.as_str())
@@ -6072,7 +6080,6 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
                 .await?,
             );
         }
-        let queued_ids = queued.iter().map(|item| item.id).collect();
         // The inbox rows the inputs name are presented by this turn, as the
         // real drain presents them, and their chats are the turn's
         // destinations.
@@ -6102,14 +6109,15 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
                     }
                 }
             }
-            db.turn_queue.retain(|item| item.session_id != session_id);
+            db.turn_queue
+                .retain(|item| !queued.iter().any(|drained| drained.id == item.id));
         }
         Ok(Some(swage_storage::DrainedTurnQueue {
             delivery_targets: attribution.delivery_targets,
             attended: attribution.attended,
             turn,
             messages,
-            queued_ids,
+            inputs: queued,
             schedule_run_ids: Vec::new(),
             channel_origins,
         }))

@@ -220,14 +220,17 @@
   // These will become fully reactive once the stores are converted to $state.
 
   const messages = $derived(store?.activeConversation?.messages ?? []);
-  const queued = $derived(store?.activeConversation?.queued ?? []);
+  const threadInView = $derived(store?.activeThreadId ?? store?.activeConversation?.root_thread_id);
+  const queued = $derived((store?.activeConversation?.queued ?? []).filter(
+    (input) => threadInView === undefined || input.thread_id === threadInView,
+  ));
   const hasConversation = $derived(store?.activeConversation != null);
   const stream = $derived(
     streamingStore?.streamFor?.(store?.activeConversation?.id ?? null),
   );
   const streamInView = $derived(
     (stream?.threadId ?? store?.activeConversation?.root_thread_id ?? null) ===
-      (store?.activeThreadId ?? store?.activeConversation?.root_thread_id ?? null),
+      (threadInView ?? null),
   );
   const isStreaming = $derived(streamInView && (stream?.isStreaming ?? streamingStore?.isStreaming ?? false));
   const streamedContent = $derived(streamInView ? (stream?.streamedContent ?? streamingStore?.streamedContent ?? "") : "");
