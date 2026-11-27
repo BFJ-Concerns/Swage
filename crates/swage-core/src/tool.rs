@@ -91,13 +91,12 @@ impl CompactToolReplay {
     }
 
     /// The replay as the model reads it: the envelope without the stored
-    /// delivered flag, inside the delivered-material frame when the flag is
-    /// set.
-    pub fn for_model(mut self) -> String {
+    /// delivered flag, inside `frame` when the flag is set.
+    pub fn for_model(mut self, frame: &crate::DeliveredMaterialFrame) -> String {
         let delivered = std::mem::take(&mut self.delivered);
         let envelope = self.to_stable_json();
         if delivered {
-            crate::frame_delivered_material(&envelope)
+            frame.wrap(&envelope)
         } else {
             envelope
         }

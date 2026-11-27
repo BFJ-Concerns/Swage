@@ -98,11 +98,11 @@ impl Tool for ToolResultReadTool {
             .as_object_mut()
             .expect("truncated_output_value always returns an object");
         // A delivered result read back is the same material its replay
-        // framed, so the part read carries the same frame, whole.
+        // framed, so the part read carries the session's frame, whole.
         if replays_as_delivered_material(&call)
             && let Some(Value::String(output)) = object.get_mut("output")
         {
-            *output = swage_core::frame_delivered_material(output);
+            *output = session_frame(gateway_ctx, ctx).await?.wrap(output);
         }
         object.insert("reference".to_string(), json!(reference));
         object.insert("tool".to_string(), json!(call.tool));
@@ -111,6 +111,24 @@ impl Tool for ToolResultReadTool {
         object.insert("bytes".to_string(), json!(result.len()));
         Ok(value)
     }
+}
+
+/// The delivered-material frame the session's turns serve. A context with no
+/// gateway state to record a draw in serves the authored frame, as a draw
+/// that cannot be recorded does.
+async fn session_frame(
+    gateway_ctx: &crate::tool_executor::GatewayToolContext,
+    ctx: &dyn ToolContext,
+) -> Result<swage_core::DeliveredMaterialFrame, ToolError> {
+    let (Some(state), Ok(session_id)) = (gateway_ctx.app_state(), ctx.session_id().parse()) else {
+        return Ok(swage_core::DeliveredMaterialFrame::authored());
+    };
+    crate::experimentation::select_delivered_material_frame(state, session_id, ctx.turn_id())
+        .await
+        .map_err(|error| ToolError::ExecutionFailed {
+            name: TOOL_RESULT_READ_TOOL.to_owned(),
+            message: error.to_string(),
+        })
 }
 
 /// Whether the call's stored replay marks its result as delivered material.

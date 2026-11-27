@@ -41,7 +41,10 @@ pub fn json_schema_validator(schema: &serde_json::Value) -> Result<jsonschema::V
 // Convenience re-exports
 // ---------------------------------------------------------------------------
 
-pub use delivered_material::frame_delivered_material;
+pub use delivered_material::{
+    AUTHORED_DELIVERED_MATERIAL_CLOSING, AUTHORED_DELIVERED_MATERIAL_OPENING,
+    DeliveredMaterialFrame,
+};
 pub use dispatch::{DispatchContextComposition, validate_context_assembly_name};
 pub use effort::{EffortControl, ResolvedEffort, resolve_effort};
 pub use error::{

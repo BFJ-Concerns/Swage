@@ -2222,7 +2222,7 @@ impl Agent {
                                 is_error,
                                 Some(reference),
                             ),
-                            swage_core::frame_delivered_material(&scanned_result),
+                            self.config.delivered_material_frame.wrap(&scanned_result),
                         )
                     } else {
                         (

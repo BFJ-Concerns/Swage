@@ -11,7 +11,14 @@ pub(super) async fn rebuild_thread_history_messages(
     storage: &dyn swage_storage::store::Storage,
     thread_id: Uuid,
 ) -> Result<Vec<ChatMessage>, GatewayError> {
-    rebuild_thread_history(storage, thread_id, None, Some(&[])).await
+    rebuild_thread_history(
+        storage,
+        thread_id,
+        None,
+        Some(&[]),
+        &swage_core::DeliveredMaterialFrame::authored(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -20,13 +27,21 @@ pub(super) async fn rebuild_thread_history_messages_with_secrets(
     thread_id: Uuid,
     secret_values: &[String],
 ) -> Result<Vec<ChatMessage>, GatewayError> {
-    rebuild_thread_history(storage, thread_id, None, Some(secret_values)).await
+    rebuild_thread_history(
+        storage,
+        thread_id,
+        None,
+        Some(secret_values),
+        &swage_core::DeliveredMaterialFrame::authored(),
+    )
+    .await
 }
 
 pub(super) async fn rebuild_thread_history_messages_with_retrieval(
     state: &AppState,
     thread_id: Uuid,
     retrieval: swage_core::ReplayRetrieval,
+    frame: &swage_core::DeliveredMaterialFrame,
 ) -> Result<Vec<ChatMessage>, GatewayError> {
     let secret_values = match known_secret_values(state).await {
         Ok(values) => Some(values),
@@ -40,6 +55,7 @@ pub(super) async fn rebuild_thread_history_messages_with_retrieval(
         thread_id,
         Some(retrieval),
         secret_values.as_deref(),
+        frame,
     )
     .await
 }
@@ -49,6 +65,7 @@ async fn rebuild_thread_history(
     thread_id: Uuid,
     retrieval: Option<swage_core::ReplayRetrieval>,
     secret_values: Option<&[String]>,
+    frame: &swage_core::DeliveredMaterialFrame,
 ) -> Result<Vec<ChatMessage>, GatewayError> {
     let stored_history = storage.list_messages_by_thread(thread_id).await?;
     let mut rebuilt = Vec::new();
@@ -96,6 +113,7 @@ async fn rebuild_thread_history(
                 &tool_calls,
                 retrieval,
                 secret_values,
+                frame,
             )?);
         }
 
@@ -113,7 +131,7 @@ async fn rebuild_thread_history(
                 // is dropped unless it answers a recorded call. The frame
                 // carries what the role cannot.
                 let text = if message.delivered {
-                    swage_core::frame_delivered_material(&message.content)
+                    frame.wrap(&message.content)
                 } else {
                     message.content
                 };
@@ -131,6 +149,7 @@ async fn rebuild_thread_history(
                 &tool_calls,
                 retrieval,
                 secret_values,
+                frame,
             )?);
         }
     }
@@ -142,13 +161,19 @@ async fn rebuild_thread_history(
 pub(super) fn compact_tool_replay_messages(
     records: &[ToolCallRecord],
 ) -> Result<Vec<ChatMessage>, swage_core::StorageError> {
-    compact_tool_replay_messages_with_retrieval(records, None, Some(&[]))
+    compact_tool_replay_messages_with_retrieval(
+        records,
+        None,
+        Some(&[]),
+        &swage_core::DeliveredMaterialFrame::authored(),
+    )
 }
 
 fn compact_tool_replay_messages_with_retrieval(
     records: &[ToolCallRecord],
     retrieval: Option<swage_core::ReplayRetrieval>,
     secret_values: Option<&[String]>,
+    frame: &swage_core::DeliveredMaterialFrame,
 ) -> Result<Vec<ChatMessage>, swage_core::StorageError> {
     let parent_rounds: HashMap<&str, i32> = records
         .iter()
@@ -187,7 +212,8 @@ fn compact_tool_replay_messages_with_retrieval(
         let mut tool_results = Vec::new();
 
         for record in round_records {
-            let model_result = model_facing_replay(replay_result(record, secret_values), retrieval);
+            let model_result =
+                model_facing_replay(replay_result(record, secret_values), retrieval, frame);
             tool_calls.push(ToolCall {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),
@@ -216,7 +242,11 @@ fn compact_tool_replay_messages_with_retrieval(
 /// — never its shortened preview, which would lose the frame's close. An
 /// approval account before the envelope stays outside the frame, as it is on
 /// the immediate result.
-fn model_facing_replay(stored: String, retrieval: Option<swage_core::ReplayRetrieval>) -> String {
+fn model_facing_replay(
+    stored: String,
+    retrieval: Option<swage_core::ReplayRetrieval>,
+    frame: &swage_core::DeliveredMaterialFrame,
+) -> String {
     let (account, envelope) = match stored.rsplit_once('\n') {
         Some((account, envelope)) => (Some(account), envelope),
         None => (None, stored.as_str()),
@@ -229,7 +259,7 @@ fn model_facing_replay(stored: String, retrieval: Option<swage_core::ReplayRetri
     } else if !replay.delivered {
         return stored;
     }
-    let envelope = replay.for_model();
+    let envelope = replay.for_model(frame);
     match account {
         Some(account) => format!("{account}\n{envelope}"),
         None => envelope,

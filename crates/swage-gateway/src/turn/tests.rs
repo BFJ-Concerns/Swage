@@ -16545,6 +16545,7 @@ async fn session_prompt_variants_are_recorded_at_the_start_of_the_first_turn() {
     for location in [
         crate::experimentation::LOCATION_TASK_PROMPT,
         crate::experimentation::LOCATION_CLOSING_ACCOUNT_REQUEST,
+        crate::experimentation::LOCATION_DELIVERED_MATERIAL_FRAME,
     ] {
         let draws: Vec<_> = events.iter().filter(|e| e.entity_id == location).collect();
         assert_eq!(draws.len(), 1, "{location} must have one session draw");
