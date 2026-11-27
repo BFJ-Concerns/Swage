@@ -54,6 +54,8 @@ pub struct SuccessionRequest<'a> {
     pub history: &'a [ChatMessage],
     /// The agent's shaping instructions for the summary, when it gave any.
     pub focus: Option<&'a str>,
+    /// The upstream model id named by the caller's selected entry.
+    pub model: Option<&'a str>,
     /// The most history messages the successor may keep verbatim, when the
     /// caller's threshold counts messages: the successor is built to fit,
     /// so the runtime's own compactor never runs over it. `None` keeps the
@@ -213,6 +215,7 @@ where
         request.carried,
         &request.history[..summarised],
         request.focus,
+        request.model,
     ))
     .await?;
     successor(&request, summary, THRESHOLD_STRATEGY, tokeniser)
@@ -224,15 +227,19 @@ where
 /// completion to `calls` before interpreting its result.
 pub async fn summarise(
     instructions: &str,
-    carried: &[ChatMessage],
-    history: &[ChatMessage],
-    focus: Option<&str>,
+    request: &SuccessionRequest<'_>,
     provider: &dyn LlmProvider,
     calls: &mut Vec<SuccessionCall>,
 ) -> Result<String, SuccessionError> {
     complete_summary(
         provider,
-        summary_request(instructions, carried, history, focus),
+        summary_request(
+            instructions,
+            request.carried,
+            request.history,
+            request.focus,
+            request.model,
+        ),
         calls,
     )
     .await
@@ -245,8 +252,14 @@ async fn complete_summary(
     request: CompletionRequest,
     calls: &mut Vec<SuccessionCall>,
 ) -> Result<String, SuccessionError> {
+    let model = request.model.clone();
     let response = provider.complete(request).await;
-    let mut call = recorded_call(provider, SuccessionStage::Summary, None, &response);
+    let mut call = recorded_call(
+        provider,
+        SuccessionStage::Summary,
+        model.as_deref(),
+        &response,
+    );
     if let Ok(response) = &response {
         if response.finish_reason == swage_core::FinishReason::Length {
             call.failure_reason = Some(SuccessionError::SummaryCut.to_string());
@@ -469,6 +482,7 @@ fn summary_request(
     carried: &[ChatMessage],
     older: &[ChatMessage],
     focus: Option<&str>,
+    model: Option<&str>,
 ) -> CompletionRequest {
     // Each part sits in its own tags, named as the instruction names them,
     // so that a heading or an instruction inside the conversation cannot be
@@ -489,7 +503,7 @@ fn summary_request(
                 ),
             ),
         ],
-        model: None,
+        model: model.map(str::to_owned),
         max_tokens: None,
         temperature: Some(0.3),
         stop_sequences: None,
@@ -629,6 +643,7 @@ mod tests {
                 carried: &carried,
                 history: &history,
                 focus: Some("keep the open questions"),
+                model: None,
                 retain_at_most: None,
             },
             "Write the notes the caller chose.",
@@ -705,6 +720,7 @@ mod tests {
                 carried: &[],
                 history: &history,
                 focus: None,
+                model: None,
                 retain_at_most: Some(1),
             },
             "The build kept failing on a missing file.".to_string(),
@@ -742,6 +758,7 @@ mod tests {
                 carried: &[],
                 history: &history,
                 focus: None,
+                model: None,
                 retain_at_most: None,
             },
             SUMMARY_INSTRUCTIONS,
@@ -774,6 +791,7 @@ mod tests {
                 carried: &[],
                 history: &history,
                 focus: None,
+                model: None,
                 retain_at_most: None,
             },
             SUMMARY_INSTRUCTIONS,
@@ -795,6 +813,7 @@ mod tests {
                 carried: &[],
                 history: &history,
                 focus: None,
+                model: None,
                 retain_at_most: None,
             },
             SUMMARY_INSTRUCTIONS,
@@ -830,6 +849,7 @@ mod tests {
             carried: &[],
             history,
             focus: None,
+            model: None,
             retain_at_most,
         })
         .expect("history splits")
@@ -923,6 +943,7 @@ mod tests {
             carried: &[],
             history: &history,
             focus: None,
+            model: None,
             retain_at_most: None,
         };
         let succession = successor_after(

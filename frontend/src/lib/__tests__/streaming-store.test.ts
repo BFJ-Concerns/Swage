@@ -1601,7 +1601,11 @@ describe("an undeliverable message beside a turn this tab only reads", () => {
     store.startTurn("question");
     store.handleServerEvent({ type: "error", code: "not_connected", message: "Not connected" });
     expect(store.isStreaming).toBe(false);
-    expect(settleUnansweredRequest).toHaveBeenCalledWith({ turn_state: "failed", tool_calls: [] }, "test-conversation");
+    expect(settleUnansweredRequest).toHaveBeenCalledWith({
+      turn_state: "failed",
+      tool_calls: [],
+      failure_message: "Not connected",
+    }, "test-conversation");
   });
 });
 

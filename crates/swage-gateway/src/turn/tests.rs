@@ -728,14 +728,15 @@ async fn token_threshold_triggers_succession_for_a_turn() {
     let mut config = swage_config::ResolvedConfig::default();
     config.context.compaction_threshold =
         Some(swage_protocol::client::settings::CompactionThresholdConfig::Tokens(600));
-    let (mut state, session_id) =
+    let (state, session_id) =
         make_state_with_config_and_storage(provider_witness_chunks(), config, Arc::clone(&storage))
             .await;
-    state.provider = Arc::new(crate::completion_record::RecordingProvider::new(
-        Arc::clone(&state.provider),
-        Arc::clone(&state.storage),
-        (*state.secret_manager).clone(),
-    ));
+    *state.runtime_provider.write().unwrap() =
+        Arc::new(crate::completion_record::RecordingProvider::new(
+            state.active_provider(),
+            Arc::clone(&state.storage),
+            (*state.secret_manager).clone(),
+        ));
     seed_history(&storage, session_id, 90).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -1189,6 +1190,10 @@ async fn a_turn_whose_walls_changed_is_diagnosed_afresh_on_the_configured_models
     )
     .await;
     let mut config = state.active_config();
+    config.providers.entries.insert(
+        "mock".to_string(),
+        swage_config::ProviderEndpointConfig::default(),
+    );
     config.models.entries.insert(
         "cheap-reader".to_string(),
         swage_config::ModelEndpointConfig {
@@ -15777,7 +15782,7 @@ fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
         },
     );
     let anthropic = swage_provider::anthropic::AnthropicProvider::new("key", "claude-opus-5");
-    let capability = super::effort_capability_for_model(&config, "claude", &anthropic);
+    let capability = super::effort_capability_for_model(&config, "claude", Some(&anthropic));
     assert!(matches!(
         capability,
         swage_core::EffortCapability::Levels {
@@ -15795,14 +15800,14 @@ fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
         .capabilities
         .effort = Some(declared.clone());
     assert_eq!(
-        super::effort_capability_for_model(&config, "claude", &anthropic),
+        super::effort_capability_for_model(&config, "claude", Some(&anthropic)),
         declared,
         "the catalogue's own declaration wins over the adapter's"
     );
 
     let mock = MockProvider::new(vec![]);
     assert_eq!(
-        super::effort_capability_for_model(&config, "unknown", &mock),
+        super::effort_capability_for_model(&config, "unknown", Some(&mock)),
         swage_core::EffortCapability::None
     );
 }

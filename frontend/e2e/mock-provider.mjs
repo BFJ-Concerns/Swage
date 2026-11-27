@@ -7,7 +7,7 @@ function event(response, type, data) {
   response.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-async function textResponse(response, chunks, pause = 30) {
+async function textResponse(response, chunks, pause = 30, stopReason = "end_turn") {
   event(response, "message_start", { type: "message_start", message: { usage: { input_tokens: 4, output_tokens: 0 } } });
   event(response, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
   for (const text of chunks) {
@@ -15,7 +15,7 @@ async function textResponse(response, chunks, pause = 30) {
     await delay(pause);
   }
   event(response, "content_block_stop", { type: "content_block_stop", index: 0 });
-  event(response, "message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: chunks.length } });
+  event(response, "message_delta", { type: "message_delta", delta: { stop_reason: stopReason }, usage: { output_tokens: chunks.length } });
   event(response, "message_stop", { type: "message_stop" });
   response.end();
 }
@@ -29,11 +29,17 @@ function hasSuccessfulApprovalResult(messages) {
       && block.content.includes("approval-ok")));
 }
 
-function definitionToolResponse(response, id, input) {
+function toolResponse(response, id, name, input, text) {
   event(response, "message_start", { type: "message_start", message: { usage: { input_tokens: 4, output_tokens: 0 } } });
-  event(response, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id, name: "agent_definition", input: {} } });
-  event(response, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } });
-  event(response, "content_block_stop", { type: "content_block_stop", index: 0 });
+  const index = text ? 1 : 0;
+  if (text) {
+    event(response, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    event(response, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
+    event(response, "content_block_stop", { type: "content_block_stop", index: 0 });
+  }
+  event(response, "content_block_start", { type: "content_block_start", index, content_block: { type: "tool_use", id, name, input: {} } });
+  event(response, "content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } });
+  event(response, "content_block_stop", { type: "content_block_stop", index });
   event(response, "message_delta", { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } });
   event(response, "message_stop", { type: "message_stop" });
   response.end();
@@ -58,8 +64,11 @@ async function handle(request, response) {
       })}\n`,
     );
   }
-  if (JSON.stringify(body.messages).includes("controlled provider failure")) {
-    response.writeHead(503, { "content-type": "application/json" });
+  const lastMessage = JSON.stringify(body.messages.at(-1));
+  if (/controlled provider failure|failed batch second/.test(lastMessage)) {
+    // The failed batch exercises the transcript after settlement.
+    const status = lastMessage.includes("failed batch second") ? 400 : 503;
+    response.writeHead(status, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "Controlled provider failure" } }));
     return;
   }
@@ -72,30 +81,39 @@ async function handle(request, response) {
     : lastContent?.filter((block) => block.type === "text").map((block) => block.text).join("");
   const definitionResult = Array.isArray(lastContent) && lastContent.find((block) =>
     block.type === "tool_result" && ["create-e2e-agent", "refuse-e2e-agent"].includes(block.tool_use_id));
-  if (definitionResult) {
+  if (lastText === "accepted before disconnect") {
+    await textResponse(response, ["The accepted request finished."], 3500);
+  } else if (lastText === "hold for the batch") {
+    await textResponse(response, ["Holding the current request."], 5000);
+  } else if (lastText === "limit this turn") {
+    await textResponse(response, ["Partial response at the output limit."], 30, "max_tokens");
+  } else if (lastText === "refuse this turn") {
+    await textResponse(response, ["Recorded refusal from the provider."], 30, "refusal");
+  } else if (lastText === "wait for an incomplete child") {
+    toolResponse(response, "wait-child", "delegate", { target_agent: "gateway", task: "child reaches output limit" });
+  } else if (lastText?.includes("child reaches output limit")) {
+    await textResponse(response, ["Child response cut short."], 30, "max_tokens");
+  } else if (definitionResult) {
     await textResponse(response, ["Definition tool returned to the provider."]);
   } else if (lastText === "Create a preferred agent") {
-    definitionToolResponse(response, "create-e2e-agent", {
+    toolResponse(response, "create-e2e-agent", "agent_definition", {
       action: "create", id: "preferred-agent", display_name: "Preferred agent",
       description: "A fixture for model selection", instructions: "Answer plainly.",
       model_id: "preferred-model",
     });
   } else if (lastText === "Set an unknown preferred model") {
-    definitionToolResponse(response, "refuse-e2e-agent", {
+    toolResponse(response, "refuse-e2e-agent", "agent_definition", {
       action: "update", id: "preferred-agent", model_id: "unknown-model",
     });
   } else if (hasSuccessfulApprovalResult(body.messages)) {
     await textResponse(response, ["Approval ", "completed through the gateway."]);
   } else if (serialised.includes("tool_result")) {
     await textResponse(response, ["Approval did not execute the tool."]);
-  } else if (serialised.includes("approve a tool")) {
-    event(response, "message_start", { type: "message_start", message: { usage: { input_tokens: 4, output_tokens: 0 } } });
-    event(response, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "e2e-tool-call", name: "shell", input: {} } });
-    event(response, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"command\":\"printf approval-ok\"}" } });
-    event(response, "content_block_stop", { type: "content_block_stop", index: 0 });
-    event(response, "message_delta", { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } });
-    event(response, "message_stop", { type: "message_stop" });
-    response.end();
+  } else if (serialised.includes("approve a tool") || lastText === "partial then approval") {
+    toolResponse(
+      response, "e2e-tool-call", "shell", { command: "printf approval-ok" },
+      lastText === "partial then approval" ? "Partial response before approval." : undefined,
+    );
   } else if (serialised.includes("render code and links")) {
     await textResponse(response, [[
       "Fixture **bold** <em>markup</em>",

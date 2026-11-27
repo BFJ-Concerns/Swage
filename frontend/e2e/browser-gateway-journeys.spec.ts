@@ -4,7 +4,7 @@ import { access, readFile, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
 import { makeScratchDir } from "./scratch-root.mjs";
 import { unusedPorts } from "./unused-ports.mjs";
 
@@ -301,11 +301,161 @@ test("reconnects mid-stream and restores the completed conversation", async ({ p
   });
   await expect(page.getByText("Reconnecting")).toBeVisible();
   await expect(page.getByText("Reconnecting")).not.toBeVisible();
-  await expect(page.getByText(
+  await expect(page.getByLabel("Assistant message")).toContainText(
     "First half before disconnect. Second half after reconnect.",
-    { exact: true },
-  )).toBeVisible();
+  );
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+});
+
+test("keeps an accepted message sent across a disconnect before the first server event", async ({ page }) => {
+  const prompt = "accepted before disconnect";
+  let openingSocket: WebSocketRoute | undefined;
+  await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
+    const gateway = socket.connectToServer();
+    if (openingSocket) return;
+    openingSocket = gateway;
+    // The request reaches the gateway, but this connection loses its replies.
+    gateway.onMessage(() => {});
+  });
+  await send(page, prompt);
+  await expect.poll(async () => (await providerRequests()).some((request) => request.prompt === prompt)).toBe(true);
+  await openingSocket!.close({ code: 4000 });
+  await expect(page.getByText("Reconnecting")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Assistant message")).toContainText("The accepted request finished.");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+});
+
+test("restores an unrecorded message and lets the person retry after reconnect", async ({ page }) => {
+  const prompt = "never reaches the gateway";
+  let dropped = false;
+  await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
+    const gateway = socket.connectToServer();
+    if (dropped) return;
+    socket.onMessage((message) => {
+      if (JSON.parse(String(message)).type === "send_message") {
+        dropped = true;
+        void socket.close({ code: 4000 });
+      } else {
+        gateway.send(message);
+      }
+    });
+  });
+
+  await send(page, prompt);
+  await expect(page.getByText("Reconnecting")).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("The gateway has no record of this message after reconnecting.");
+  await expect(page.getByLabel("Your message")).toContainText(prompt);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  expect((await providerRequests()).filter((request) => request.prompt === prompt)).toHaveLength(0);
+
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.getByLabel("Assistant message")).toContainText("Streamed response reached the browser.");
+  await expect.poll(async () => (await providerRequests()).filter((request) => request.prompt === prompt)).toHaveLength(1);
+});
+
+test("stops generating when reconnect recovers an output-limited reply", async ({ page }) => {
+  await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
+    const gateway = socket.connectToServer();
+    gateway.onMessage((message) => {
+      if (JSON.parse(String(message)).type === "turn_complete") {
+        void socket.close({ code: 4000 });
+      } else {
+        socket.send(message);
+      }
+    });
+  });
+  await send(page, "limit this turn");
+  await expect(page.getByText("Reconnecting")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  const reply = page.getByLabel("Assistant message");
+  await expect(reply).toContainText("Partial response at the output limit.");
+  await expect(reply).toContainText("Response incomplete");
+});
+
+test("clears a stopped approval and keeps the tool under its partial reply", async ({ page, context }) => {
+  await send(page, "partial then approval");
+  const approval = page.getByRole("dialog", { name: "Approval required" });
+  await expect(approval).toBeVisible();
+
+  const other = await context.newPage();
+  try {
+    await other.goto(page.url());
+    await other.getByRole("button", { name: "Stop", exact: true }).click();
+    await expect(approval).toBeHidden();
+    const reply = page.getByLabel("Assistant message").filter({ hasText: "Partial response before approval." });
+    await expect(reply).toContainText("Response cancelled");
+    await expect(reply).toContainText("tool call was cancelled when its turn was stopped");
+    await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+    await page.reload();
+    await expect(reply).toContainText("Response cancelled");
+    await expect(reply).toContainText("tool call was cancelled when its turn was stopped");
+  } finally {
+    await other.close();
+  }
+});
+
+test("clears the approval when reconnect recovers a stopped request with no reply", async ({ page, context }) => {
+  let openingSocket: WebSocketRoute | undefined;
+  await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
+    const gateway = socket.connectToServer();
+    openingSocket ??= gateway;
+  });
+  await send(page, "approve a tool");
+  const approval = page.getByRole("dialog", { name: "Approval required" });
+  await expect(approval).toBeVisible();
+
+  const other = await context.newPage();
+  try {
+    await other.goto(page.url());
+    const stop = other.getByRole("button", { name: "Stop", exact: true });
+    await expect(stop).toBeVisible();
+    await openingSocket!.close({ code: 4000 });
+    await stop.click();
+    await expect(page.getByText("Cancelled before a reply")).toBeVisible();
+    await expect(approval).toBeHidden();
+  } finally {
+    await other.close();
+  }
+});
+
+test("offers one Retry when the provider fails before sending a reply", async ({ page }) => {
+  await send(page, "controlled provider failure");
+  await expect(page.getByRole("alert")).toContainText("Controlled provider failure");
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(1);
+});
+
+test("offers one Retry on the recorded refusal account", async ({ page }) => {
+  await send(page, "refuse this turn");
+  await expect(page.getByRole("button", { name: "Retry request", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: /^Retry(?: request)?$/ })).toHaveCount(1);
+});
+
+test("retries the complete failed batch before and after reload", async ({ page }) => {
+  await send(page, "hold for the batch");
+  await expect(page.getByLabel("Assistant message")).toContainText("Holding the current request.");
+  const composer = page.getByRole("textbox", { name: "Message" });
+  const inputs = ["failed batch first", "failed batch second"];
+  for (const input of inputs) {
+    await composer.fill(input);
+    await composer.press("Enter");
+    await expect(page.getByLabel("Queued message").getByText(input, { exact: true })).toBeVisible();
+  }
+
+  const retry = page.getByRole("button", { name: "Retry", exact: true });
+  await expect(retry).toHaveCount(1);
+  await page.reload();
+  await expect(retry).toHaveCount(1);
+  await retry.click();
+  await expect(page.getByLabel("Your message").last()).toHaveText(/failed batch first\s+failed batch second/);
+});
+
+test("reports the waited child's incomplete reply live and after reload", async ({ page }) => {
+  await send(page, "wait for an incomplete child");
+  await expect(page.getByText("Child response incomplete", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText("Child response incomplete", { exact: true })).toBeVisible();
 });
 
 test("approves a pending tool call through the rendered UI", async ({ page }) => {
