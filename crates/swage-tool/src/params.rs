@@ -1,4 +1,4 @@
-//! Parameter extraction and redaction utilities.
+//! Parameter extraction utilities.
 
 use serde_json::Value;
 use swage_core::ToolError;

@@ -21,6 +21,23 @@ pub fn render_message_for_model_context(message: &ChatMessage) -> String {
     }
 }
 
+/// Messages as labelled prose for a reader outside the conversation: each
+/// opens with who it is from, with tool calls and their results rendered as
+/// the model context renders them.
+pub fn transcript_for_model_context(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .map(|message| {
+            format!(
+                "[{}] {}",
+                role_label_for_model_context(message.role()),
+                render_message_for_model_context(message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 pub fn role_label_for_model_context(role: Role) -> &'static str {
     match role {
         Role::System => "system",

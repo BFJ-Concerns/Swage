@@ -9402,7 +9402,7 @@ async fn make_state_offering_memory_read(
     let mut config = swage_config::ResolvedConfig::default();
     config.tools.permissions.allow = allow.iter().map(|tool| tool.to_string()).collect();
     config.tools.permissions.deny = deny.iter().map(|tool| tool.to_string()).collect();
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -9461,7 +9461,7 @@ async fn scheduled_memory_request(with_read_tool: bool) -> (String, bool) {
     } else {
         vec!["file_read", "file_list", "file_write", "file_edit"]
     };
-    let (mut state, session_id, captured) = make_state_offering_memory_read(
+    let (state, session_id, captured) = make_state_offering_memory_read(
         &allow,
         &[],
         None,
@@ -9470,13 +9470,8 @@ async fn scheduled_memory_request(with_read_tool: bool) -> (String, bool) {
         }),
     )
     .await;
-    let root = tempfile::Builder::new()
-        .prefix("scheduled-memory-")
-        .tempdir_in(&state.config_root)
-        .expect("isolated memory root inside the test home");
-    state.config_root = root.path().to_path_buf();
     crate::memory::write_entry(
-        root.path(),
+        &state.config_root,
         &ScopeLocation::General,
         &crate::memory::MemoryReference::parse("general/planning").unwrap(),
         "The operator plans the following week on Friday.",
@@ -15792,7 +15787,7 @@ async fn process_turn_carries_the_declared_output_limit_and_records_its_source()
             ..Default::default()
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -23784,7 +23779,7 @@ async fn delegation_bounds_state(
         .await
         .unwrap();
     let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(provider),
@@ -24203,15 +24198,7 @@ async fn detached_delegation_cycle_honours_the_depth_bound() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delegated_child_effort_uses_selected_provider() {
-    let _home = SwageHomeGuard::isolate();
     let (url, bodies) = spawn_rejecting_capture_endpoint("/v1/chat/completions").await;
-    let agent_dir = swage_core::ScopeLocation::General.agent_dir(_home.path(), "a");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(
-        agent_dir.join("config.toml"),
-        format!("[providers.entries.second]\nprotocol = \"openai\"\nbase_url = {url:?}\n"),
-    )
-    .unwrap();
     let mut config = swage_config::ResolvedConfig::default();
     config.sandbox.enabled = false;
     config.models.default = "parent".into();
@@ -24244,18 +24231,25 @@ async fn delegated_child_effort_uses_selected_provider() {
         );
     }
     config.providers.default = "parent".into();
-    std::fs::write(
-        _home.path().join("config.toml"),
-        toml::to_string(&swage_config::PartialConfig::from(config.clone())).unwrap(),
-    )
-    .unwrap();
     let DelegationBoundsFixture {
         state,
         storage,
         topic,
         parent_turn,
         ..
-    } = delegation_bounds_state(vec![], config).await;
+    } = delegation_bounds_state(vec![], config.clone()).await;
+    let agent_dir = swage_core::ScopeLocation::General.agent_dir(&state.config_root, "a");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("config.toml"),
+        format!("[providers.entries.second]\nprotocol = \"openai\"\nbase_url = {url:?}\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        state.config_root.join("config.toml"),
+        toml::to_string(&swage_config::PartialConfig::from(config)).unwrap(),
+    )
+    .unwrap();
     storage
         .upsert_task_definition(swage_storage::NewTaskDefinition {
             id: "second-provider".into(),
@@ -25098,7 +25092,7 @@ async fn image_scheme_refusals_are_audited_before_returning_without_a_provider_r
     let (_, session_id) =
         make_state_with_config_and_storage(vec![], vision_capable_config(), Arc::clone(&storage))
             .await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
