@@ -19,7 +19,6 @@ use serde_json::Value;
 use swage_core::ToolError;
 use swage_plugin::{HostCallFailure, InvocationContext, PluginError, PluginHost, ToolDeclaration};
 use swage_python::NestedToolHost;
-use swage_storage::model::NewAuditEvent;
 use swage_tool::context::{ToolContext, serialise_tool_context};
 use uuid::Uuid;
 
@@ -159,31 +158,15 @@ impl Tool for PluginTool {
         match outcome {
             Ok(value) => Ok(value),
             Err(PluginError::Terminated(termination)) => {
-                let session_id = ctx.session_id().parse::<Uuid>().ok();
-                if let Err(error) = gateway_ctx
-                    .storage()
-                    .create_audit_event(NewAuditEvent {
-                        id: Uuid::new_v4().to_string(),
-                        session_id,
-                        entity_kind: "plugin".to_owned(),
-                        entity_id: self.plugin.clone(),
-                        event_kind: "plugin_terminated".to_owned(),
-                        summary: format!(
-                            "Plugin {} was terminated serving {}: {}",
-                            self.plugin,
-                            self.name(),
-                            termination.reason()
-                        ),
-                        metadata: serde_json::json!({
-                            "reason": termination.reason(),
-                            "tool": self.name(),
-                            "call_id": call_id,
-                        }),
-                    })
-                    .await
-                {
-                    tracing::warn!(plugin = %self.plugin, %error, "plugin termination could not be recorded");
-                }
+                super::record_termination(
+                    gateway_ctx.storage().as_ref(),
+                    ctx.session_id().parse::<Uuid>().ok(),
+                    &self.plugin,
+                    self.name(),
+                    termination.reason(),
+                    serde_json::json!({ "tool": self.name(), "call_id": call_id }),
+                )
+                .await;
                 Err(failed(format!(
                     "{termination}; the plugin starts afresh on its next call"
                 )))

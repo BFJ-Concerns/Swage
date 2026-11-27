@@ -1105,8 +1105,9 @@ second argument carries the session, agent, call id and working directory.
 A call ends when the isolate is idle, not when the handler's promise
 settles: work a handler starts and does not await still completes inside
 that call, and a failure in it is that call's failure. An isolate that
-crosses a limit is terminated, the termination recorded, and the plugin
-starts afresh on its next call. The limits are the manifest's `[limits]`:
+crosses a limit is terminated, the termination recorded as
+`plugin_terminated` with what it was serving — a tool, a slot or a hook
+point — and the plugin starts afresh on its next call. The limits are the manifest's `[limits]`:
 `heap_mib` (64 by default, and at least 4, the least the engine starts in)
 and `continuous_execution_secs` (5 by default).
 

@@ -101,7 +101,10 @@ pub(super) async fn compose(
         tokio::select! {
             answer = &mut invocation => return answer
                 .map(|output| (output, work))
-                .map_err(|error| format!("{}: {error}", slot.plugin)),
+                .map_err(|error| {
+                    slot.note_failure("the context_program slot", &error);
+                    format!("{}: {error}", slot.plugin)
+                }),
             Some(request) = receiver.recv() => {
                 let result = (|| {
                     let operation: ContextOperation = serde_json::from_value(request.value)

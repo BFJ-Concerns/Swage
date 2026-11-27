@@ -868,6 +868,35 @@ impl PluginService {
     }
 }
 
+/// Record that a plugin's isolate was terminated — at its heap or time
+/// limit — while serving `serving` (a tool, a slot or a hook point), so the
+/// audit trail has it whichever door the plugin was entered by.
+pub(crate) async fn record_termination(
+    storage: &dyn swage_storage::store::Storage,
+    session_id: Option<Uuid>,
+    plugin: &str,
+    serving: &str,
+    reason: &str,
+    mut detail: serde_json::Value,
+) {
+    detail["reason"] = serde_json::Value::from(reason);
+    detail["serving"] = serde_json::Value::from(serving);
+    if let Err(error) = storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id,
+            entity_kind: "plugin".to_owned(),
+            entity_id: plugin.to_owned(),
+            event_kind: "plugin_terminated".to_owned(),
+            summary: format!("Plugin {plugin} was terminated serving {serving}: {reason}"),
+            metadata: detail,
+        })
+        .await
+    {
+        tracing::warn!(plugin, %error, "plugin termination could not be recorded");
+    }
+}
+
 /// The tools the live dispatcher holds that no plugin provides: the
 /// built-ins this host registered, whose names a package cannot take.
 pub(crate) fn built_in_tool_names(state: &AppState) -> Vec<String> {

@@ -21,7 +21,7 @@ use swage_context::report::AssemblyOutput;
 use swage_context::succession::SuccessionError;
 use swage_context::tokeniser::Tokeniser;
 use swage_core::{ChatMessage, CompletionRequest, Role};
-use swage_plugin::{HostCallFailure, InvocationContext, PluginHost, PluginRuntime};
+use swage_plugin::{HostCallFailure, InvocationContext, PluginError, PluginHost, PluginRuntime};
 use swage_protocol::client::context::{SuccessionCall, SuccessionStage};
 use swage_protocol::client::turn_graph::{HookAttachment, HookMode, HookPoint, TurnGraph};
 use swage_storage::model::NewAuditEvent;
@@ -233,7 +233,14 @@ pub struct PluginSlot {
     pub(super) runtime: Arc<PluginRuntime>,
     pub(super) host: Arc<dyn PluginHost>,
     pub(super) context: InvocationContext,
+    /// Who records a termination of the isolate while it serves: given
+    /// what it was serving and the reason.
+    terminations: Option<TerminationRecorder>,
 }
+
+/// Records that a slot's isolate was terminated: what it was serving, and
+/// why.
+pub type TerminationRecorder = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// What a hook decided about an event.
 #[derive(Debug, Clone, PartialEq)]
@@ -255,6 +262,22 @@ impl PluginSlot {
             runtime,
             host,
             context,
+            terminations: None,
+        }
+    }
+
+    /// This slot, with each termination of its isolate recorded by
+    /// `recorder`.
+    pub fn recording_terminations(mut self, recorder: TerminationRecorder) -> Self {
+        self.terminations = Some(recorder);
+        self
+    }
+
+    /// Note a failure of the isolate serving `serving`: a termination is
+    /// recorded; any other failure is the caller's to report.
+    pub(super) fn note_failure(&self, serving: &str, error: &PluginError) {
+        if let (PluginError::Terminated(termination), Some(record)) = (error, &self.terminations) {
+            record(serving, termination.reason());
         }
     }
 
@@ -300,8 +323,10 @@ impl PluginSlot {
             .collect();
         let cut = made.iter().any(|call| call.failure_reason.is_some());
         calls.extend(made);
-        let output = output
-            .map_err(|error| SuccessionError::Summariser(format!("{}: {error}", self.plugin)))?;
+        let output = output.map_err(|error| {
+            self.note_failure("the succession slot", &error);
+            SuccessionError::Summariser(format!("{}: {error}", self.plugin))
+        })?;
         // Notes cut at the output limit stop mid-account, and nothing in
         // them says so: they are not handed on as though they were whole.
         if cut {
@@ -522,6 +547,7 @@ impl PluginSlot {
         {
             Ok(answer) => answer,
             Err(error) => {
+                self.note_failure(&format!("the {point} hook"), &error);
                 tracing::warn!(plugin = %self.plugin, point, %error, "plugin hook failed; the event continues");
                 return HookAction::Continue;
             }
@@ -899,16 +925,39 @@ pub fn slot_for_plugin(
     topic_id: Option<Uuid>,
 ) -> Result<PluginSlot, String> {
     match state.plugins.execution_of(plugin, topic_id) {
-        Some(crate::plugin::Execution::Isolate(runtime)) => Ok(PluginSlot::new(
-            plugin.to_owned(),
-            runtime,
-            Arc::new(SlotHost::new(
+        Some(crate::plugin::Execution::Isolate(runtime)) => {
+            let session_id = context.session_id.parse::<Uuid>().ok();
+            let storage = state.storage.clone();
+            let name = plugin.to_owned();
+            let recorder: TerminationRecorder = Arc::new(move |serving: &str, reason: &str| {
+                let (storage, name, serving, reason) = (
+                    storage.clone(),
+                    name.clone(),
+                    serving.to_owned(),
+                    reason.to_owned(),
+                );
+                // A slot can fail on the turn's own thread (the context
+                // program runs there), so the write goes to the runtime.
+                tokio::spawn(async move {
+                    super::record_termination(
+                        storage.as_ref(),
+                        session_id,
+                        &name,
+                        &serving,
+                        &reason,
+                        serde_json::json!({}),
+                    )
+                    .await;
+                });
+            });
+            Ok(PluginSlot::new(
                 plugin.to_owned(),
-                state.clone(),
-                context.session_id.parse::<Uuid>().ok(),
-            )),
-            context.clone(),
-        )),
+                runtime,
+                Arc::new(SlotHost::new(plugin.to_owned(), state.clone(), session_id)),
+                context.clone(),
+            )
+            .recording_terminations(recorder))
+        }
         Some(crate::plugin::Execution::Process(_)) => {
             let reason =
                 format!("plugin '{plugin}' runs as a process, which cannot fill a slot or hook");
@@ -1072,6 +1121,32 @@ mod tests {
         ) -> Result<Value, swage_core::ToolError> {
             Ok(json!({ "ran": self.0, "with": params }))
         }
+    }
+
+    /// A hook that runs past its time limit is terminated, the event
+    /// continues, and the termination is recorded with the point it served.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hook_terminated_at_its_limit_is_recorded() {
+        let hook = slot(
+            "spinner",
+            "[[provides.hooks]]\npoint = \"turn_start\"\nmode = \"observe\"\n[limits]\ncontinuous_execution_secs = 1",
+            r#"swage.provide.hook("turn_start", () => { while (true) {} });"#,
+            Arc::new(SummarisingHost::default()),
+        )
+        .await;
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&recorded);
+        let hook = hook.recording_terminations(Arc::new(move |serving: &str, reason: &str| {
+            sink.lock()
+                .unwrap()
+                .push((serving.to_owned(), reason.to_owned()));
+        }));
+        let action = hook.hook("turn_start", HookMode::Observe, json!({})).await;
+        assert_eq!(action, HookAction::Continue);
+        assert_eq!(
+            recorded.lock().unwrap().clone(),
+            vec![("the turn_start hook".to_owned(), "time_limit".to_owned())]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
