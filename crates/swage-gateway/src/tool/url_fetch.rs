@@ -551,7 +551,7 @@ pub(crate) async fn ensure_url_target_is_safe(
     tool_name: &str,
 ) -> Result<(), ToolError> {
     let host = parsed_url
-        .host_str()
+        .host()
         .ok_or_else(|| ToolError::InvalidParameters {
             name: tool_name.to_owned(),
             message: "URL must include a host".to_owned(),
@@ -564,15 +564,18 @@ pub(crate) async fn ensure_url_target_is_safe(
             message: "URL must include a recognised port".to_owned(),
         })?;
 
+    // An address literal is checked as written; only a name is looked up.
+    let host = match host {
+        url::Host::Ipv4(ip) => return ensure_public_ip(IpAddr::V4(ip), tool_name),
+        url::Host::Ipv6(ip) => return ensure_public_ip(IpAddr::V6(ip), tool_name),
+        url::Host::Domain(host) => host,
+    };
+
     if is_blocked_hostname(host) {
         return Err(ToolError::ExecutionFailed {
             name: tool_name.to_owned(),
             message: format!("Blocked private or metadata destination: {host}"),
         });
-    }
-
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return ensure_public_ip(ip, tool_name);
     }
 
     let resolved = tokio::net::lookup_host((host, port))
@@ -631,7 +634,12 @@ fn ensure_connected_peer_is_safe(
 fn is_private_or_metadata_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_private_or_metadata_ipv4(ip),
-        IpAddr::V6(ip) => is_private_or_metadata_ipv6(ip),
+        // An IPv4-mapped address (`::ffff:a.b.c.d`) reaches the IPv4 host it
+        // carries, so it is judged as that host.
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+            Some(ip) => is_private_or_metadata_ipv4(ip),
+            None => is_private_or_metadata_ipv6(ip),
+        },
     }
 }
 
@@ -732,6 +740,39 @@ mod tests {
             "{message}"
         );
         assert_eq!(message.matches("url_fetch").count(), 1, "{message}");
+    }
+
+    #[tokio::test]
+    async fn ipv6_literals_are_judged_by_the_address_they_reach() {
+        let public = "http://[2606:4700:4700::1111]/".parse().unwrap();
+        ensure_url_target_is_safe(&public, "url_fetch")
+            .await
+            .expect("a public IPv6 literal is fetched");
+
+        let from: reqwest::Url = "https://example.com/old/page".parse().unwrap();
+        for mapped in [
+            "http://[::ffff:127.0.0.1]:8080/",
+            "http://[::ffff:10.0.0.1]/",
+            "http://[::ffff:169.254.169.254]/latest/meta-data/",
+        ] {
+            let target: reqwest::Url = mapped.parse().unwrap();
+            for error in [
+                ensure_url_target_is_safe(&target, "url_fetch").await,
+                ensure_redirect_target_is_safe(&from, &target, "url_fetch").await,
+            ]
+            .map(Result::unwrap_err)
+            {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("Blocked private or metadata destination"),
+                    "{mapped}: {error}"
+                );
+            }
+        }
+
+        let mapped_loopback = SocketAddr::from((Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 80));
+        assert!(ensure_connected_peer_is_safe(Some(mapped_loopback), "url_fetch").is_err());
     }
 
     #[tokio::test]
