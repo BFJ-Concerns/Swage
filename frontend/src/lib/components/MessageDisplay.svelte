@@ -236,7 +236,11 @@
   const streamedContent = $derived(streamInView ? (stream?.streamedContent ?? streamingStore?.streamedContent ?? "") : "");
   const turnError = $derived(streamInView ? (stream?.turnError ?? streamingStore?.turnError ?? null) : null);
   const providerRetry = $derived(streamInView ? (stream?.providerRetry ?? streamingStore?.providerRetry ?? null) : null);
-  const recordedFailure = $derived(messages.at(-1)?.failure_message === turnError?.message);
+  const recordedFailure = $derived(
+    messages.at(-1)?.failure_message === turnError?.message ||
+    (turnError?.code === "provider_refused" &&
+      messages.at(-1)?.origin === "platform" && messages.at(-1)?.turn_state === "refused"),
+  );
   const liveInterruption = $derived(turnError?.code === "gateway_shutdown" || turnError?.code === "approval_timeout");
   function errorSummary(detail: string, model?: string | null, interrupted = false): string {
     if (interrupted) return detail;
@@ -277,10 +281,14 @@
 
   // A turn that ended without a reply carries its account — state, tool
   // calls, failure explanation — on its request, since no assistant message
-  // exists to hold it.
+  // exists to hold it. The last input carries the account for a batch.
+  function isLastTurnMessage(message: (typeof messages)[number]): boolean {
+    return !message.turn_id || messages.findLast((other) => other.turn_id === message.turn_id) === message;
+  }
+
   function endedWithoutReply(message: (typeof messages)[number]): boolean {
-    if (!isPersonsMessage(message)) return false;
     if (message.turn_state !== "failed" && message.turn_state !== "interrupted" && message.turn_state !== "cancelled") return false;
+    if (!isPersonsMessage(message) || !isLastTurnMessage(message)) return false;
     if (!message.turn_id) {
       // A request settled live, before the gateway's record names its turn:
       // a reply would follow it directly.
@@ -299,19 +307,22 @@
       content: requests.map((request) => request.content).join("\n\n"),
       attachments: requests.flatMap((request) => request.attachments ?? []),
     };
-    return messages.slice(0, messages.indexOf(message)).reverse()
-      .find((candidate) => isPersonsMessage(candidate) && !candidate.turn_id) ?? null;
+    const index = messages.indexOf(message);
+    let previous = messages[index - 1];
+    // A live refusal can carry partial text before its recorded account.
+    if (message.turn_state === "refused" && previous?.role === "assistant" &&
+        previous.turn_state === "refused" && !previous.id && !previous.turn_id) {
+      previous = messages[index - 2];
+    }
+    return previous && isPersonsMessage(previous) && !previous.id && !previous.turn_id ? previous : null;
   }
 
   // What Retry resends for a failed turn, shown on the message holding the
   // turn's account: the request itself when no reply came, or — under a
   // partial reply — the request that partial reply answered.
   function retryRequest(message: (typeof messages)[number]): ReturnType<typeof turnRequest> {
-    if (message.turn_state !== "failed") return null;
-    if (endedWithoutReply(message)) return message;
-    if ((message.role !== "assistant" && message.origin !== "platform") || !message.turn_id) return null;
-    const turnMessages = messages.filter((other) => other.turn_id === message.turn_id);
-    if (turnMessages[turnMessages.length - 1] !== message) return null;
+    if (message.turn_state !== "failed" || !isLastTurnMessage(message)) return null;
+    if (endedWithoutReply(message) && !message.turn_id) return message;
     return turnRequest(message);
   }
 
@@ -323,11 +334,6 @@
       streamingStore?.startTurn(request.content);
     }
   }
-
-  // The request a live failure answered: the latest message the person sent.
-  const lastPersonsMessage = $derived(
-    [...messages].reverse().find((message) => isPersonsMessage(message)) ?? null,
-  );
 
   function shouldShowModel(role: "user" | "assistant"): boolean {
     return (
@@ -469,11 +475,13 @@
               {/each}
             </div>
           {/if}
-          <p class="interrupted-notice">
-            {message.turn_state === "cancelled" ? "Cancelled before a reply" : message.turn_state === "interrupted" ? "↩ Interrupted before a reply" : "⚠ No reply — the turn failed"}
-          </p>
+          {#if message.turn_state !== "failed" || !message.failure_message}
+            <p class="interrupted-notice">
+              {message.turn_state === "cancelled" ? "Cancelled before a reply" : message.turn_state === "interrupted" ? "↩ Interrupted before a reply" : "⚠ No reply — the turn failed"}
+            </p>
+          {/if}
         {/if}
-        {#if message.failure_message}
+        {#if message.failure_message && isLastTurnMessage(message)}
           {@render failureNotice(message.failure_message, message.model, retryRequest(message), message.turn_state === "interrupted")}
         {/if}
         {#if !message.failure_message && retryRequest(message) !== null && !isStreaming}
@@ -565,7 +573,7 @@
 
     <!-- ---- Turn error: shown inline after any partial response ---- -->
     {#if turnError && !recordedFailure}
-      {@render failureNotice(turnError.message, undefined, lastPersonsMessage ?? null, liveInterruption)}
+      {@render failureNotice(turnError.message, undefined, null, liveInterruption)}
     {/if}
   {/if}
 </div>
@@ -588,7 +596,12 @@
     <span class="error-icon" aria-hidden="true">⚠</span>
     <div class="error-message">
       <p>{errorSummary(detail, model, interrupted)}</p>
-      <div class="error-actions"><button class="branch-link" disabled={isStreaming || request === null} onclick={() => request !== null && retry(request)}>Retry</button><a href="/settings/providers">Provider settings</a></div>
+      <div class="error-actions">
+        {#if request !== null}
+          <button class="branch-link" disabled={isStreaming} onclick={() => retry(request)}>Retry</button>
+        {/if}
+        <a href="/settings/providers">Provider settings</a>
+      </div>
       <details><summary>Technical details</summary><pre>{detail}</pre></details>
     </div>
   </div>

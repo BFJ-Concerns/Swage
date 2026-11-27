@@ -59,6 +59,7 @@ export interface ConversationStore {
     thread_id?: string;
     turn_id?: string;
     tool_calls?: MessageView["tool_calls"];
+    failure_message?: string;
   }, conversationId?: string | null): void;
   /**
    * Install a message the gateway recorded and announced — a row nobody at
@@ -78,6 +79,8 @@ export interface ConversationStore {
     settlement: {
       turn_state: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled">;
       tool_calls: MessageView["tool_calls"];
+      turn_id?: string;
+      failure_message?: string;
     },
     conversationId?: string | null,
   ): void;
@@ -187,6 +190,7 @@ export function createConversationStore(): ConversationStore {
       thread_id?: string;
       turn_id?: string;
       tool_calls?: MessageView["tool_calls"];
+      failure_message?: string;
     },
     conversationId?: string | null,
     queuedSource?: QueuedSource,
@@ -222,6 +226,7 @@ export function createConversationStore(): ConversationStore {
       ...(threadId === undefined ? {} : { thread_id: threadId }),
       ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
       ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
+      ...(message.failure_message === undefined ? {} : { failure_message: message.failure_message }),
     };
 
     const messages = activeConversation.messages.filter((existing) =>
@@ -399,6 +404,7 @@ export function createConversationStore(): ConversationStore {
         ...(message.thread_id === undefined ? {} : { thread_id: message.thread_id }),
         ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
         ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
+        ...(message.failure_message === undefined ? {} : { failure_message: message.failure_message }),
       }, conversationId);
     },
 
@@ -406,13 +412,16 @@ export function createConversationStore(): ConversationStore {
       const activeConversation = get(activeConversationStore);
       if (!activeConversation || (conversationId && activeConversation.id !== conversationId)) return;
       const index = activeConversation.messages.findLastIndex(
-        (message) => message.role === "user" && ["pending", "processing", "delegating", "awaiting_approval"].includes(message.turn_state ?? ""),
+        (message) => message.role === "user" &&
+          (settlement.turn_id ? message.turn_id === settlement.turn_id :
+            ["pending", "processing", "delegating", "awaiting_approval"].includes(message.turn_state ?? "")),
       );
       if (index < 0) return;
       const messages = [...activeConversation.messages];
       const settledMessage = {
         ...messages[index],
         turn_state: settlement.turn_state,
+        ...(settlement.failure_message ? { failure_message: settlement.failure_message } : {}),
         ...(settlement.tool_calls && settlement.tool_calls.length > 0
           ? { tool_calls: settlement.tool_calls }
           : {}),
@@ -467,6 +476,7 @@ export function createConversationStore(): ConversationStore {
         ...(message.turn_id === undefined || message.turn_id === null
           ? {}
           : { turn_id: message.turn_id }),
+        ...(message.failure_message === undefined ? {} : { failure_message: message.failure_message }),
         // The wire tool-call view narrows to the display view the same way
         // the conversation API's fetch does.
         ...(message.tool_calls.length === 0

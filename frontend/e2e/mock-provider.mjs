@@ -58,8 +58,11 @@ async function handle(request, response) {
       })}\n`,
     );
   }
-  if (JSON.stringify(body.messages).includes("controlled provider failure")) {
-    response.writeHead(503, { "content-type": "application/json" });
+  const lastMessage = JSON.stringify(body.messages.at(-1));
+  if (/controlled provider failure|failed batch second/.test(lastMessage)) {
+    // The failed batch exercises the transcript after settlement.
+    const status = lastMessage.includes("failed batch second") ? 400 : 503;
+    response.writeHead(status, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "Controlled provider failure" } }));
     return;
   }
@@ -74,8 +77,12 @@ async function handle(request, response) {
     block.type === "tool_result" && ["create-e2e-agent", "refuse-e2e-agent"].includes(block.tool_use_id));
   if (lastText === "accepted before disconnect") {
     await textResponse(response, ["The accepted request finished."], 3500);
+  } else if (lastText === "hold for the batch") {
+    await textResponse(response, ["Holding the current request."], 5000);
   } else if (lastText === "limit this turn") {
     await textResponse(response, ["Partial response at the output limit."], 30, "max_tokens");
+  } else if (lastText === "refuse this turn") {
+    await textResponse(response, ["Recorded refusal from the provider."], 30, "refusal");
   } else if (definitionResult) {
     await textResponse(response, ["Definition tool returned to the provider."]);
   } else if (lastText === "Create a preferred agent") {

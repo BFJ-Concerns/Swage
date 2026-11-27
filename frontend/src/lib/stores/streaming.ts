@@ -123,28 +123,12 @@ export interface StreamingStoreOptions {
       content: string;
       timestamp: string;
     }): void;
-    appendAssistantMessage(message: {
-      content: string;
-      timestamp: string;
-      turn_state: Extract<
-        MessageView["turn_state"],
-        "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled"
-      >;
-      thread_id?: string;
-      turn_id?: string;
-      tool_calls?: ToolCallView[];
-    }, conversationId?: string | null): void;
+    appendAssistantMessage: ConversationStore["appendAssistantMessage"];
     /**
      * Settle the person's pending request as a turn that ended without a
      * reply: its terminal state and the tool calls it issued.
      */
-    settleUnansweredRequest?(
-      settlement: {
-        turn_state: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled">;
-        tool_calls: ToolCallView[];
-      },
-      conversationId?: string | null,
-    ): void;
+    settleUnansweredRequest?: ConversationStore["settleUnansweredRequest"];
     /** Installs a message the gateway recorded and announced on its conversation. */
     appendRecordedMessage?: ConversationStore["appendRecordedMessage"];
     /** Shows a message the gateway holds for the conversation's next turn. */
@@ -302,6 +286,7 @@ export function createStreamingStore(
     >,
     turn_id?: string,
     tool_calls?: ToolCallView[],
+    failure_message?: string,
   ): void {
     // The reply belongs to the thread the turn was sent on, whatever the
     // person is looking at when it completes.
@@ -313,6 +298,7 @@ export function createStreamingStore(
       ...(threadId === null ? {} : { thread_id: threadId }),
       ...(turn_id === undefined ? {} : { turn_id }),
       ...(tool_calls === undefined ? {} : { tool_calls }),
+      ...(failure_message === undefined ? {} : { failure_message }),
     }, conversationId);
   }
 
@@ -323,13 +309,19 @@ export function createStreamingStore(
     turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled">,
     turnId?: string,
     toolCalls?: ToolCallView[],
+    failureMessage?: string,
   ): void {
     const streamedContent = get(stream.streamedContentStore);
     if (streamedContent || (toolCalls?.length ?? 0) > 0) {
-      pushAssistantMessage(conversationId, streamedContent, turnState, turnId, toolCalls);
+      pushAssistantMessage(conversationId, streamedContent, turnState, turnId, toolCalls, failureMessage);
     } else if (get(stream.activeToolCallsStore).length === 0) {
       options?.conversationStore?.settleUnansweredRequest?.(
-        { turn_state: turnState, tool_calls: [] }, conversationId,
+        {
+          turn_state: turnState,
+          tool_calls: [],
+          ...(stream.queuedTurnId ? { turn_id: stream.queuedTurnId } : {}),
+          ...(failureMessage ? { failure_message: failureMessage } : {}),
+        }, conversationId,
       );
     }
     stream.streamedContentStore.set("");
@@ -506,8 +498,9 @@ export function createStreamingStore(
             );
           } else {
             settleResponse(
-              ownerId, stream, interrupted ? "interrupted" : refused ? "refused" : "failed", undefined,
-              settleCalls ? toolCalls : undefined,
+              ownerId, stream, interrupted ? "interrupted" : refused ? "refused" : "failed",
+              stream.queuedTurnId ?? undefined, settleCalls ? toolCalls : undefined,
+              code === "agent_error" || code === "not_connected" ? message : undefined,
             );
           }
           stream.turnErrorStore.set({ code, message });

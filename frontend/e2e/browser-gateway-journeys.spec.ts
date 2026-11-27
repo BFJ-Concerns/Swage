@@ -369,6 +369,37 @@ test("clears the approval when reconnect recovers a stopped request with no repl
   }
 });
 
+test("offers one Retry when the provider fails before sending a reply", async ({ page }) => {
+  await send(page, "controlled provider failure");
+  await expect(page.getByRole("alert")).toContainText("Controlled provider failure");
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(1);
+});
+
+test("offers one Retry on the recorded refusal account", async ({ page }) => {
+  await send(page, "refuse this turn");
+  await expect(page.getByRole("button", { name: "Retry request", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: /^Retry(?: request)?$/ })).toHaveCount(1);
+});
+
+test("retries the complete failed batch before and after reload", async ({ page }) => {
+  await send(page, "hold for the batch");
+  await expect(page.getByLabel("Assistant message")).toContainText("Holding the current request.");
+  const composer = page.getByRole("textbox", { name: "Message" });
+  const inputs = ["failed batch first", "failed batch second"];
+  for (const input of inputs) {
+    await composer.fill(input);
+    await composer.press("Enter");
+    await expect(page.getByLabel("Queued message").getByText(input, { exact: true })).toBeVisible();
+  }
+
+  const retry = page.getByRole("button", { name: "Retry", exact: true });
+  await expect(retry).toHaveCount(1);
+  await page.reload();
+  await expect(retry).toHaveCount(1);
+  await retry.click();
+  await expect(page.getByLabel("Your message").last()).toHaveText(/failed batch first\s+failed batch second/);
+});
+
 test("approves a pending tool call through the rendered UI", async ({ page }) => {
   await send(page, "approve a tool");
   const approval = page.getByRole("dialog", { name: "Approval required" });
