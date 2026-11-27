@@ -993,8 +993,9 @@ one is available.
 two sandbox-eligible tools.
 
 `python_execute` runs each program in a fresh interpreter with Python's standard
-built-ins and standard-library imports. The default Python sandbox starts it in
-a private working directory with no network access. The supplied `swage` module
+built-ins and standard-library imports. It starts in the session's working
+directory under the turn's own sandbox, as `shell` runs: the same files
+writable, the same private paths masked and the same network. The supplied `swage` module
 can call the file, shell and web tools available to the turn.
 
 **Browser** — `browser_navigate`, `browser_snapshot`, `browser_click`,

@@ -46,12 +46,12 @@ impl Tool for PythonExecuteTool {
          defined in one call exists in the next, and only what the program prints comes \
          back. The standard library can be imported and third-party packages cannot. An \
          exception fails the call with its traceback, and so does running past the \
-         installation's time limit. Unless the operator has lifted it, the program runs \
-         sandboxed: it starts in an empty directory of its own, anything it writes there is \
-         gone when the call ends, and neither the session's files nor the network can be \
-         reached from inside it, by `open` or by any standard-library module. The program \
-         reaches files, commands and the web through the `swage` module, which is already in \
-         scope. Each of its functions makes one call to the tool it is named for and returns \
+         installation's time limit. The program starts in the session's working directory \
+         and runs as a `shell` command would: unless the operator has lifted the sandbox, it \
+         can change files under the working directory and little outside it, and it reaches \
+         the network only as far as the operator lets sandboxed commands reach it. The \
+         `swage` module, already in scope, calls the session's other tools from inside the \
+         program. Each of its functions makes one call to the tool it is named for and returns \
          that tool's result object, the same fields a direct call gives: \
          `swage.read_file(path)`, `swage.write_file(path, content)`, \
          `swage.edit_files(changes)`, `swage.list_files(path)`, \
