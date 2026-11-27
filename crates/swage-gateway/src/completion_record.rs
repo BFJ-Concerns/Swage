@@ -221,7 +221,7 @@ impl CompletionAccount {
         });
         let content_omitted = match secret_values {
             Some(values) => {
-                mask_registered_values(&mut returned, values);
+                swage_core::secret_masking::mask_json_strings(&mut returned, values);
                 false
             }
             None => {
@@ -263,33 +263,6 @@ impl CompletionAccount {
             summary: format!("completion {} {outcome}", self.model),
             metadata,
         }
-    }
-}
-
-/// Mask every registered value in each string and each object key, in its
-/// plain form and in the escaped form it takes inside JSON text, which a
-/// completion may return.
-fn mask_registered_values(value: &mut Value, secret_values: &[String]) {
-    match value {
-        Value::String(text) => {
-            crate::turn::redact_serialised_text(text, secret_values);
-        }
-        Value::Array(values) => {
-            for value in values {
-                mask_registered_values(value, secret_values);
-            }
-        }
-        Value::Object(values) => {
-            *values = std::mem::take(values)
-                .into_iter()
-                .map(|(mut key, mut value)| {
-                    crate::turn::redact_serialised_text(&mut key, secret_values);
-                    mask_registered_values(&mut value, secret_values);
-                    (key, value)
-                })
-                .collect();
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
@@ -745,7 +718,7 @@ mod tests {
         let mut returned = json!({
             "tool_calls": [{ "arguments": { "command": "printf probe", secret.clone(): secret.clone() } }],
         });
-        mask_registered_values(&mut returned, std::slice::from_ref(&secret));
+        swage_core::secret_masking::mask_json_strings(&mut returned, std::slice::from_ref(&secret));
         assert_eq!(
             returned,
             json!({

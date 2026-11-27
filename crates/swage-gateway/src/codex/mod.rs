@@ -860,7 +860,6 @@ async fn handle_tool_call(
             call_id: call_id.clone(),
             tool: tool.clone(),
             arguments: arguments.to_string(),
-            model_arguments: arguments.to_string(),
             result: Some(result_json.to_string()),
             model_result: Some(result_json.to_string()),
             status: Some(status.to_string()),

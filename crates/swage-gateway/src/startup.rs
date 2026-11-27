@@ -253,6 +253,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
         eprintln!("Failed to register the Codex auth store as governed secrets: {error}");
         std::process::exit(1);
     }
+    // Every record written from here on is masked against the registered
+    // values, so they are read before the gateway takes any work.
+    state.secret_manager.refresh_registered_values().await;
     if let Err(error) = recover_worktrees_after_crash(&state).await {
         eprintln!("Worktree startup recovery failed: {error}");
         std::process::exit(1);

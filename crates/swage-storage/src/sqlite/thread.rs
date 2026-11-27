@@ -78,7 +78,7 @@ fn copy_tool_calls_for_branch(
     child_turn_id: &str,
 ) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT agent_id, call_id, tool, arguments, model_arguments, result, status,
+        "SELECT agent_id, call_id, tool, arguments, result, status,
                 duration_ms, truncated, total_bytes, provider_round, position, created_at,
                 parent_call_id, display_summary, model_result
          FROM tool_calls
@@ -93,16 +93,15 @@ fn copy_tool_calls_for_branch(
             row.get::<_, String>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
-            row.get::<_, Option<String>>(6)?,
-            row.get::<_, Option<i64>>(7)?,
-            row.get::<_, i64>(8)?,
-            row.get::<_, Option<i64>>(9)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<i64>>(8)?,
+            row.get::<_, i32>(9)?,
             row.get::<_, i32>(10)?,
-            row.get::<_, i32>(11)?,
-            row.get::<_, String>(12)?,
+            row.get::<_, String>(11)?,
+            row.get::<_, Option<String>>(12)?,
             row.get::<_, Option<String>>(13)?,
             row.get::<_, Option<String>>(14)?,
-            row.get::<_, Option<String>>(15)?,
         ))
     })?;
     let calls = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -113,7 +112,6 @@ fn copy_tool_calls_for_branch(
         call_id,
         tool,
         arguments,
-        model_arguments,
         result,
         status,
         duration_ms,
@@ -157,10 +155,10 @@ fn copy_tool_calls_for_branch(
 
         conn.execute(
             "INSERT INTO tool_calls
-	             (id, turn_id, agent_id, call_id, tool, arguments, model_arguments, result,
+	             (id, turn_id, agent_id, call_id, tool, arguments, result,
 	              model_result, status, duration_ms, truncated, total_bytes, provider_round,
 	              position, created_at, parent_call_id, display_summary)
-	             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+	             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 Uuid::new_v4().to_string(),
                 child_turn_id,
@@ -168,7 +166,6 @@ fn copy_tool_calls_for_branch(
                 call_id,
                 tool,
                 arguments,
-                model_arguments,
                 result,
                 model_result,
                 status,
@@ -665,8 +662,8 @@ mod tests {
     use crate::model::{NewMessage, NewSession, NewToolCall, NewTopic, NewTurn, TurnState};
     use crate::store::{MessageStore, SessionStore, ToolCallStore, TopicStore, TurnStore};
     use swage_core::{
-        Role, compact_tool_arguments_for_model, compact_tool_result_for_model,
-        compact_tool_result_for_model_with_reference, tool_result_reference,
+        Role, compact_tool_result_for_model, compact_tool_result_for_model_with_reference,
+        tool_result_reference,
     };
 
     use super::*;
@@ -1131,8 +1128,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let expected_model_arguments =
-            compact_tool_arguments_for_model(&serde_json::json!({"cmd": "pwd"}));
         storage
             .create_tool_call(NewToolCall {
                 execution: None,
@@ -1141,7 +1136,6 @@ mod tests {
                 call_id: "call_1".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"pwd"}"#.into(),
-                model_arguments: expected_model_arguments.clone(),
                 result: Some("workspace".into()),
                 model_result: Some(compact_tool_result_for_model("workspace", false)),
                 status: Some("success".into()),
@@ -1187,10 +1181,7 @@ mod tests {
             tool_result_reference(&child_turns[0].id.to_string(), "call_1"),
         );
         assert_eq!(child_tool_calls[0].call_id, "call_1");
-        assert_eq!(
-            child_tool_calls[0].model_arguments,
-            expected_model_arguments
-        );
+        assert_eq!(child_tool_calls[0].arguments, r#"{"cmd":"pwd"}"#);
         assert_eq!(
             child_tool_calls[0].model_result.as_deref(),
             Some(expected_model_result.as_str())
@@ -1224,9 +1215,6 @@ mod tests {
                 call_id: "call_1".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"pwd"}"#.into(),
-                model_arguments: compact_tool_arguments_for_model(
-                    &serde_json::json!({"cmd": "pwd"}),
-                ),
                 result: Some("workspace".into()),
                 model_result: Some(compact_tool_result_for_model("workspace", false)),
                 status: Some("success".into()),
@@ -1349,7 +1337,6 @@ mod tests {
                 call_id: "call_1".into(),
                 tool: "delegate".into(),
                 arguments: "{}".into(),
-                model_arguments: "{}".into(),
                 result: Some("the child's answer".into()),
                 model_result: Some(format!(
                     "{account}\n{}",
@@ -1449,9 +1436,6 @@ mod tests {
                 call_id: "call_future".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"pwd"}"#.into(),
-                model_arguments: compact_tool_arguments_for_model(&serde_json::json!({
-                    "cmd": "pwd"
-                })),
                 result: Some("workspace".into()),
                 model_result: Some(compact_tool_result_for_model("workspace", false)),
                 status: Some("success".into()),

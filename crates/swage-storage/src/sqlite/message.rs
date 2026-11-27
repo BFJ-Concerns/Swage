@@ -86,7 +86,8 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 
 #[async_trait]
 impl MessageStore for SqliteStorage {
-    async fn create_message(&self, message: NewMessage) -> Result<Message, StorageError> {
+    async fn create_message(&self, mut message: NewMessage) -> Result<Message, StorageError> {
+        self.mask(&mut message.content);
         self.with_conn(|conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
@@ -132,7 +133,8 @@ impl MessageStore for SqliteStorage {
         .await
     }
 
-    async fn append_message(&self, message: AppendMessage) -> Result<Message, StorageError> {
+    async fn append_message(&self, mut message: AppendMessage) -> Result<Message, StorageError> {
+        self.mask(&mut message.content);
         self.with_conn(|conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();

@@ -24,7 +24,8 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 #[async_trait]
 impl ContextSnapshotStore for SqliteStorage {
     async fn store_snapshot(&self, turn_id: Uuid, report_json: &str) -> Result<(), StorageError> {
-        let report_json = report_json.to_owned();
+        let mut report_json = report_json.to_owned();
+        self.mask(&mut report_json);
         let now = Utc::now().to_rfc3339();
 
         self.with_conn(move |conn| {

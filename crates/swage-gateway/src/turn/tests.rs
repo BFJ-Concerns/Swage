@@ -41,8 +41,6 @@ use swage_storage::{
     },
 };
 
-use super::history::parse_model_arguments;
-
 use swage_agent::{AgentEvent, DelegationOutcome};
 use swage_sandbox::ToolCallResult;
 
@@ -874,7 +872,6 @@ async fn seed_finished_turn(
                 call_id: format!("call-{position}"),
                 tool: tool.to_string(),
                 arguments: arguments.to_string(),
-                model_arguments: arguments.to_string(),
                 result: Some("no such file".to_string()),
                 model_result: None,
                 status: Some(status.to_string()),
@@ -5415,7 +5412,6 @@ impl ToolCallStore for MockStorage {
             call_id: tool_call.call_id,
             tool: tool_call.tool,
             arguments: tool_call.arguments,
-            model_arguments: tool_call.model_arguments,
             result: tool_call.result,
             model_result: tool_call.model_result,
             status: tool_call.status,
@@ -6376,6 +6372,17 @@ fn mock_secret_record(
 
 #[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
+    fn registered_secret_values(&self) -> swage_core::RegisteredSecretValues {
+        swage_core::RegisteredSecretValues::default()
+    }
+
+    async fn stored_keys_among(
+        &self,
+        _: Vec<String>,
+    ) -> Result<std::collections::HashSet<String>, StorageError> {
+        Ok(std::collections::HashSet::new())
+    }
+
     async fn write_credentials_with_audit(
         &self,
         creations: Vec<swage_storage::NewSecretRecord>,
@@ -10718,11 +10725,14 @@ async fn later_snapshot_masks_registered_secret_before_tool_replay_compaction() 
         .list_tool_calls_by_turn(first_turn)
         .await
         .unwrap();
-    let stored_arguments: serde_json::Value =
-        serde_json::from_str(&calls[0].model_arguments).unwrap();
-    let stored_prefix = stored_arguments["text"].as_str().unwrap();
-    assert_eq!(stored_prefix.len(), 2000);
-    assert!(stored_prefix.contains("unique-long-fixture-material-"));
+    let stored_arguments: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+    assert!(
+        stored_arguments["text"]
+            .as_str()
+            .unwrap()
+            .contains("unique-long-fixture-material-"),
+        "the call was recorded before the value was registered"
+    );
     let stored_result: swage_core::CompactToolReplay =
         serde_json::from_str(calls[0].model_result.as_ref().unwrap()).unwrap();
     assert!(stored_result.truncated);
@@ -10738,7 +10748,6 @@ async fn later_snapshot_masks_registered_secret_before_tool_replay_compaction() 
         call_id: "malformed-call".into(),
         tool: calls[0].tool.clone(),
         arguments: "{".into(),
-        model_arguments: calls[0].model_arguments.clone(),
         result: Some("Result of the call with malformed arguments".into()),
         model_result: Some(swage_core::compact_tool_result_for_model(
             "Result of the call with malformed arguments",
@@ -10763,7 +10772,6 @@ async fn later_snapshot_masks_registered_secret_before_tool_replay_compaction() 
         .create_tool_call(NewToolCall {
             call_id: "unverifiable-result".into(),
             arguments: "{}".into(),
-            model_arguments: "{}".into(),
             result: None,
             model_result: calls[0].model_result.clone(),
             position: malformed_call.position + 1,
@@ -11058,9 +11066,6 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
             call_id: "call_1".to_string(),
             tool: "echo".to_string(),
             arguments: r#"{"text":"first"}"#.to_string(),
-            model_arguments: swage_core::compact_tool_arguments_for_model(
-                &serde_json::json!({ "text": "first" }),
-            ),
             result: Some(r#"{"output":"first"}"#.to_string()),
             model_result: Some(swage_core::compact_tool_result_for_model_with_reference(
                 r#"{"output":"first"}"#,
@@ -11245,9 +11250,6 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
             call_id: "call_fail".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"command":"missing-command"}"#.to_string(),
-            model_arguments: swage_core::compact_tool_arguments_for_model(
-                &serde_json::json!({ "command": "missing-command" }),
-            ),
             result: Some("command not found".to_string()),
             model_result: Some(swage_core::compact_tool_result_for_model_with_reference(
                 "command not found",
@@ -11344,9 +11346,6 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
             call_id: top_level_call_id.clone(),
             tool: "python_execute".to_string(),
             arguments: r#"{"code":"run()"}"#.to_string(),
-            model_arguments: swage_core::compact_tool_arguments_for_model(
-                &serde_json::json!({"code": "run()"}),
-            ),
             result: Some(r#"{"ok":true}"#.to_string()),
             model_result: Some(swage_core::compact_tool_result_for_model(
                 r#"{"ok":true}"#,
@@ -11370,9 +11369,6 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
             call_id: "nested_read".to_string(),
             tool: "file_read".to_string(),
             arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
-            model_arguments: swage_core::compact_tool_arguments_for_model(
-                &serde_json::json!({"path": "Cargo.toml"}),
-            ),
             result: Some(r#"{"content":"workspace"}"#.to_string()),
             model_result: Some(swage_core::compact_tool_result_for_model(
                 r#"{"content":"workspace"}"#,
@@ -11441,9 +11437,6 @@ fn complete_replay_record(call_id: &str) -> ToolCallRecord {
         call_id: call_id.into(),
         tool: "file_read".into(),
         arguments: r#"{"path":"Cargo.toml"}"#.into(),
-        model_arguments: swage_core::compact_tool_arguments_for_model(
-            &serde_json::json!({"path": "Cargo.toml"}),
-        ),
         result: Some("workspace".into()),
         model_result: Some(swage_core::compact_tool_result_for_model(
             "workspace",
@@ -11497,7 +11490,6 @@ fn replayed_long_argument_values_are_bounded_inside_the_native_shape() {
     let mut record = complete_replay_record("long-write");
     record.tool = "file_write".into();
     record.arguments = raw.to_string();
-    record.model_arguments = swage_core::compact_tool_arguments_for_model(&raw);
 
     let replay = compact_tool_replay_messages(&[record]).unwrap();
     let ToolReplayPart::ToolCall { arguments, .. } = &replay[0].tool_replay().unwrap()[0] else {
@@ -11513,56 +11505,6 @@ fn replayed_long_argument_values_are_bounded_inside_the_native_shape() {
             long_key: "value"
         }),
         "only string values exceeding 2,000 characters may be shortened"
-    );
-}
-
-#[test]
-fn replayed_old_argument_envelopes_recover_bounded_raw_arguments_and_keep_results() {
-    let raw = serde_json::json!({"path": "Cargo.toml", "note": "x".repeat(2001)});
-    let mut old = complete_replay_record("old-read");
-    old.arguments = raw.to_string();
-    old.model_arguments = serde_json::json!({
-        "kind": "tool_arguments", "bytes": old.arguments.len(),
-        "sha256": "a".repeat(64), "truncated": true,
-        "preview": "not the original arguments"
-    })
-    .to_string();
-    let mut native = complete_replay_record("native-kind");
-    native.model_arguments = serde_json::json!({
-        "path": "kind.txt", "kind": "tool_arguments", "preview": "ordinary parameter"
-    })
-    .to_string();
-    let result = old.model_result.clone().unwrap();
-    let replay = compact_tool_replay_messages(&[old.clone(), native]).unwrap();
-    let calls = replay[0].tool_replay().unwrap();
-    assert!(
-        matches!(&calls[0], ToolReplayPart::ToolCall { call_id, arguments, .. }
-        if call_id == "old-read" && arguments == &serde_json::json!({
-            "path": "Cargo.toml", "note": "x".repeat(2000)
-        })),
-        "an old envelope must recover bounded arguments from the raw row"
-    );
-    assert!(
-        matches!(&calls[1], ToolReplayPart::ToolCall { arguments, .. }
-        if arguments == &serde_json::json!({
-            "path": "kind.txt", "kind": "tool_arguments", "preview": "ordinary parameter"
-        })),
-        "native parameters resembling part of an envelope must remain intact"
-    );
-    assert!(
-        matches!(&replay[1].tool_replay().unwrap()[0],
-        ToolReplayPart::ToolResult { call_id, content, .. }
-        if call_id == "old-read" && content == &result),
-        "recovering old arguments must retain the original result"
-    );
-
-    old.arguments = "{invalid".into();
-    assert!(
-        matches!(
-            compact_tool_replay_messages(&[old]),
-            Err(StorageError::Corruption { .. })
-        ),
-        "a preview is no substitute for corrupt raw arguments"
     );
 }
 
@@ -11640,7 +11582,7 @@ async fn replayed_native_arguments_are_redacted_in_recorded_provider_requests() 
     let stored_calls = storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
     assert_eq!(stored_calls.len(), 1);
     assert!(
-        stored_calls[0].model_arguments.contains(secret),
+        stored_calls[0].arguments.contains(secret),
         "the replay input must actually contain the registered secret"
     );
     let snapshot = storage.get_snapshot(turns[1].id).await.unwrap().unwrap();
@@ -11696,17 +11638,6 @@ fn replay_omits_rejected_tool_calls_with_empty_names() {
 }
 
 #[test]
-fn replay_uses_valid_raw_arguments_when_compact_arguments_are_unreadable() {
-    let mut record = complete_replay_record("legacy-call");
-    record.model_arguments = "not-json".into();
-
-    let arguments = parse_model_arguments(&record)
-        .expect("valid raw arguments are a safe legacy replay fallback");
-
-    assert_eq!(arguments["path"], "Cargo.toml");
-}
-
-#[test]
 fn replay_omits_calls_without_model_safe_results() {
     let mut record = complete_replay_record("incomplete-call");
     record.result = Some("raw result must not be replayed".into());
@@ -11737,15 +11668,20 @@ fn replay_includes_started_call_with_unknown_outcome() {
 }
 
 #[test]
-fn corrupt_replay_arguments_are_rejected() {
+fn undecodable_arguments_replay_as_none_beside_their_result() {
     let mut record = complete_replay_record("corrupt-call");
-    record.model_arguments = "{not-json".into();
-    record.arguments = "{also-not-json".into();
+    record.arguments = "{not-json".into();
 
-    let error = compact_tool_replay_messages(&[record])
-        .expect_err("corrupt replay arguments must not be sent to the provider");
+    let replay = compact_tool_replay_messages(&[record]).unwrap();
 
-    assert!(matches!(error, StorageError::Corruption { .. }));
+    assert!(matches!(
+        &replay[0].tool_replay().unwrap()[0],
+        ToolReplayPart::ToolCall { arguments, .. } if arguments == &serde_json::json!({})
+    ));
+    assert!(matches!(
+        &replay[1].tool_replay().unwrap()[0],
+        ToolReplayPart::ToolResult { call_id, .. } if call_id == "corrupt-call"
+    ));
 }
 
 #[test]
@@ -21352,7 +21288,6 @@ async fn a_long_delivered_tool_result_replays_inside_the_whole_frame() {
             call_id: "delegate-1".into(),
             tool: "delegate".into(),
             arguments: "{}".into(),
-            model_arguments: "{}".into(),
             result: Some(payload.clone()),
             model_result: Some(swage_core::compact_delivered_tool_result_for_model(
                 &payload,
@@ -21476,9 +21411,6 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
                 call_id: call_id.into(),
                 tool: tool.into(),
                 arguments: "{}".into(),
-                model_arguments: swage_core::compact_tool_arguments_for_model(&serde_json::json!(
-                    {}
-                )),
                 result: None,
                 model_result: None,
                 status: None,
@@ -21598,7 +21530,6 @@ async fn assistantless_delegated_round_follows_the_delegated_task() {
             call_id: "child-call".into(),
             tool: "echo".into(),
             arguments: "{}".into(),
-            model_arguments: "{}".into(),
             result: Some("done".into()),
             model_result: Some("done".into()),
             status: Some("success".into()),

@@ -41,6 +41,7 @@
 //! in `Processing` state by a previous unclean exit as `Interrupted`.
 
 pub mod access_gate;
+pub mod answer_masking;
 pub mod approval_scope;
 pub mod assets;
 pub mod attachment;

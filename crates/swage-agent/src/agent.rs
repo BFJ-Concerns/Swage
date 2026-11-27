@@ -12,9 +12,8 @@ use uuid::Uuid;
 use serde_json::Value;
 use swage_core::{
     ChatMessage, CompletionRequest, Role, StreamChunk, ToolCall, ToolReplayReasoning, ToolResult,
-    build_tool_round_messages_with_reasoning, compact_tool_arguments_for_model,
-    compact_tool_result_for_model_with_reference, extract_tool_result_metadata,
-    tool_result_reference,
+    build_tool_round_messages_with_reasoning, compact_tool_result_for_model_with_reference,
+    extract_tool_result_metadata, tool_result_reference,
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_provider::LlmProvider;
@@ -2051,7 +2050,6 @@ impl Agent {
                             call_id: call.call_id.clone(),
                             tool: call.name.clone(),
                             arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
-                            model_arguments: compact_tool_arguments_for_model(&call.arguments),
                             result: None,
                             model_result: None,
                             status: None,
@@ -4229,20 +4227,24 @@ impl Agent {
     /// When no leak detector is configured, the text passes through unchanged.
     /// If the detector panics (shouldn't happen, but defensive), we fail-open:
     /// log a warning and return the original text.
+    /// Text as the model and the record may see it: every registered secret
+    /// value masked, and credential-shaped text the leak detector finds
+    /// redacted. Registered values are masked first, so a tool result's
+    /// shortened preview is cut from text that no longer holds them.
     pub(crate) fn scan_output(&self, text: &str) -> String {
+        let mut text = text.to_owned();
+        self.storage.registered_secret_values().mask(&mut text);
         let detector = match &self.leak_detector {
             Some(d) => d.clone(),
-            None => return text.to_owned(),
+            None => return text,
         };
 
         // Fail-open: catch any panic from the scanning pipeline.
-        let text_owned = text.to_owned();
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| detector.scan(&text_owned)))
-        {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| detector.scan(&text))) {
             Ok(redacted) => redacted,
             Err(_) => {
                 tracing::warn!("leak detector panicked during scan — returning original text");
-                text.to_owned()
+                text
             }
         }
     }
