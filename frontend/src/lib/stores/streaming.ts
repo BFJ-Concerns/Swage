@@ -5,11 +5,12 @@
 
 import { fromStore, get, writable, type Writable } from "svelte/store";
 
+import { isPersonsMessage } from "../message-authorship";
 import { randomUuid } from "../random-uuid";
 import type { Effort } from "../protocol/Effort";
 import type { MessageAttachment } from "../protocol/MessageAttachment";
 import { stopConversationTurn } from "../api/conversations";
-import type { MessageView, ServerEvent, ToolCallView } from "../types";
+import type { ConversationDetail, MessageView, ServerEvent, ToolCallView } from "../types";
 import type { ConversationStore } from "./conversations";
 
 // Approval state surfaced for the ApprovalCard / MessageInput swap.
@@ -77,6 +78,7 @@ export interface StreamingStore {
     recoveredTurnGeneration: number,
     conversationId?: string | null,
     recoveredMessages?: MessageView[],
+    queued?: ConversationDetail["queued"],
   ): void;
   startTurn(
     content: string,
@@ -98,6 +100,8 @@ export interface StreamingStore {
    */
   cancelTurn(): Promise<void>;
 }
+
+const UNCONFIRMED_SEND = "The gateway has no record of this message after reconnecting.";
 
 // Cancellation records the stop decision without asserting completed effects.
 const CANCELLED_TOOL_RESULT = "tool call was cancelled when its turn was stopped";
@@ -123,15 +127,15 @@ export interface StreamingStoreOptions {
   /** Receives messages pushed by the streaming store (user turns and settled
    *  assistant turns). */
   conversationStore?: {
-    readonly activeConversation?: { id?: string; messages: MessageView[] } | null;
+    readonly activeConversation?: {
+      id?: string;
+      root_thread_id?: string;
+      messages: MessageView[];
+      queued?: ConversationDetail["queued"];
+    } | null;
     /** The thread the composer sends on; null or absent is the root thread. */
     readonly activeThreadId?: string | null;
-    appendOptimisticUserMessage(message: {
-      attachments?: MessageAttachment[];
-      client_id?: string;
-      content: string;
-      timestamp: string;
-    }): void;
+    appendOptimisticUserMessage: ConversationStore["appendOptimisticUserMessage"];
     appendAssistantMessage: ConversationStore["appendAssistantMessage"];
     /**
      * Settle the person's pending request as a turn that ended without a
@@ -191,6 +195,11 @@ export function createStreamingStore(
     pendingApprovalState: { current: PendingApproval | null };
     activeTurnGeneration: number;
     queuedTurnId: string | null;
+    pendingRequest?: {
+      message: Parameters<ConversationStore["appendOptimisticUserMessage"]>[0];
+      personMessageCount: number;
+      acknowledged?: boolean;
+    };
     /** The thread the running turn was sent on; null is the root thread. */
     threadId: string | null;
   }
@@ -279,7 +288,10 @@ export function createStreamingStore(
   }
 
   function setStreamActive(conversationId: string | null, stream: InternalStreamState, active: boolean): void {
-    if (!active) stream.queuedTurnId = null;
+    if (!active) {
+      stream.queuedTurnId = null;
+      stream.pendingRequest = undefined;
+    }
     stream.isStreamingStore.set(active);
     if (conversationId) options?.connectionStore?.setStreamActive?.(conversationId, active);
   }
@@ -378,6 +390,11 @@ export function createStreamingStore(
     handleServerEvent(event: ServerEvent, conversationId?: string): void {
       const ownerId = conversationId ?? currentConversationId();
       const stream = streamStateFor(ownerId);
+      if (stream.pendingRequest && (event.type === "token" || event.type === "context_assembled" ||
+          event.type === "tool_start" || event.type === "approval_required" ||
+          event.type === "provider_retry_started")) {
+        stream.pendingRequest.acknowledged = true;
+      }
       switch (event.type) {
         case "token":
           // Append streaming token — the UI renders this live.
@@ -631,6 +648,7 @@ export function createStreamingStore(
           options?.conversationStore?.clearQueuedMessages?.(event.session_id, event.queued_ids);
           if (stream.queuedTurnId === event.turn_id) break;
           stream.queuedTurnId = event.turn_id;
+          stream.pendingRequest = undefined;
           stream.threadId = event.thread_id;
           stream.streamedContentStore.set("");
           stream.turnErrorStore.set(null);
@@ -685,25 +703,50 @@ export function createStreamingStore(
       recoveredTurnGeneration: number,
       conversationId = currentConversationId(),
       recoveredMessages = options?.conversationStore?.activeConversation?.messages,
+      queued = options?.conversationStore?.activeConversation?.queued,
     ): void {
       const ownerId = conversationId;
       const stream = streams.get(ownerId);
-      const lastMessage = recoveredMessages?.at(-1);
-      const approval = stream && get(stream.pendingApprovalStore);
-      const isApprovalTurn = approval && lastMessage?.turn_id === approval.turn_id;
-      if (
-        !stream ||
-        !get(stream.isStreamingStore) ||
-        stream.activeTurnGeneration !== recoveredTurnGeneration ||
-        (lastMessage?.role !== "assistant" && lastMessage?.origin !== "platform" && !isApprovalTurn) ||
-        !["completed", "refused", "incomplete", "failed", "interrupted", "cancelled"].includes(lastMessage?.turn_state ?? "")
-      ) return;
+      if (!stream || !get(stream.isStreamingStore) ||
+          stream.activeTurnGeneration !== recoveredTurnGeneration || !recoveredMessages) return;
 
-      // The HTTP refresh recovered the terminal account the dropped socket
-      // could not deliver. Normal token events intentionally
-      // carry no turn ID, so the monotonically increasing local generation
-      // fences a later start that races the refresh. The durable conversation
-      // is authoritative only for the projection captured before reconnect.
+      const lastMessage = recoveredMessages.at(-1);
+      const approval = get(stream.pendingApprovalStore);
+      const isApprovalTurn = approval && lastMessage?.turn_id === approval.turn_id;
+      const request = stream.pendingRequest;
+      const isQueued = request && queued?.some((input) => input.client_id === request.message.client_id);
+      let unsent = false;
+      let isRequestTurn = false;
+      if (request && !isQueued) {
+        // Ordinary recorded inputs have no client ID. Compare the thread's
+        // person-authored rows with the transcript before this send, so
+        // resending identical text does not match an earlier request.
+        const personMessages = recoveredMessages.filter(isPersonsMessage);
+        const recordedRequest = personMessages[request.personMessageCount];
+        isRequestTurn = Boolean(recordedRequest?.turn_id && recordedRequest.turn_id === lastMessage?.turn_id);
+        if (recordedRequest) {
+          request.acknowledged = true;
+        } else if (!request.acknowledged) {
+          unsent = !["pending", "processing", "delegating", "awaiting_approval"].includes(lastMessage?.turn_state ?? "");
+        }
+      }
+
+      const terminal = ["completed", "refused", "incomplete", "failed", "interrupted", "cancelled"]
+        .includes(lastMessage?.turn_state ?? "");
+      if (!unsent && !isQueued && (!terminal || (
+        lastMessage?.role !== "assistant" && lastMessage?.origin !== "platform" &&
+        !isApprovalTurn && !isRequestTurn
+      ))) return;
+
+      if (unsent && request) {
+        options?.conversationStore?.appendOptimisticUserMessage({
+          ...request.message,
+          failure_message: UNCONFIRMED_SEND,
+        }, ownerId);
+      }
+
+      // The recovered transcript or queue has replaced the optimistic
+      // stream. Clear the live controls and any obsolete approval.
       stream.streamedContentStore.set("");
       setStreamActive(ownerId, stream, false);
       stream.turnStartedAtStore.set(null);
@@ -743,19 +786,27 @@ export function createStreamingStore(
       stream.turnStartedAtStore.set(new Date().toISOString());
       setStreamActive(conversationId, stream, true);
 
-      // Immediately record the user's message so the conversation history
-      // updates before the first token arrives.
-      options?.conversationStore?.appendOptimisticUserMessage({
+      // Keep the original input until the stream or a recovered record
+      // accounts for it. Recovery can replace the optimistic transcript.
+      const conversation = options?.conversationStore?.activeConversation;
+      const threadId = options?.conversationStore?.activeThreadId ?? null;
+      const recordedThread = threadId ?? conversation?.root_thread_id;
+      const message = {
         ...(attachments?.length ? { attachments } : {}),
         client_id: clientId,
         content,
         timestamp: new Date().toISOString(),
-      });
-
-      // Dispatch the outgoing message over the WebSocket, on the thread the
-      // person is standing on — a branch, or the root when none is selected.
-      const threadId = options?.conversationStore?.activeThreadId ?? null;
+      };
       stream.threadId = threadId;
+      if (conversationId && conversation) {
+        stream.pendingRequest = {
+          message: { ...message, ...(recordedThread ? { thread_id: recordedThread } : {}) },
+          personMessageCount: conversation.messages.filter((row) =>
+            isPersonsMessage(row) && row.failure_message !== UNCONFIRMED_SEND).length,
+        };
+      }
+      options?.conversationStore?.appendOptimisticUserMessage(message);
+
       if (conversationId) {
         options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, attachments, threadId, clientId);
       }
@@ -861,8 +912,8 @@ export function withConversationAutoCreate(
     },
     handleServerEvent: (event, conversationId) => base.handleServerEvent(event, conversationId),
     clearConnectionError: (conversationId) => base.clearConnectionError(conversationId),
-    reconcileAfterReconnect: (turnGeneration, conversationId, recoveredMessages) =>
-      base.reconcileAfterReconnect(turnGeneration, conversationId, recoveredMessages),
+      reconcileAfterReconnect: (turnGeneration, conversationId, recoveredMessages, queued) =>
+      base.reconcileAfterReconnect(turnGeneration, conversationId, recoveredMessages, queued),
     cancelTurn: () => base.cancelTurn(),
 
     startTurn(

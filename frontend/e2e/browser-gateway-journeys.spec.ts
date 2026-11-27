@@ -326,6 +326,34 @@ test("keeps an accepted message sent across a disconnect before the first server
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
 });
 
+test("restores an unrecorded message and lets the person retry after reconnect", async ({ page }) => {
+  const prompt = "never reaches the gateway";
+  let dropped = false;
+  await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
+    const gateway = socket.connectToServer();
+    if (dropped) return;
+    socket.onMessage((message) => {
+      if (JSON.parse(String(message)).type === "send_message") {
+        dropped = true;
+        void socket.close({ code: 4000 });
+      } else {
+        gateway.send(message);
+      }
+    });
+  });
+
+  await send(page, prompt);
+  await expect(page.getByText("Reconnecting")).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("The gateway has no record of this message after reconnecting.");
+  await expect(page.getByLabel("Your message")).toContainText(prompt);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  expect((await providerRequests()).filter((request) => request.prompt === prompt)).toHaveLength(0);
+
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.getByLabel("Assistant message")).toContainText("Streamed response reached the browser.");
+  await expect.poll(async () => (await providerRequests()).filter((request) => request.prompt === prompt)).toHaveLength(1);
+});
+
 test("stops generating when reconnect recovers an output-limited reply", async ({ page }) => {
   await page.routeWebSocket(/\/conversations\/[^/]+\/ws$/, (socket) => {
     const gateway = socket.connectToServer();

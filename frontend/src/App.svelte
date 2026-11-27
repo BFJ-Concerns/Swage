@@ -18,7 +18,7 @@
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
   import PairingDialog from "./lib/components/PairingDialog.svelte";
-  import { getConversation } from "./lib/api/conversations";
+  import { getConversation, getThread } from "./lib/api/conversations";
   import { fetchSettings } from "./lib/api/settings";
   import { openSharedWorkSurfaceChannel } from "./lib/api/work-surface";
   import { listEffectiveAgentDefinitions } from "./lib/api/agent-definitions";
@@ -73,7 +73,8 @@
     if (!conversationId) return;
     const generation = recoveringGeneration(conversationId);
     await conversationStore.refreshActiveConversation();
-    if (generation !== undefined && conversationStore.activeConversation?.id === conversationId) {
+    if (generation !== undefined && conversationStore.activeConversation?.id === conversationId &&
+        (streamingStore.streamFor?.(conversationId).threadId ?? null) === (conversationStore.activeThreadId ?? null)) {
       streamingStore.reconcileAfterReconnect(generation, conversationId);
       recoveringGeneration(conversationId);
     }
@@ -85,14 +86,21 @@
       const stream = streamingStore.streamFor?.(conversationId);
       const generation = stream?.isStreaming ? stream.activeTurnGeneration : undefined;
       if (generation !== undefined) recoveringTurns.set(conversationId, generation);
-      if (conversationStore.activeConversation?.id === conversationId) {
+      if (conversationStore.activeConversation?.id === conversationId &&
+          (stream?.threadId ?? null) === (conversationStore.activeThreadId ?? null)) {
         await refreshOpenConversation().catch(() => {});
       } else {
         try {
           const recoveredConversation = await getConversation(conversationId);
-          conversationStore.replaceActiveConversationIfCurrent?.(recoveredConversation);
+          const messages = stream?.threadId
+            ? (await getThread(stream.threadId)).messages
+            : recoveredConversation.messages;
+          if (!stream?.threadId && (conversationStore.activeThreadId ?? null) === null &&
+              (generation === undefined || recoveringGeneration(conversationId) === generation)) {
+            conversationStore.replaceActiveConversationIfCurrent?.(recoveredConversation);
+          }
           if (generation !== undefined && recoveringGeneration(conversationId) === generation) {
-            streamingStore.reconcileAfterReconnect(generation, conversationId, recoveredConversation.messages);
+            streamingStore.reconcileAfterReconnect(generation, conversationId, messages, recoveredConversation.queued);
             recoveringGeneration(conversationId);
           }
         } catch {

@@ -47,7 +47,9 @@ export interface ConversationStore {
     client_id?: string;
     content: string;
     timestamp: string;
-  }): void;
+    thread_id?: string;
+    failure_message?: string;
+  }, conversationId?: string | null): void;
   appendAssistantMessage(message: {
     content: string;
     timestamp: string;
@@ -384,15 +386,17 @@ export function createConversationStore(): ConversationStore {
       branchesStore.set([]);
     },
 
-    appendOptimisticUserMessage(message) {
+    appendOptimisticUserMessage(message, conversationId) {
       appendMessage({
         ...(message.attachments?.length ? { attachments: message.attachments } : {}),
         client_id: message.client_id,
         role: "user",
         content: message.content,
         timestamp: message.timestamp,
-        turn_state: "pending",
-      });
+        turn_state: message.failure_message ? "failed" : "pending",
+        ...(message.thread_id === undefined ? {} : { thread_id: message.thread_id }),
+        ...(message.failure_message === undefined ? {} : { failure_message: message.failure_message }),
+      }, conversationId);
     },
 
     appendAssistantMessage(message, conversationId) {
