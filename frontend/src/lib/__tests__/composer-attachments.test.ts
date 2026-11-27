@@ -82,8 +82,8 @@ function choose(files: File[], control = "Attach files") {
   flushSync(() => input.dispatchEvent(new Event("change", { bubbles: true })));
 }
 
-function inFolder(path: string, body: BlobPart, type = ""): File {
-  const file = new File([body], path.split("/").at(-1)!, { type });
+function inFolder(path: string, contents: BlobPart, type = ""): File {
+  const file = new File([contents], path.split("/").at(-1)!, { type });
   Object.defineProperty(file, "webkitRelativePath", { value: path });
   return file;
 }
