@@ -12,8 +12,10 @@
 //! settings page, the install's Settings and a session's view all say the
 //! same thing from the same reading.
 //!
-//! A write updates only the supplied security overrides and records the
-//! change in the audit trail with the prior and new readings, and takes
+//! A write updates only the supplied security overrides. One that changes a
+//! scope's overrides is recorded once in the audit trail with the prior and
+//! new readings, its summary naming each check it relaxed or restored; a
+//! write that changes nothing records nothing. A write takes
 //! effect for the next turn: the install's active configuration is updated
 //! in place, and a topic's file is read by every turn that runs under it.
 //! No write here touches tool grants: the allow and deny lists are the
@@ -44,8 +46,8 @@ pub async fn read_security_settings(
     resolved.read(state).await
 }
 
-/// Update a scope's supplied security overrides, record the change, and return the
-/// scope as it now reads.
+/// Update a scope's supplied security overrides, record the change when
+/// there is one, and return the scope as it now reads.
 pub async fn save_security_settings(
     state: &AppState,
     scope: SettingsScope,
@@ -65,6 +67,10 @@ pub async fn save_security_settings(
     }
 
     let current = resolved.read(state).await?;
+    let prior_overrides = serde_json::to_value(&prior.overrides).map_err(snapshot_error)?;
+    if serde_json::to_value(&current.overrides).map_err(snapshot_error)? == prior_overrides {
+        return Ok(current);
+    }
     record_config_change(
         state,
         ConfigChange {
@@ -76,7 +82,7 @@ pub async fn save_security_settings(
             summary: &format!(
                 "security settings saved for {}: {}",
                 resolved.describe(),
-                describe_relaxations(&current.relaxed)
+                describe_change(&prior.relaxed, &current.relaxed)
             ),
             prior_state: Some(serde_json::to_value(&prior).map_err(snapshot_error)?),
             new_state: Some(serde_json::to_value(&current).map_err(snapshot_error)?),
@@ -294,19 +300,27 @@ fn relaxations(
     relaxed
 }
 
-fn describe_relaxations(relaxed: &[RelaxedCheck]) -> String {
-    if relaxed.is_empty() {
-        return "every shipped check in force".to_owned();
-    }
-    let names: Vec<&str> = relaxed
+/// What a save did to the checks: each one it relaxed — newly, or further
+/// than before — and each one it restored to the shipped default.
+fn describe_change(prior: &[RelaxedCheck], current: &[RelaxedCheck]) -> String {
+    let name = |check: SecurityCheck| match check {
+        SecurityCheck::Sandbox => "sandbox",
+        SecurityCheck::ApprovalPrompts => "approval prompts",
+        SecurityCheck::AccessGate => "access gate",
+    };
+    let relaxed = current
         .iter()
-        .map(|entry| match entry.check {
-            SecurityCheck::Sandbox => "sandbox relaxed",
-            SecurityCheck::ApprovalPrompts => "approval prompts relaxed",
-            SecurityCheck::AccessGate => "access gate relaxed",
-        })
-        .collect();
-    names.join(", ")
+        .filter(|entry| !prior.contains(entry))
+        .map(|entry| format!("{} relaxed", name(entry.check)));
+    let restored = prior
+        .iter()
+        .filter(|entry| !current.iter().any(|now| now.check == entry.check))
+        .map(|entry| format!("{} restored", name(entry.check)));
+    let changes: Vec<String> = relaxed.chain(restored).collect();
+    if changes.is_empty() {
+        return "no check relaxed or restored".to_owned();
+    }
+    changes.join(", ")
 }
 
 /// What a scope's own file says about the security checks.
@@ -890,6 +904,45 @@ mod tests {
         assert!(restored.effective.sandbox_enabled);
         assert!(restored.relaxed.is_empty());
         assert!(state.active_config().sandbox.enabled);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relaxation_is_recorded_when_it_is_made_and_not_on_later_saves() {
+        let (state, storage, _root) = fixture().await;
+        // Each save supplies only the fields it names; the rest stand.
+        for body in [
+            serde_json::json!({"sandbox_enabled": false}),
+            serde_json::json!({"sandbox_enabled": false}),
+            serde_json::json!({}),
+            serde_json::json!({"access_gate": "token"}),
+            serde_json::json!({"sandbox_enabled": null}),
+        ] {
+            save_security_settings(
+                &state,
+                SettingsScope::Install,
+                serde_json::from_value(body).unwrap(),
+            )
+            .await
+            .expect("save");
+        }
+
+        let mut changes = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                entity_kind: Some("security_settings".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("audit read");
+        changes.sort_by_key(|event| event.created_at);
+        let summaries: Vec<&str> = changes.iter().map(|event| event.summary.as_str()).collect();
+        assert_eq!(
+            summaries,
+            [
+                "security settings saved for the install: sandbox relaxed",
+                "security settings saved for the install: no check relaxed or restored",
+                "security settings saved for the install: sandbox restored",
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
