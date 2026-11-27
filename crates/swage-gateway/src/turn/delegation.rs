@@ -344,6 +344,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
                 self.offered_tools
                     .is_offered(crate::tool::material::MATERIAL_READ_TOOL),
             ),
+            context_choices.material_quoting,
         )
         .await;
         let mut session_variables: std::collections::BTreeMap<String, String> = self

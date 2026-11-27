@@ -26119,6 +26119,7 @@ mod reference_materials {
                 session_id,
                 &general,
                 MaterialReach::ReadByTool,
+                crate::material::MaterialQuoting::AUTHORED,
             )
             .await
             .is_none(),
@@ -26160,7 +26161,8 @@ mod reference_materials {
             ))
             .await
             .unwrap();
-        let long_text = "x".repeat(crate::material::INLINE_MATERIAL_BYTES + 1);
+        let long_text =
+            "x".repeat(crate::material::MaterialQuoting::AUTHORED.per_material_bytes + 1);
         storage
             .create_material(new_material(
                 AttachmentScopeKind::Session,
@@ -26177,6 +26179,7 @@ mod reference_materials {
             session_id,
             &general,
             MaterialReach::ReadByTool,
+            crate::material::MaterialQuoting::AUTHORED,
         )
         .await
         .expect("active material yields the element");
@@ -26200,8 +26203,8 @@ mod reference_materials {
         let storage = Arc::new(MockStorage::new());
         let (_state, session_id) = make_state_with_storage(vec![], storage.clone()).await;
         let general = storage.general_scope().await.expect("general scope");
-        let file_text = "y".repeat(crate::material::INLINE_MATERIAL_BYTES);
-        let files = crate::material::INLINE_MATERIALS_TOTAL_BYTES / file_text.len() + 2;
+        let file_text = "y".repeat(crate::material::MaterialQuoting::AUTHORED.per_material_bytes);
+        let files = crate::material::MaterialQuoting::AUTHORED.total_bytes / file_text.len() + 2;
         for index in 0..files {
             storage
                 .create_material(new_material(
@@ -26219,6 +26222,7 @@ mod reference_materials {
             session_id,
             &general,
             MaterialReach::ReadByTool,
+            crate::material::MaterialQuoting::AUTHORED,
         )
         .await
         .expect("active material yields the element");
@@ -26226,7 +26230,7 @@ mod reference_materials {
         assert_eq!(text.matches("- notes/").count(), files);
         assert_eq!(
             text.matches("```text").count(),
-            crate::material::INLINE_MATERIALS_TOTAL_BYTES / file_text.len()
+            crate::material::MaterialQuoting::AUTHORED.total_bytes / file_text.len()
         );
     }
 
@@ -26282,6 +26286,7 @@ mod reference_materials {
             session.id,
             &orchard,
             MaterialReach::ReadByTool,
+            crate::material::MaterialQuoting::AUTHORED,
         )
         .await
         .expect("the topic's material yields the element");

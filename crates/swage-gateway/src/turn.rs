@@ -584,6 +584,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         swage_context::materials::MaterialReach::for_tools(
             offered_tools.is_offered(crate::tool::material::MATERIAL_READ_TOOL),
         ),
+        context_choices.material_quoting,
     )
     .await;
 

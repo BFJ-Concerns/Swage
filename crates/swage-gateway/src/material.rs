@@ -65,13 +65,28 @@ pub async fn create_material(
     map_material_response(state, material).await
 }
 
-/// The longest material text quoted whole in a turn's context.
-pub const INLINE_MATERIAL_BYTES: usize = 4096;
+/// How much of a session's reference material a turn quotes whole in its
+/// context. Materials past either limit are named with their id for
+/// `material_read`. Which limits serve a session is drawn at the
+/// `context.material_quoting` experiment location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialQuoting {
+    /// The variant id recorded for these limits.
+    pub variant: &'static str,
+    /// The longest material quoted whole.
+    pub per_material_bytes: usize,
+    /// The most text quoted across all of a turn's materials, so a folder
+    /// of short files is listed rather than poured into every turn.
+    pub total_bytes: usize,
+}
 
-/// The most material text a turn's context quotes across all its materials,
-/// so a folder of short files is listed rather than poured into every turn.
-/// Materials past it are named with their id for `material_read`.
-pub const INLINE_MATERIALS_TOTAL_BYTES: usize = 16 * 1024;
+impl MaterialQuoting {
+    pub const AUTHORED: Self = Self {
+        variant: "short-whole-v1",
+        per_material_bytes: 4096,
+        total_bytes: 16 * 1024,
+    };
+}
 
 /// The reference material a turn in `session_id` sees: the session's own
 /// active materials and, inside a topic, the topic's. `None` when nothing is
@@ -83,6 +98,7 @@ pub async fn load_reference_materials(
     session_id: Uuid,
     topic: &swage_storage::Topic,
     reach: MaterialReach,
+    quoting: MaterialQuoting,
 ) -> Option<MaterialsElement> {
     let mut active = Vec::new();
     match storage.list_materials_by_session(session_id).await {
@@ -110,10 +126,17 @@ pub async fn load_reference_materials(
     if active.is_empty() {
         return None;
     }
-    let mut quote_budget = INLINE_MATERIALS_TOTAL_BYTES;
+    let mut quote_budget = quoting.total_bytes;
     let materials = active
         .into_iter()
-        .map(|(material, scope)| reference_material(material, scope, &mut quote_budget))
+        .map(|(material, scope)| {
+            reference_material(
+                material,
+                scope,
+                quoting.per_material_bytes,
+                &mut quote_budget,
+            )
+        })
         .collect();
     Some(MaterialsElement::new(materials, reach))
 }
@@ -124,10 +147,11 @@ pub async fn load_reference_materials(
 fn reference_material(
     material: Material,
     scope: ReferenceMaterialScope,
+    per_material_bytes: usize,
     quote_budget: &mut usize,
 ) -> ReferenceMaterial {
     let byte_count = material.content_text.len();
-    let quoted = byte_count <= INLINE_MATERIAL_BYTES
+    let quoted = byte_count <= per_material_bytes
         && byte_count <= *quote_budget
         && material.mime_type.starts_with("text/");
     if quoted {
