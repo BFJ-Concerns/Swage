@@ -324,13 +324,15 @@ A credential travels in plaintext when the provider's `base_url` is
 `http://` and names an address other than this machine's loopback: anyone
 on the path can read it. A local model server on `localhost` or `127.0.0.1`
 is never plaintext in this sense, and needs no setting. For a remote
-`http://` endpoint the provider entry's `plaintext_credentials` decides what
-happens, judged when the provider is built:
+`http://` endpoint, **Plaintext credentials** in the provider's form under
+**Settings → Providers** sets `plaintext_credentials`. The policy applies
+when the provider is built and when model discovery sends a credential.
 
 - `warn` (the default) — requests are sent, after one warning for the
   provider in the audit record (event kind `provider_credential_exposure`).
-  A rebuild of the same provider finds the warning and adds none; if the
-  warning cannot be recorded, nothing is sent.
+  A rebuild of the same provider finds the warning and adds none. If the
+  audit record cannot be written, the gateway logs the warning and still
+  sends the request.
 - `refuse` — nothing is sent: every request fails with the reason, and the
   refusal is recorded once.
 - `allow` — requests are sent and nothing is recorded.
@@ -996,6 +998,11 @@ one is available.
 `file_search`, `shell`, and `python_execute`. Of these, `shell` is one of the
 two sandbox-eligible tools.
 
+`python_execute` runs each program in a fresh interpreter with Python's standard
+built-ins and standard-library imports. The default Python sandbox starts it in
+a private working directory with no network access. The supplied `swage` module
+can call the file, shell and web tools available to the turn.
+
 **Browser** — `browser_navigate`, `browser_snapshot`, `browser_click`,
 `browser_type`, `browser_select`, and `browser_scroll`.
 
@@ -1048,7 +1055,9 @@ of the attached workspace's write permission:
 
 `shell` retains stdout and stderr artefacts only when the output stream was
 truncated — a stream that fits in the tool result is reported inline and the
-artefact file is removed. Three browser action tools — `browser_click`,
+artefact file is removed. The two streams share the output limit: a short
+stream is reported whole beside a long one, and two long streams take half
+the limit each. Three browser action tools — `browser_click`,
 `browser_select`, and `browser_scroll` — write a post-action screenshot when
 the browser screenshot policy is not Off; `browser_type` never captures.
 `browser_snapshot` writes a full
@@ -1071,4 +1080,6 @@ workspace. Paired-device execution still stores artefacts relative to its
 working directory at `.swage/tool-output/` and reports relative paths.
 
 Operators can register additional tools through plugins; plugin tool names come
-from the plugin manifest rather than the gateway's built-in set.
+from the plugin manifest rather than the gateway's built-in set. A plugin
+whose tool takes a built-in tool's name, or a name another tool already has,
+is left out at startup with a warning in the gateway's log.

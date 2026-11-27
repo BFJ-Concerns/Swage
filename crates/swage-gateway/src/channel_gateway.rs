@@ -1019,7 +1019,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("channels.db");
         let storage = Arc::new(swage_storage::SqliteStorage::open(&database).unwrap());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage.clone(),
             Arc::new(crate::turn::tests::MockProvider::new(vec![
@@ -1124,7 +1124,7 @@ mod tests {
         drop(state);
         drop(storage);
         let reopened = Arc::new(swage_storage::SqliteStorage::open(&database).unwrap());
-        let rebuilt = AppState::new(
+        let rebuilt = AppState::for_test(
             reopened.clone(),
             reopened,
             Arc::new(crate::turn::tests::MockProvider::new(vec![
@@ -1183,7 +1183,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn shared_channel_targets_receive_one_delivery_per_drained_turn() {
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage.clone(),
             Arc::new(crate::turn::tests::MockProvider::new(vec![
@@ -1309,7 +1309,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn interleaved_channel_origins_keep_session_arrival_order() {
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage.clone(),
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -1406,7 +1406,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn older_inbox_arrival_precedes_direct_input_queued_during_resolution() {
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage.clone(),
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -1861,7 +1861,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_surface_delivery_records_the_schedule_run_or_the_turn_behind_it() {
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage.clone(),
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),

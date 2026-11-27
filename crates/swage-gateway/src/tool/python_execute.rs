@@ -45,13 +45,14 @@ impl Tool for PythonExecuteTool {
     fn description(&self) -> &str {
         "Run a Python program and return what it printed, as `output`. It is for \
          computation: arithmetic, parsing, working over data, anything a few lines of code \
-         settle more surely than reasoning does. Each call is a new interpreter started in \
-         the session's working directory, so nothing defined in one call exists in the next, \
-         and only what the program prints comes back. The standard library can be imported \
-         and third-party packages cannot. Not every built-in function is defined (`open`, \
-         `map` and `round` are among the missing), and one that is missing can be imported \
-         from the standard library's `builtins` module. An exception fails the call with its \
-         traceback, and so does running past the installation's time limit. The program \
+         settle more surely than reasoning does. Each call is a new interpreter, so nothing \
+         defined in one call exists in the next, and only what the program prints comes \
+         back. The standard library can be imported and third-party packages cannot. An \
+         exception fails the call with its traceback, and so does running past the \
+         installation's time limit. Unless the operator has lifted it, the program runs \
+         sandboxed: it starts in an empty directory of its own, anything it writes there is \
+         gone when the call ends, and neither the session's files nor the network can be \
+         reached from inside it, by `open` or by any standard-library module. The program \
          reaches files, commands and the web through the `swage` module, which is already in \
          scope. Each of its functions makes one call to the tool it is named for and returns \
          that tool's result object, the same fields a direct call gives: \

@@ -14,8 +14,16 @@ const resultsDir = process.env.SWAGE_E2E_RESULTS_DIR ?? join(invocationDir, "pla
 const gatewayPort = Number(process.env.SWAGE_E2E_GATEWAY_PORT ?? "33100");
 const providerPort = Number(process.env.SWAGE_E2E_PROVIDER_PORT ?? "33101");
 await mkdir(invocationDir, { recursive: true });
+// The gateway reads and writes memory beneath SWAGE_HOME, including
+// general/memory and topics/*/memory. Give both scopes this run's root.
 const swageRoot = join(invocationDir, "state");
 await mkdir(swageRoot, { recursive: true });
+const gatewayEnvironment = { ...process.env, SWAGE_HOME: swageRoot };
+for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"]) {
+  const directory = join(swageRoot, "gateway-environment", key);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  gatewayEnvironment[key] = directory;
+}
 
 await writeFile(join(swageRoot, "config.toml"), `
 [server]
@@ -98,9 +106,7 @@ start(join(targetDir, "debug/swage"), [
 ], {
   cwd: repoDir,
   env: {
-    ...process.env,
-    SWAGE_HOME: swageRoot,
-    XDG_RUNTIME_DIR: join(swageRoot, "run"),
+    ...gatewayEnvironment,
     SWAGE_E2E_PROVIDER_KEY: "test-only",
     SWAGE_MANAGED_SECRET_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   },
