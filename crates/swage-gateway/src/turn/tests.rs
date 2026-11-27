@@ -5015,7 +5015,11 @@ impl swage_storage::SurfaceAnnotationStore for MockStorage {
 
 #[async_trait]
 impl TurnStore for MockStorage {
-    async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError> {
+    async fn create_attributed_turn(
+        &self,
+        turn: NewTurn,
+        attribution: swage_storage::model::TurnAttribution,
+    ) -> Result<Turn, StorageError> {
         let t = Turn {
             id: Uuid::new_v4(),
             thread_id: turn.thread_id,
@@ -5035,49 +5039,11 @@ impl TurnStore for MockStorage {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
-            attribution: None,
+            attribution,
+            resume_delegation: false,
         };
         self.db.lock().await.turns.insert(t.id, t.clone());
         Ok(t)
-    }
-
-    async fn settle_delegation_result(&self, call: ToolCallRecord) -> Result<(), StorageError> {
-        let write = self.turn_state_write_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if self.fail_tool_call_settlement.load(Ordering::SeqCst)
-            || self.fail_turn_state_writes.load(Ordering::SeqCst)
-            || self.fail_turn_state_write_at.load(Ordering::SeqCst) == write
-        {
-            return Err(StorageError::QueryFailed(
-                "delegation settlement refused by the test".into(),
-            ));
-        }
-        let mut db = self.db.lock().await;
-        let valid = call.result.is_some()
-            && call.model_result.is_some()
-            && call.status.is_some()
-            && call.duration_ms.is_some()
-            && db
-                .turns
-                .get(&call.turn_id)
-                .is_some_and(|turn| turn.state == TurnState::Delegating);
-        let index = db.tool_calls.iter().position(|stored| {
-            stored.id == call.id && stored.turn_id == call.turn_id && stored.result.is_none()
-        });
-        if !valid || index.is_none() {
-            return Err(StorageError::QueryFailed(
-                "delegation settlement has no matching wait and started call".into(),
-            ));
-        }
-        let stored = &mut db.tool_calls[index.unwrap()];
-        stored.result = call.result;
-        stored.model_result = call.model_result;
-        stored.status = call.status;
-        stored.duration_ms = call.duration_ms;
-        stored.truncated = call.truncated;
-        stored.total_bytes = call.total_bytes;
-        stored.execution = call.execution;
-        db.turns.get_mut(&call.turn_id).unwrap().state = TurnState::Processing;
-        Ok(())
     }
 
     async fn update_structured_output(
@@ -5108,18 +5074,6 @@ impl TurnStore for MockStorage {
             db.turns.remove(&id);
         }
         Ok(db.turns.get(&id).cloned())
-    }
-
-    async fn get_turn_observation(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<(Turn, chrono::DateTime<chrono::Utc>)>, StorageError> {
-        let db = self.db.lock().await;
-        Ok(db
-            .turns
-            .get(&id)
-            .cloned()
-            .map(|turn| (turn, chrono::Utc::now())))
     }
 
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
@@ -5164,14 +5118,6 @@ impl TurnStore for MockStorage {
         }
         let mut db = self.db.lock().await;
         if let Some(turn) = db.turns.get_mut(&id) {
-            if turn.state == TurnState::Delegating
-                && !state.is_terminal()
-                && state != TurnState::Delegating
-            {
-                return Err(StorageError::QueryFailed(
-                    "a delegating turn must settle its owning tool result before changing to another non-terminal state".into(),
-                ));
-            }
             if state.is_terminal() {
                 turn.completed_at = Some(chrono::Utc::now());
             }
@@ -6043,13 +5989,6 @@ fn enqueue_mock_turn_input(
         .map(|queued| queued.seq)
         .max()
         .map_or(0, |seq| seq + 1);
-    let arrived_at = input
-        .channel_message_ids
-        .iter()
-        .filter_map(|id| db.channel_messages.iter().find(|row| row.id == *id))
-        .map(|row| row.received_at)
-        .min()
-        .unwrap_or_else(chrono::Utc::now);
     let queued = swage_storage::QueuedTurnInput {
         requested_model: input.requested_model,
         delivery_targets: input.delivery_targets,
@@ -6064,7 +6003,7 @@ fn enqueue_mock_turn_input(
         attachments: input.attachments,
         schedule_run_id: input.schedule_run_id,
         channel_message_ids: input.channel_message_ids,
-        created_at: arrived_at,
+        created_at: chrono::Utc::now(),
     };
     db.turn_queue.push(queued.clone());
     queued
@@ -6099,7 +6038,7 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
         use swage_storage::ChannelInboundMessageState::{Pending, Presented};
         let mut db = self.db.lock().await;
         let parent_valid = db.turns.get(&parent_turn_id).is_some_and(|parent| {
-            parent.state == TurnState::Delegating
+            (parent.state == TurnState::Delegating || parent.resume_delegation)
                 && parent.parent_turn_id.is_none()
                 && parent.thread_id == input.thread_id
         }) && db
@@ -6134,6 +6073,7 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
         }
         let parent = db.turns.get_mut(&parent_turn_id).unwrap();
         parent.state = TurnState::Interrupted;
+        parent.resume_delegation = false;
         parent.completed_at = Some(chrono::Utc::now());
         Ok(enqueue_mock_turn_input(&mut db, input))
     }
@@ -6149,7 +6089,7 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             .filter(|queued| queued.session_id == session_id)
             .cloned()
             .collect();
-        queued.sort_by_key(|queued| (queued.created_at, queued.seq));
+        queued.sort_by_key(|queued| queued.seq);
         Ok(queued)
     }
 
@@ -6175,33 +6115,19 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             .map(|item| item.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
+        let attribution = swage_storage::model::TurnAttribution::from_queue(&queued);
         let turn = self
-            .create_turn(swage_storage::NewTurn {
-                thread_id,
-                agent_id: agent_id.to_string(),
-                state: swage_storage::TurnState::Pending,
-                user_input: Some(user_input),
-                parent_turn_id: None,
-            })
+            .create_attributed_turn(
+                swage_storage::NewTurn {
+                    thread_id,
+                    agent_id: agent_id.to_string(),
+                    state: swage_storage::TurnState::Pending,
+                    user_input: Some(user_input),
+                    parent_turn_id: None,
+                },
+                attribution.clone(),
+            )
             .await?;
-        // The drain records how the batch was started on the turn, as the
-        // real one does.
-        let attribution = swage_storage::model::TurnAttribution {
-            attended: queued.iter().any(|input| input.attended),
-            delivery_targets: queued
-                .iter()
-                .flat_map(|input| input.delivery_targets.clone())
-                .collect(),
-        };
-        let turn = {
-            let mut db = self.db.lock().await;
-            let stored = db
-                .turns
-                .get_mut(&turn.id)
-                .expect("the turn was just created");
-            stored.attribution = Some(attribution.clone());
-            stored.clone()
-        };
         let mut messages = Vec::new();
         for item in &queued {
             messages.push(
@@ -6740,25 +6666,6 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
                 id: id.to_string(),
             })?;
         message.payload = payload;
-        Ok(())
-    }
-    async fn reissue_agent_message(
-        &self,
-        id: Uuid,
-        payload: serde_json::Value,
-    ) -> Result<(), StorageError> {
-        let mut db = self.db.lock().await;
-        let message = db
-            .agent_messages
-            .get_mut(&id)
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "agent_message".into(),
-                id: id.to_string(),
-            })?;
-        message.payload = payload;
-        message.status = swage_core::MessageStatus::Pending;
-        message.failure_reason = None;
-        message.created_at = chrono::Utc::now();
         Ok(())
     }
     async fn find_delegate_for_thread(
@@ -13113,114 +13020,6 @@ async fn delegated_snapshot_loss_records_degradation_and_double_failure_escalate
             .state,
         TurnState::Failed,
         "an unrecorded reconstructive gap must force the delegated child turn to fail"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn review_fix_2_detached_observation_includes_completion_time() {
-    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage.general_scope().await.expect("default topic");
-    let session = storage
-        .create_session(new_session(topic.id))
-        .await
-        .expect("create session");
-    let session_id = session.id;
-    let root_thread = ThreadStore::create(
-        &*storage,
-        NewThread {
-            session_id,
-            agent_id: "gateway".to_string(),
-        },
-    )
-    .await
-    .expect("create root thread");
-
-    let child_started = Arc::new(Notify::new());
-    let child_release = Arc::new(Notify::new());
-    let child_marker = Uuid::new_v4().to_string();
-    let (provider, _captured_requests) = DetachedGatedProvider::new(
-        child_started.clone(),
-        child_release.clone(),
-        child_marker.clone(),
-    );
-
-    let dispatcher =
-        crate::tool::ToolDispatcher::allow_all(vec![
-            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>
-        ]);
-    let root = tempfile::tempdir().unwrap();
-    let state = AppState::new_with_config_root(
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
-        Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
-        dispatcher,
-        None,
-        root.path().to_path_buf(),
-    );
-
-    let pause =
-        crate::workflow::workflow_pause_test_hook::install("detached-snapshot-pending", session_id);
-    let parent_state = state.clone();
-    let parent = tokio::spawn(async move {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        process_turn(
-            &parent_state,
-            session_id,
-            None,
-            "Delegate independently".to_string(),
-            tx,
-            Arc::new(Mutex::new(SubscriptionState::new(true))),
-            None,
-        )
-        .await
-        .unwrap();
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-    child_release.notify_one();
-    let child_turn = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let children = state.storage.list_by_topic(topic.id).await.unwrap();
-            for child in children.into_iter().filter(|child| child.id != session_id) {
-                for thread in state.storage.list_by_session(child.id).await.unwrap() {
-                    for turn in state.storage.list_turns_by_thread(thread.id).await.unwrap() {
-                        if turn.state == TurnState::Completed {
-                            return turn;
-                        }
-                    }
-                }
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    pause.release.add_permits(1);
-    parent.await.unwrap();
-    let root_turn = state
-        .storage
-        .list_turns_by_thread(root_thread.id)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let calls = state
-        .storage
-        .list_tool_calls_by_turn(root_turn.id)
-        .await
-        .unwrap();
-    let call = calls.iter().find(|call| call.tool == "delegate").unwrap();
-    let output: serde_json::Value = serde_json::from_str(call.result.as_deref().unwrap()).unwrap();
-    assert_eq!(output["status"], "completed");
-    let observed =
-        chrono::DateTime::parse_from_rfc3339(output["status_as_of"].as_str().unwrap()).unwrap();
-    assert!(
-        observed >= child_turn.completed_at.unwrap(),
-        "a completed detached child observation must not precede its completion"
     );
 }
 
@@ -25411,228 +25210,6 @@ async fn delegated_prompt_audit_failure_still_runs_child() {
             .iter()
             .all(|event| event.entity_id != "task.prompt")
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ordinary_child_turn_restores_its_delegation_bound() {
-    let _home = SwageHomeGuard::isolate();
-    let mut config = swage_config::ResolvedConfig::default();
-    config.sandbox.enabled = false;
-    config.sessions.max_delegation_depth = 1;
-    let DelegationBoundsFixture {
-        state,
-        storage,
-        topic,
-        parent_turn,
-        ..
-    } = delegation_bounds_state(vec![delegation_answer(), delegation_answer()], config).await;
-    let handler = GatewayDelegationHandler::new(state.clone());
-    handler
-        .handle_delegation(
-            "a",
-            "first",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            DispatchContextComposition::default(),
-            "first",
-            "root",
-            parent_turn,
-            topic,
-            CancellationToken::new(),
-            DelegateCompletionMode::Wait,
-        )
-        .await
-        .unwrap();
-    let child = storage
-        .list_sessions_by_agent_id("a")
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let thread = storage
-        .list_by_session(child.id)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let turn = storage
-        .create_turn(NewTurn {
-            thread_id: thread.id,
-            agent_id: "a".into(),
-            state: TurnState::Processing,
-            user_input: Some("later".into()),
-            parent_turn_id: None,
-        })
-        .await
-        .unwrap();
-    let result = GatewayDelegationHandler::new(state)
-        .handle_delegation(
-            "b",
-            "later",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            DispatchContextComposition::default(),
-            "later",
-            "a",
-            turn.id,
-            topic,
-            CancellationToken::new(),
-            DelegateCompletionMode::Wait,
-        )
-        .await;
-    assert!(
-        result.is_err(),
-        "an ordinary later child turn must keep its ancestor's depth bound"
-    );
-    assert!(
-        storage
-            .list_sessions_by_agent_id("b")
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    let events = storage
-        .list_audit_events_by_session(child.id)
-        .await
-        .unwrap();
-    assert!(
-        events
-            .iter()
-            .any(|event| event.event_kind == "delegation_refused" && event.metadata["limit"] == 1)
-    );
-}
-
-async fn named_child_keeps_creation_bound(initial: u64, changed: u64) {
-    let _home = SwageHomeGuard::isolate();
-    let mut config = swage_config::ResolvedConfig::default();
-    config.sandbox.enabled = false;
-    config.sessions.max_delegation_depth = initial;
-    config.tools.permissions.allow = vec!["delegate".into()];
-    config.tools.permissions.require_approval = vec![];
-    let delegation = vec![
-        StreamChunk::ToolUse {
-            call_id: "nested".into(),
-            name: "delegate".into(),
-            arguments: serde_json::json!({"target_agent": "b", "task": "continue"}),
-        },
-        StreamChunk::Done {
-            finish_reason: Some(FinishReason::ToolUse),
-        },
-    ];
-    let DelegationBoundsFixture {
-        state,
-        storage,
-        topic,
-        parent_turn,
-        ..
-    } = delegation_bounds_state(
-        vec![
-            delegation_answer(),
-            delegation,
-            delegation_answer(),
-            delegation_answer(),
-            delegation_answer(),
-        ],
-        config,
-    )
-    .await;
-    GatewayDelegationHandler::new(state.clone())
-        .handle_delegation(
-            "a",
-            "first",
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("held"),
-            DispatchContextComposition::default(),
-            "first",
-            "root",
-            parent_turn,
-            topic,
-            CancellationToken::new(),
-            DelegateCompletionMode::Wait,
-        )
-        .await
-        .unwrap();
-    state
-        .runtime_config
-        .write()
-        .unwrap()
-        .sessions
-        .max_delegation_depth = changed;
-    GatewayDelegationHandler::new(state.clone())
-        .handle_delegation(
-            "a",
-            "continue",
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("held"),
-            DispatchContextComposition::default(),
-            "second",
-            "root",
-            parent_turn,
-            topic,
-            CancellationToken::new(),
-            DelegateCompletionMode::Wait,
-        )
-        .await
-        .unwrap();
-    let nested = storage.list_sessions_by_agent_id("b").await.unwrap();
-    assert_eq!(
-        !nested.is_empty(),
-        initial > 1,
-        "named continuation must use its creation limit rather than the current setting"
-    );
-    GatewayDelegationHandler::new(state)
-        .handle_delegation(
-            "a",
-            "fresh",
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("fresh"),
-            DispatchContextComposition::default(),
-            "fresh",
-            "root",
-            parent_turn,
-            topic,
-            CancellationToken::new(),
-            DelegateCompletionMode::Wait,
-        )
-        .await
-        .unwrap();
-    let children = storage.list_sessions_by_agent_id("a").await.unwrap();
-    assert!(
-        children
-            .iter()
-            .any(|child| child.metadata.as_ref().unwrap()["delegation_bound"]["limit"] == changed),
-        "fresh chains use the changed setting"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn named_child_retains_limit_after_setting_is_raised() {
-    named_child_keeps_creation_bound(1, 3).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn named_child_retains_limit_after_setting_is_lowered() {
-    named_child_keeps_creation_bound(2, 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

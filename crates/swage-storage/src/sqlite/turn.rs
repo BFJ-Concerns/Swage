@@ -118,30 +118,20 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
                 })?
         },
         failure_message: row.get(18)?,
-        attribution: {
-            let attended: Option<bool> = row.get(19)?;
-            let targets: Option<String> = row.get(20)?;
-            attended
-                .map(|attended| -> rusqlite::Result<TurnAttribution> {
-                    let delivery_targets = targets
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                20,
-                                rusqlite::types::Type::Text,
-                                Box::new(ParseError(e.to_string())),
-                            )
-                        })?
-                        .unwrap_or_default();
-                    Ok(TurnAttribution {
-                        attended,
-                        delivery_targets,
-                    })
-                })
-                .transpose()?
+        attribution: TurnAttribution {
+            attended: row.get(19)?,
+            delivery_targets: serde_json::from_str(&row.get::<_, String>(20)?).map_err(
+                |error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        20,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                },
+            )?,
+            automation_owned: row.get(21)?,
         },
+        resume_delegation: row.get(22)?,
         created_at: parse_dt(&created)?,
         completed_at: completed.as_deref().map(parse_dt).transpose()?,
     })
@@ -153,7 +143,11 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
 
 #[async_trait]
 impl TurnStore for SqliteStorage {
-    async fn create_turn(&self, mut turn: NewTurn) -> Result<Turn, StorageError> {
+    async fn create_attributed_turn(
+        &self,
+        mut turn: NewTurn,
+        attribution: TurnAttribution,
+    ) -> Result<Turn, StorageError> {
         self.mask_option(&mut turn.user_input);
         self.with_conn(|conn| {
             let id = Uuid::new_v4();
@@ -163,9 +157,12 @@ impl TurnStore for SqliteStorage {
 
             let parent_str = turn.parent_turn_id.map(|p| p.to_string());
 
+            let targets = serde_json::to_string(&attribution.delivery_targets)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             conn.execute(
-                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at, parent_turn_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at,
+                                    parent_turn_id, attended, delivery_targets, automation_owned)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     id.to_string(),
                     turn.thread_id.to_string(),
@@ -174,6 +171,9 @@ impl TurnStore for SqliteStorage {
                     &state_str,
                     &now_str,
                     &parent_str,
+                    attribution.attended,
+                    targets,
+                    attribution.automation_owned,
                 ],
             )?;
 
@@ -196,23 +196,14 @@ impl TurnStore for SqliteStorage {
                 delegated_output_tokens: None,
                 execution_isolation: None,
                 failure_message: None,
-                            attribution: None,
-})
+                attribution,
+                resume_delegation: false,
+            })
         })
         .await
     }
 
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError> {
-        Ok(self
-            .get_turn_observation(id)
-            .await?
-            .map(|(record, _)| record))
-    }
-
-    async fn get_turn_observation(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<(Turn, chrono::DateTime<chrono::Utc>)>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
@@ -220,14 +211,27 @@ impl TurnStore for SqliteStorage {
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
                         isolation_kind, isolation_detail, failure_message,
-                        attended, delivery_targets
+                        attended, delivery_targets, automation_owned, resume_delegation
                  FROM turns WHERE id = ?1",
                 params![id.to_string()],
-                |row| Ok((row_to_turn(row)?, chrono::Utc::now())),
+                row_to_turn,
             )
             .optional()
         })
         .await
+    }
+
+    async fn interrupt_turn_for_shutdown(&self, id: Uuid) -> Result<(), StorageError> {
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE turns SET state = 'interrupted', completed_at = ?2,
+                        resume_delegation = state = 'delegating' AND parent_turn_id IS NULL AND NOT automation_owned
+                 WHERE id = ?1 AND state IN ('pending', 'processing', 'awaiting_approval', 'delegating')",
+                params![id.to_string(), Utc::now().to_rfc3339()],
+            )
+        })
+        .await?;
+        Ok(())
     }
 
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
@@ -238,7 +242,7 @@ impl TurnStore for SqliteStorage {
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
                         isolation_kind, isolation_detail, failure_message,
-                        attended, delivery_targets
+                        attended, delivery_targets, automation_owned, resume_delegation
                  FROM turns WHERE thread_id = ?1
                  ORDER BY created_at ASC",
             )?;
@@ -256,7 +260,7 @@ impl TurnStore for SqliteStorage {
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
                         isolation_kind, isolation_detail, failure_message,
-                        attended, delivery_targets
+                        attended, delivery_targets, automation_owned, resume_delegation
                  FROM turns WHERE parent_turn_id = ?1
                  ORDER BY created_at ASC",
             )?;
@@ -280,7 +284,7 @@ impl TurnStore for SqliteStorage {
         // below — "first terminal state wins" without a read-then-write race.
         let is_terminal = new_state.is_terminal();
 
-        let wait_blocked = self.with_conn(move |conn| {
+        self.with_conn(move |conn| {
             let state_str = new_state.to_string();
             // The WHERE excludes terminal states so a concurrent Interrupted
             // write can't be overwritten by a late Completed transition.
@@ -292,82 +296,13 @@ impl TurnStore for SqliteStorage {
                     params![&state_str, &now_str, id.to_string()],
                 )?;
             } else {
-                let changed = conn.execute(
+                conn.execute(
                     "UPDATE turns SET state = ?1
-                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted', 'cancelled')
-                       AND (state != 'delegating' OR ?1 = 'delegating')",
+                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted', 'cancelled')",
                     params![&state_str, id.to_string()],
                 )?;
-                if changed == 0 {
-                    return conn.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM turns WHERE id = ?1 AND state = 'delegating')",
-                        params![id.to_string()],
-                        |row| row.get(0),
-                    );
-                }
             }
-            Ok(false)
-        })
-        .await?;
-        if wait_blocked {
-            return Err(StorageError::QueryFailed(
-                "a delegating turn must settle its owning tool result before changing to another non-terminal state".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn settle_delegation_result(
-        &self,
-        call: crate::model::ToolCallRecord,
-    ) -> Result<(), StorageError> {
-        let (Some(mut result), Some(mut model_result), Some(status), Some(duration_ms)) = (
-            call.result,
-            call.model_result,
-            call.status,
-            call.duration_ms,
-        ) else {
-            return Err(StorageError::QueryFailed(
-                "delegation settlement requires a complete tool result".into(),
-            ));
-        };
-        self.mask(&mut result);
-        self.mask(&mut model_result);
-        self.with_conn(move |conn| {
-            let tx = conn.unchecked_transaction()?;
-            let recorded = tx.execute(
-                "UPDATE tool_calls
-                 SET result = ?1, model_result = ?2, status = ?3, duration_ms = ?4,
-                     truncated = ?5, total_bytes = ?6, execution = ?9
-                 WHERE id = ?7 AND turn_id = ?8 AND result IS NULL",
-                params![
-                    result,
-                    model_result,
-                    status,
-                    duration_ms,
-                    call.truncated,
-                    call.total_bytes,
-                    call.id.to_string(),
-                    call.turn_id.to_string(),
-                    call.execution
-                        .map(|value| serde_json::to_string(&value))
-                        .transpose()
-                        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(
-                            error
-                        )))?
-                ],
-            )?;
-            if recorded != 1 {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
-            }
-            let resumed = tx.execute(
-                "UPDATE turns SET state = 'processing' WHERE id = ?1 AND state = 'delegating'",
-                params![call.turn_id.to_string()],
-            )?;
-            if resumed != 1 {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
-            }
-            tx.commit()
+            Ok(())
         })
         .await
     }
@@ -405,7 +340,7 @@ impl TurnStore for SqliteStorage {
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
                         isolation_kind, isolation_detail, failure_message,
-                        attended, delivery_targets
+                        attended, delivery_targets, automation_owned, resume_delegation
                  FROM turns WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;
@@ -727,48 +662,6 @@ mod tests {
         let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert_eq!(updated.state, TurnState::Processing);
         assert!(updated.completed_at.is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn delegation_wait_rejects_non_terminal_transitions_until_settlement() {
-        let (storage, thread_id) = make_thread().await;
-        for terminal in [
-            TurnState::Completed,
-            TurnState::Refused,
-            TurnState::Incomplete,
-            TurnState::Failed,
-            TurnState::Interrupted,
-            TurnState::Cancelled,
-        ] {
-            let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
-            storage
-                .update_turn_state(turn.id, TurnState::Delegating)
-                .await
-                .unwrap();
-            for state in [
-                TurnState::Pending,
-                TurnState::Processing,
-                TurnState::AwaitingApproval,
-            ] {
-                let error = storage.update_turn_state(turn.id, state).await.unwrap_err();
-                assert!(error.to_string().contains("owning tool result"));
-                assert_eq!(
-                    storage.get_turn(turn.id).await.unwrap().unwrap().state,
-                    TurnState::Delegating
-                );
-            }
-            storage
-                .update_turn_state(turn.id, TurnState::Delegating)
-                .await
-                .unwrap();
-            storage
-                .update_turn_state(turn.id, terminal.clone())
-                .await
-                .unwrap();
-            let ended = storage.get_turn(turn.id).await.unwrap().unwrap();
-            assert_eq!(ended.state, terminal);
-            assert!(ended.completed_at.is_some());
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

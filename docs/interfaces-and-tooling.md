@@ -812,13 +812,12 @@ turn that was waiting on a delegated agent resumes from the record: each
 child's fate — its result if it finished before the restart, its failure,
 or a note that it was cut off with its session and thread named — goes to
 the parent agent's mailbox under the delegation that started it, and a
-continuation is queued on the parent's conversation saying the gateway
-restarted while the turn waited and what became of each child. The
-startup drain starts that turn, the child's result enters the thread
-first (labelled as a delegation notice), and the parent carries on or
-returns to a cut-off child's thread. A child whose delegation record
-cannot be found is noted as a degraded turn record in the audit trail;
-the continuation still names it.
+continuation is queued on the parent's conversation with the original
+turn's attendance. The startup drain starts that turn and delivers
+the child's result into the parent's thread as a delegation notice. The
+parent can then carry on or return to a cut-off child's thread. A child
+whose delegation record cannot be found is noted as a degraded turn
+record in the audit trail.
 
 ## API error contract
 

@@ -802,9 +802,9 @@ fn open_storage(path: &std::path::Path) -> Arc<swage_storage::SqliteStorage> {
 }
 
 fn storage_open_error(path: &std::path::Path, error: &swage_core::StorageError) -> String {
-    if let swage_core::StorageError::UnknownSchema { message } = error {
+    if matches!(error, swage_core::StorageError::UnknownSchema { .. }) {
         return format!(
-            "The database at {} was not produced by this build ({message}). Rebuild this data root, or run the build that owns it; data migration is not supported during the private alpha.",
+            "The database at {} was not produced by this build. Rebuild this data root or run the build that owns it. Data migration is unavailable during the private alpha.",
             path.display()
         );
     }
@@ -1693,7 +1693,7 @@ mod tests {
 
         assert!(message.contains(&path.display().to_string()));
         assert!(message.contains("not produced by this build"));
-        assert!(message.contains("Rebuild this data root"));
+        assert_eq!(message.matches("Rebuild this data root").count(), 1);
         assert!(message.contains("data migration is not supported"));
     }
 

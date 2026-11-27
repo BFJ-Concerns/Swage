@@ -22,7 +22,7 @@ use crate::model::{
     PluginRevisionRecord, ProviderRoundRecord, RemovedSurfaceModule, Schedule, ScheduleRun,
     ScheduleRunUpdate, SecretRecord, Session, SessionActivity, SessionListing, SessionVariable,
     SourceCapture, SourceObservation, Surface, SurfaceAnnotation, SurfaceModule, TaskDefinition,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic, TopicSlug, Turn,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic, TopicSlug, Turn, TurnAttribution,
     TurnGraphRevisionRecord, TurnIsolation, TurnState, UpdateSchedule, WorkflowHoldSettlement,
     WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
     WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
@@ -308,10 +308,7 @@ pub trait TaskDefinitionStore: Send + Sync {
 /// as one batch by the drain that starts the next turn.
 #[async_trait]
 pub trait TurnQueueStore: Send + Sync {
-    /// Enqueue one arrival batch atomically, retaining a row per input.
-    /// Inbox-attributed inputs retain the earliest named inbox arrival time;
-    /// other inputs arrive now. List and drain order by arrival, with enqueue
-    /// sequence breaking ties, so destination resolution cannot reorder them.
+    /// Enqueue a batch atomically, retaining one row per input in sequence.
     async fn enqueue_turn_inputs(
         &self,
         inputs: Vec<NewQueuedTurnInput>,
@@ -328,14 +325,14 @@ pub trait TurnQueueStore: Send + Sync {
         parent_turn_id: Uuid,
         input: NewQueuedTurnInput,
     ) -> Result<QueuedTurnInput, StorageError>;
-    /// Everything queued for a session, in arrival order.
+    /// Everything queued for a session, in enqueue order.
     async fn list_queued_turn_inputs(
         &self,
         session_id: Uuid,
     ) -> Result<Vec<QueuedTurnInput>, StorageError>;
     /// Run the first consecutive thread group as one turn, atomically: the turn row created
     /// (its input the queued texts joined by a blank line), one message row per
-    /// input in that group in arrival order with its origin, and those queue rows
+    /// input in that group in enqueue order with its origin, and those queue rows
     /// removed — all or nothing. `None` when nothing was queued, or when the
     /// thread already holds a live turn and the one-live-turn index refused the
     /// claim; the queue is then untouched.
@@ -612,42 +609,28 @@ pub trait MaterialStore: Send + Sync {
 
 #[async_trait]
 pub trait TurnStore: Send + Sync {
-    async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError>;
-    async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError>;
-    /// Read state and its observation time together, while the storage snapshot is held.
-    async fn get_turn_observation(
-        &self,
-        _id: Uuid,
-    ) -> Result<Option<(Turn, chrono::DateTime<chrono::Utc>)>, StorageError> {
-        Err(StorageError::QueryFailed(
-            "turn observations are unsupported by this store".into(),
-        ))
+    async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError> {
+        self.create_attributed_turn(turn, TurnAttribution::default())
+            .await
     }
+    async fn create_attributed_turn(
+        &self,
+        turn: NewTurn,
+        attribution: TurnAttribution,
+    ) -> Result<Turn, StorageError>;
 
+    async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError>;
+    /// Interrupt a live turn while retaining any delegation it was waiting on.
+    async fn interrupt_turn_for_shutdown(&self, id: Uuid) -> Result<(), StorageError> {
+        self.update_turn_state(id, TurnState::Interrupted).await
+    }
     /// List all turns for a thread ordered by created_at ascending.
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError>;
     /// The turns a delegating turn started — its children by
     /// `parent_turn_id` — in creation order.
     async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError>;
-    /// Update a turn's state.
-    ///
-    /// A Delegating turn can only leave its wait through atomic result
-    /// settlement or a terminal state. Other non-terminal transitions are
-    /// refused, so a later tool's approval cannot consume an unsettled wait.
+    /// Update a turn's state, preserving a terminal state once recorded.
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError>;
-    /// Record a delegating turn's tool result and return it to Processing in
-    /// one transaction. The caller must supply the call that owns the wait.
-    /// Only the result fields of the named, unsettled call
-    /// are changed. A missing call, a call owned by another turn, or a turn
-    /// no longer Delegating fails without changing either record.
-    ///
-    /// Stores that cannot provide this atomic hand-over reject it rather
-    /// than exposing a restart window between the result and the state.
-    async fn settle_delegation_result(&self, _call: ToolCallRecord) -> Result<(), StorageError> {
-        Err(StorageError::QueryFailed(
-            "atomic delegation settlement is not supported by this store".into(),
-        ))
-    }
     /// Force a turn to `Failed`, overriding the first-terminal-wins guard.
     ///
     /// The one sanctioned terminal-to-terminal transition: the record
@@ -1165,16 +1148,6 @@ pub trait AgentMessageStore: Send + Sync {
     /// Used by `DelegationExecutor` to annotate delegate messages with the
     /// child thread_id after creation, enabling scoped cancel fallback.
     async fn update_agent_message_payload(
-        &self,
-        id: Uuid,
-        payload: serde_json::Value,
-    ) -> Result<(), StorageError>;
-
-    /// Reissue a pending message with a new payload, dated now: a message
-    /// written before a restart and readdressed by its recovery is as new
-    /// as the restart, so the startup expiry of stale messages does not
-    /// take it before the drain delivers it.
-    async fn reissue_agent_message(
         &self,
         id: Uuid,
         payload: serde_json::Value,
@@ -2859,7 +2832,11 @@ mod tests {
 
     #[async_trait]
     impl TurnStore for StubStorage {
-        async fn create_turn(&self, _: NewTurn) -> Result<Turn, StorageError> {
+        async fn create_attributed_turn(
+            &self,
+            _: NewTurn,
+            _: TurnAttribution,
+        ) -> Result<Turn, StorageError> {
             unimplemented!()
         }
         async fn get_turn(&self, _: Uuid) -> Result<Option<Turn>, StorageError> {
@@ -3251,13 +3228,6 @@ mod tests {
             unimplemented!()
         }
         async fn update_agent_message_payload(
-            &self,
-            _: Uuid,
-            _: serde_json::Value,
-        ) -> Result<(), StorageError> {
-            unimplemented!()
-        }
-        async fn reissue_agent_message(
             &self,
             _: Uuid,
             _: serde_json::Value,

@@ -264,13 +264,24 @@ pub(super) async fn process_turn_with_composition_and_focus(
         None => {
             state
                 .storage
-                .create_turn(NewTurn {
-                    thread_id,
-                    agent_id: session.agent_id.clone(),
-                    state: TurnState::Pending,
-                    user_input: Some(content.clone()),
-                    parent_turn_id: None,
-                })
+                .create_attributed_turn(
+                    NewTurn {
+                        thread_id,
+                        agent_id: session.agent_id.clone(),
+                        state: TurnState::Pending,
+                        user_input: Some(content.clone()),
+                        parent_turn_id: None,
+                    },
+                    swage_storage::model::TurnAttribution {
+                        attended: attendance == TurnAttendance::Attended,
+                        automation_owned: matches!(
+                            origin,
+                            swage_storage::MessageOrigin::Schedule
+                                | swage_storage::MessageOrigin::Workflow
+                        ),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .map_err(|error| map_turn_creation_error(error, session_id))?
                 .id

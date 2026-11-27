@@ -14,7 +14,7 @@ use rusqlite::types::{Value, ValueRef};
 use swage_core::RegisteredSecretValues;
 
 /// The tables that hold registered values by design.
-const SECRET_TABLES: &[&str] = &["secrets", "managed_secret_values", "_swage_migrations"];
+const SECRET_TABLES: &[&str] = &["secrets", "managed_secret_values"];
 
 /// Install the masking functions and triggers on `conn`.
 pub(super) fn install(conn: &Connection, values: &RegisteredSecretValues) -> rusqlite::Result<()> {

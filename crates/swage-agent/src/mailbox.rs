@@ -17,7 +17,7 @@ use crate::error::AgentError;
 /// Categorised pending messages retrieved from the mailbox on instantiation.
 ///
 /// Result messages are deliberately absent: completed-delegation Results are
-/// owned by the turn path (`pending_results`/`claim_result` below), which
+/// owned by the turn path (`pending_results` below), which
 /// records each durably before claiming it. Instantiation never touches
 /// them — claiming one here would either lose it on a crash (claimed but
 /// never surfaced) or double-deliver against the turn path.
@@ -125,11 +125,7 @@ pub async fn check_mailbox(
 /// instantiation-shaped — it decides shutdown, collects cancellations, and
 /// claims every kind at once — and a turn loop must not run it, because
 /// claiming a Delegate or Shutdown there would swallow lifecycle messages
-/// the instantiation path owns. The turn path reads Results alone, records
-/// each durably, and only then claims it with [`claim_result`]: append
-/// before claim means a failure between the two re-delivers rather than
-/// loses, which is the right side of at-least-once for completed work.
-///
+/// the instantiation path owns.
 /// When a Shutdown is pending, nothing is returned: that mailbox belongs to
 /// the instantiation path, which also decides what happens to siblings, and
 /// delivering results past it would race that decision.
@@ -145,18 +141,6 @@ pub async fn pending_results(
         .into_iter()
         .filter(|m| m.kind == MessageKind::Result)
         .collect())
-}
-
-/// Claim one Result after it has been durably recorded. First claimer wins;
-/// `false` means another consumer claimed it between read and claim, and
-/// the caller's already-recorded copy stands as at-least-once delivery.
-pub async fn claim_result(
-    storage: &Arc<dyn Storage>,
-    message_id: Uuid,
-) -> Result<bool, AgentError> {
-    Ok(storage
-        .update_agent_message_status(message_id, MessageStatus::Delivered, None)
-        .await?)
 }
 
 #[cfg(test)]
@@ -296,7 +280,7 @@ mod tests {
             .unwrap();
 
         // Instantiation must not claim (or even surface) completed work —
-        // the turn path owns Results, append-before-claim.
+        // the turn path owns Results.
         check_mailbox(&storage, "agent-a").await.unwrap();
         let still_pending = pending_results(&storage, "agent-a").await.unwrap();
         assert_eq!(still_pending.len(), 1);
@@ -370,34 +354,6 @@ mod tests {
         assert_eq!(second.len(), 1);
         let contents = check_mailbox(&storage, "agent-a").await.unwrap();
         assert_eq!(contents.pending_delegates.len(), 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn claim_result_is_first_claimer_wins() {
-        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
-
-        let result = storage
-            .create_agent_message(NewAgentMessage {
-                sender_agent_id: "child".into(),
-                recipient_agent_id: "agent-a".into(),
-                kind: MessageKind::Result,
-                correlation_id: Some(Uuid::new_v4()),
-                payload: serde_json::json!({"response": "done"}),
-            })
-            .await
-            .unwrap();
-
-        assert!(claim_result(&storage, result.id).await.unwrap());
-        assert!(
-            !claim_result(&storage, result.id).await.unwrap(),
-            "a second claim must lose"
-        );
-        assert!(
-            pending_results(&storage, "agent-a")
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
