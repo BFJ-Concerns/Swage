@@ -1011,6 +1011,10 @@ account — see
 [Workflow engine — Terminal account](workflow-engine.md#terminal-account)).
 `workflow_run_status` and `workflow_run_account` are scoped to the caller's
 session topic: a run in another topic reads as absent rather than forbidden.
+`model_list` lists the models the catalogue serves to the session — each id,
+its aliases, the provider's name for it, its vendor family where the name
+shows one, and the effort levels it serves as asked — for a workflow call's
+`model` and `minEffort` or an agent definition's model.
 
 **Surfaces and delivery** — `surface_read`, `surface_write`, `surface_library`, and `run_event_post`.
 
