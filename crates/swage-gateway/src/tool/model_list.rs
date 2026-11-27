@@ -15,7 +15,9 @@ pub const MODEL_LIST_TOOL: &str = "model_list";
 
 /// The levels a model serves as asked, lowest first: a level outside the
 /// list is clamped to another, and an empty list means the model takes no
-/// effort setting at all.
+/// effort setting at all. `off` is in the list where the model can switch
+/// reasoning off, and is never what another level clamps to
+/// (`swage_core::resolve_effort`).
 fn levels_served_as_asked(capability: &EffortCapability) -> Vec<Effort> {
     let (mut levels, can_disable) = match capability {
         EffortCapability::None => return Vec::new(),
@@ -105,14 +107,20 @@ impl Tool for ModelListTool {
 
     fn description(&self) -> &str {
         "List the models this gateway serves to this session: the ids a workflow's `agent()` \
-         call can give as `model` or `fallbackModel`, and an agent definition as its model. \
-         Each entry gives the `id`, any `aliases` that name the same model, `model` (the \
-         provider's own name for it), `family` (`claude`, `gpt` or `gemini`; left out when the \
-         name matches none of them), and `effort_levels`: the levels the model is served at as \
-         asked. A call asking for a level not in that list is served at the nearest listed \
-         level below it, or at the lowest listed level when none is below it, and a model \
-         whose list is empty takes no effort setting. `default` is the id a call that \
-         names no model runs on. Listing changes nothing."
+         call can give as `model` or `fallbackModel`, and an agent definition as its model. An \
+         id outside the list fails the call that names it. Each entry gives the `id`, any \
+         `aliases` that name the same model, `model` (the provider's own name for it), \
+         `family` (`claude`, `gpt` or `gemini`; left out when the name matches none of them), \
+         and `effort_levels`: the levels the model is served at as asked, lowest first. A \
+         call asking for a level not in that list is served at the nearest listed level below \
+         it, or at the lowest when none is below it, and `off` never counts as either: it is \
+         listed where the model can switch reasoning off, and only a call that asks for `off` \
+         is served it. A model whose list is empty takes no effort setting. A workflow call \
+         that gives `minEffort` is refused rather than served below that level. `default` is \
+         the id a workflow call runs on when neither the call nor its script's `defaults` \
+         gives a `model`, an `agent` or a `task`. The listing is read from configuration: it \
+         uses no provider credential, calls no provider and changes nothing, so a listed \
+         model can still be unavailable when a call is made."
     }
 
     fn parameters(&self) -> Value {
