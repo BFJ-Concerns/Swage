@@ -65,6 +65,7 @@ mod succession;
 mod turn_input;
 pub(crate) mod turn_release;
 mod workspace;
+pub(crate) use workspace::expand_require_approval_entries;
 
 pub(crate) use configuration::*;
 pub(crate) use context::*;

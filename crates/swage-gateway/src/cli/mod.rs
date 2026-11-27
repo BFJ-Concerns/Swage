@@ -8,6 +8,7 @@
 pub mod completions;
 pub mod device;
 pub mod install;
+pub mod pair;
 pub mod recovery;
 pub mod restart;
 pub mod run;
@@ -74,6 +75,10 @@ pub enum Command {
 /// Arguments for `swage run`.
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
+    /// One-time code from `swage gateway pair`; remembered for this gateway.
+    #[arg(long)]
+    pub pairing_code: Option<String>,
+
     /// Gateway URL to connect to.
     ///
     /// Defaults to the running gateway's address found via runtime metadata,
@@ -135,6 +140,8 @@ pub enum GatewayCommand {
     Stop(StopArgs),
     /// Check whether the gateway is running.
     Status,
+    /// Issue a one-time code that pairs a device on the network with this gateway.
+    Pair,
 }
 
 // ---------------------------------------------------------------------------
