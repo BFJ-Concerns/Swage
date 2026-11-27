@@ -79,6 +79,7 @@ export interface StreamingStore {
     conversationId?: string | null,
     recoveredMessages?: MessageView[],
     queued?: ConversationDetail["queued"],
+    reportMissingRequest?: boolean,
   ): void;
   startTurn(
     content: string,
@@ -704,6 +705,7 @@ export function createStreamingStore(
       conversationId = currentConversationId(),
       recoveredMessages = options?.conversationStore?.activeConversation?.messages,
       queued = options?.conversationStore?.activeConversation?.queued,
+      reportMissingRequest = true,
     ): void {
       const ownerId = conversationId;
       const stream = streams.get(ownerId);
@@ -713,6 +715,7 @@ export function createStreamingStore(
       const lastMessage = recoveredMessages.at(-1);
       const approval = get(stream.pendingApprovalStore);
       const isApprovalTurn = approval && lastMessage?.turn_id === approval.turn_id;
+      const isQueuedTurn = stream.queuedTurnId && lastMessage?.turn_id === stream.queuedTurnId;
       const request = stream.pendingRequest;
       const isQueued = request && queued?.some((input) => input.client_id === request.message.client_id);
       let unsent = false;
@@ -726,6 +729,12 @@ export function createStreamingStore(
         isRequestTurn = Boolean(recordedRequest?.turn_id && recordedRequest.turn_id === lastMessage?.turn_id);
         if (recordedRequest) {
           request.acknowledged = true;
+        } else if (!reportMissingRequest) {
+          const visibleMessages = options?.conversationStore?.activeConversation?.messages ?? [];
+          if (!visibleMessages.some((message) => message.client_id === request.message.client_id)) {
+            options?.conversationStore?.appendOptimisticUserMessage(request.message, ownerId);
+          }
+          return;
         } else if (!request.acknowledged) {
           unsent = !["pending", "processing", "delegating", "awaiting_approval"].includes(lastMessage?.turn_state ?? "");
         }
@@ -735,7 +744,7 @@ export function createStreamingStore(
         .includes(lastMessage?.turn_state ?? "");
       if (!unsent && !isQueued && (!terminal || (
         lastMessage?.role !== "assistant" && lastMessage?.origin !== "platform" &&
-        !isApprovalTurn && !isRequestTurn
+        !isApprovalTurn && !isQueuedTurn && !isRequestTurn
       ))) return;
 
       if (unsent && request) {
@@ -912,8 +921,8 @@ export function withConversationAutoCreate(
     },
     handleServerEvent: (event, conversationId) => base.handleServerEvent(event, conversationId),
     clearConnectionError: (conversationId) => base.clearConnectionError(conversationId),
-      reconcileAfterReconnect: (turnGeneration, conversationId, recoveredMessages, queued) =>
-      base.reconcileAfterReconnect(turnGeneration, conversationId, recoveredMessages, queued),
+    reconcileAfterReconnect: (turnGeneration, conversationId, recoveredMessages, queued, reportMissingRequest) =>
+      base.reconcileAfterReconnect(turnGeneration, conversationId, recoveredMessages, queued, reportMissingRequest),
     cancelTurn: () => base.cancelTurn(),
 
     startTurn(

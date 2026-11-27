@@ -376,6 +376,8 @@ pub struct SessionActivity {
     pub last_activity: DateTime<Utc>,
     /// The latest user or assistant message's text.
     pub latest_message: Option<String>,
+    /// The first non-empty message the person sent.
+    pub opening_message: Option<String>,
     pub has_interrupted_turn: bool,
     /// The newest turn across every thread in the session.
     pub latest_turn: Option<SessionTurnActivity>,

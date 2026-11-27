@@ -69,7 +69,7 @@ function rootRoute(pathname = "/", notFound = false): Route {
 
 export interface Router {
   readonly currentRoute: Route;
-  navigate(path: string): void;
+  navigate(path: string, options?: { keepPreviousOnMissing?: boolean }): Promise<void>;
   // Parse the initial URL, attach popstate listener, and select any
   // conversation referenced by the URL. Returns a Promise so callers
   // (App.svelte) can await initial selection before rendering.
@@ -83,7 +83,7 @@ export interface RouterOptions {
     readonly activeConversationId: string | null;
     checkConversationExists(id: string): Promise<void>;
     clearActiveConversation(): void;
-    selectConversation(id: string): Promise<void>;
+    selectConversation(id: string, isCurrent: () => boolean): Promise<void>;
   };
   onRouteChange?: (route: Route) => void;
   onNavigationError?: (error: unknown) => void;
@@ -198,7 +198,7 @@ export function createRouter(options?: RouterOptions): Router {
   }
 
   // Called on every URL change (pushState + popstate).
-  async function applyLocation(generation: number): Promise<void> {
+  async function applyLocation(generation: number, keepPreviousOnMissing = false): Promise<void> {
     const route = parseRoute(currentLocation());
     updateRoute(route);
 
@@ -209,13 +209,16 @@ export function createRouter(options?: RouterOptions): Router {
         if (isActiveConversation) {
           await options.conversationStore.checkConversationExists(route.conversationId);
         } else {
-          await options.conversationStore.selectConversation(route.conversationId);
+          await options.conversationStore.selectConversation(
+            route.conversationId, () => generation === navigationGeneration,
+          );
         }
       } catch (error) {
         if (generation !== navigationGeneration) {
           return;
         }
-        if (error instanceof Error && isNotAConversation(error)) {
+        const fallback = options.conversationStore.activeConversationId;
+        if (!(keepPreviousOnMissing && fallback) && error instanceof Error && isNotAConversation(error)) {
           if (isActiveConversation) {
             options.conversationStore.clearActiveConversation();
           }
@@ -230,7 +233,6 @@ export function createRouter(options?: RouterOptions): Router {
           return;
         } else if (options?.onNavigationError) {
           options.onNavigationError(error);
-          const fallback = options.conversationStore.activeConversationId;
           const fallbackPath = fallback ? conversationPath(fallback) : "/";
           window.history.replaceState(null, "", fallbackPath);
           updateRoute(parseRoute(fallbackPath));
@@ -244,8 +246,8 @@ export function createRouter(options?: RouterOptions): Router {
   // A navigation that loads a conversation can fail after the URL changes.
   // Restore the active conversation on a transient failure; applyLocation
   // handles a missing conversation with its own not-found route.
-  function followLocation(generation: number): void {
-    void applyLocation(generation).catch(() => {
+  function followLocation(generation: number, keepPreviousOnMissing = false): Promise<void> {
+    return applyLocation(generation, keepPreviousOnMissing).catch(() => {
       if (generation !== navigationGeneration) return;
       const activeConversationId = options?.conversationStore?.activeConversationId;
       const fallbackPath = activeConversationId
@@ -261,7 +263,7 @@ export function createRouter(options?: RouterOptions): Router {
       return currentRoute;
     },
 
-    navigate(path: string): void {
+    async navigate(path, { keepPreviousOnMissing = false } = {}): Promise<void> {
       navigationGeneration += 1;
       if (currentLocation() !== path) {
         window.history.pushState(null, "", path);
@@ -272,10 +274,9 @@ export function createRouter(options?: RouterOptions): Router {
         route.conversationId &&
         route.conversationId !== options.conversationStore.activeConversationId
       ) {
-        followLocation(navigationGeneration);
+        await followLocation(navigationGeneration, keepPreviousOnMissing);
       } else {
-        // Session selectors install their conversation before navigating;
-        // links to other sessions use the same loading path as a deep link.
+        // A new session is already installed when its URL is published.
         updateRoute(route);
       }
     },
@@ -286,7 +287,7 @@ export function createRouter(options?: RouterOptions): Router {
         // popstate is synchronous in terms of the URL update; async selection
         // runs in the background and updates currentRoute when it settles.
         const generation = ++navigationGeneration;
-        followLocation(generation);
+        void followLocation(generation);
       });
 
       // Apply the initial URL — this kicks off conversation selection if

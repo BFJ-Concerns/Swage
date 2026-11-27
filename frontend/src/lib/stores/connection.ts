@@ -41,7 +41,7 @@ export interface ConnectionStoreOptions {
   // Called when a dropped or refused connection successfully reconnects. The owner is
   // carried through so an off-screen conversation is reconciled rather than
   // whichever conversation happens to be selected at that moment.
-  onReconnect?: (conversationId: string) => void;
+  onReconnect?: (conversationId: string, sentPendingMessages: boolean) => void;
 }
 
 export function createConnectionStore(
@@ -81,12 +81,12 @@ export function createConnectionStore(
       for (const handler of serverEventHandlers) handler(event, conversationId);
     });
     let needsRecovery = false;
-    client.onStatusChange((newStatus, message) => {
+    client.onStatusChange((newStatus, message, sentPendingMessages) => {
       if (newStatus === "reconnecting" || newStatus === "error") needsRecovery = true;
       statuses.set(conversationId, newStatus);
       if (needsRecovery && newStatus === "connected") {
         needsRecovery = false;
-        options?.onReconnect?.(conversationId);
+        options?.onReconnect?.(conversationId, sentPendingMessages ?? false);
       }
       if (conversationId !== selectedConversationId) return;
       errorMessageStore.set(

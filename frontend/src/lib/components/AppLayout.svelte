@@ -76,7 +76,7 @@
     onNavigate?: (path: string) => void;
     onSettingsSaved?: () => void | Promise<void>;
     agentDefinitions?: EffectiveAgentDefinitionResponse[];
-    onNewConversation?: (agentId?: string) => void;
+    onNewConversation?: () => void;
   }
 
   let {
@@ -227,6 +227,9 @@
   // The surface the URL names, if any: the pane opens it and keeps the
   // address in step when the user opens another.
   const routedSurfaceId = $derived(route?.surfaceId ?? null);
+  const openingConversation = $derived(
+    Boolean(route?.conversationId && route.conversationId !== activeConversation?.id),
+  );
 
   function closeSettings(): void {
     onNavigate?.(activeConversation?.id ? conversationPath(activeConversation.id) : "/");
@@ -262,17 +265,20 @@
   }
 </script>
 
+<div class="app-layout">
 {#if inScope || settingsMode}
   <header class="topbar">
     <button type="button" class="sessions-btn" onclick={() => onOpenSessions?.()}>All sessions</button>
-    <span class="scope" aria-label="Session scope">
-      {#if currentTopic}<span class="scope-label">Topic</span>{/if}
-      {#if currentTopic}
-        <button type="button" class="scope-name" onclick={openTopicSettings} title="Topic settings">{scopeName}</button>
-      {:else}
-        <span class="scope-name">{scopeName}</span>
-      {/if}
-    </span>
+    {#if !openingConversation}
+      <span class="scope" aria-label="Session scope">
+        {#if currentTopic}<span class="scope-label">Topic</span>{/if}
+        {#if currentTopic}
+          <button type="button" class="scope-name" onclick={openTopicSettings} title="Topic settings">{scopeName}</button>
+        {:else}
+          <span class="scope-name">{scopeName}</span>
+        {/if}
+      </span>
+    {/if}
     <nav aria-label="Surface">
       <button aria-pressed={isSurfaceActive("conversation")} class:active={isSurfaceActive("conversation")} onclick={() => selectSurface("conversation")}>Conversation</button>
       <button aria-pressed={isSurfaceActive("surfaces")} class:active={isSurfaceActive("surfaces")} onclick={() => selectSurface("surfaces")}>Surfaces</button>
@@ -364,6 +370,8 @@
       />
     {/if}
   </main>
+{:else if openingConversation}
+  <main class="opening-session"><p role="status">Opening conversation…</p></main>
 {:else if !inScope}
   <!--
     The front door: the control that starts a new session — with a topic, or
@@ -417,14 +425,17 @@
   </main>
 {:else}
   <main class="conversation">
-    <aside><ConversationList store={conversationStore} onNewConversation={() => onNewConversation?.(selectedAgentId || undefined)} /></aside>
+    <aside><ConversationList store={conversationStore} {onNewConversation} /></aside>
     <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} />
   </main>
 {/if}
+</div>
 
 <style>
+  .app-layout { height: 100%; display: flex; flex-direction: column; overflow: auto; }
   .topbar {
     display: flex;
+    flex: none;
     flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem 1rem;
@@ -460,11 +471,13 @@
   .settings-chrome .topic-tab { border-left: 1px dotted var(--rule-soft); padding-left: .5rem; }
   .settings-chrome .topic-tab ~ .topic-tab { border-left: none; padding-left: 0; }
   button.active { font-weight: bold; }
-  .conversation { display: grid; grid-template-columns: minmax(16rem, 25%) 1fr; height: calc(100vh - 4rem); }
+  .conversation { grid-template-columns: minmax(16rem, 25%) minmax(0, 1fr); }
+  .conversation, .surfaces-surface { display: grid; flex: 1; min-height: 0; grid-template-rows: minmax(0, 1fr); }
   .conversation aside { overflow: auto; border-right: 1px solid var(--ink); }
   /* The work takes the wide column; its docked conversation stays available. */
-  .surfaces-surface { display: grid; grid-template-columns: minmax(0, 1fr) minmax(20rem, 33%); height: calc(100vh - 4rem); }
+  .surfaces-surface { grid-template-columns: minmax(0, 1fr) minmax(20rem, 33%); }
   .surfaces-surface .work { min-width: 0; overflow: auto; border-right: 1px solid var(--ink); }
+  .opening-session { padding: 1rem; }
   .no-session { padding: 1rem; color: var(--ink-soft); }
   .operator { min-width: 0; overflow: auto; }
 
@@ -479,11 +492,9 @@
     .conversation,
     .surfaces-surface {
       grid-template-columns: 1fr;
-      grid-template-rows: auto 1fr;
-      height: auto;
-      min-height: calc(100vh - 4rem);
+      grid-template-rows: auto minmax(0, 1fr);
     }
     .conversation aside,
-    .surfaces-surface .work { border-right: none; border-bottom: 1px solid var(--ink); max-height: 40vh; }
+    .surfaces-surface .work { border-right: none; border-bottom: 1px solid var(--ink); max-height: 24dvh; }
   }
 </style>

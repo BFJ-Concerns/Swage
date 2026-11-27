@@ -12,7 +12,6 @@
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
-  import AgentPicker from "./AgentPicker.svelte";
   import type { DisplayPreferences } from "../display-preferences";
   import type { ConnectionStore } from "../stores/connection";
   import type { ConversationStore } from "../stores/conversations";
@@ -21,6 +20,7 @@
   import type { ConversationBranch } from "../types";
   import { relativeTime } from "../utils/relative-time";
   import { messagePreview } from "../message-preview";
+  import { isPersonsMessage } from "../message-authorship";
 
   interface Props {
     conversationStore: ConversationStore;
@@ -34,7 +34,7 @@
     agentDefinitions?: EffectiveAgentDefinitionResponse[];
     selectedAgentId: string;
     onNavigate?: (path: string) => void;
-    onNewConversation?: (agentId?: string) => void;
+    onNewConversation?: () => void;
   }
 
   let {
@@ -62,13 +62,17 @@
   // yet in the loaded list (just created, list not refreshed) still needs an
   // option, or the switcher would read as having nothing selected.
   const sessions = $derived.by(() => {
+    const active = activeConversation;
+    const openingInput = activeThreadId === null
+      ? active?.messages.find((message) => isPersonsMessage(message) && message.content.trim())?.content
+      : undefined;
     const listed = conversationStore.conversations.map((conversation) => ({
       id: conversation.id,
-      label: messagePreview(conversation.message_preview ?? "New conversation"),
+      label: messagePreview(conversation.opening_message ??
+        (conversation.id === active?.id ? openingInput : undefined) ?? "New conversation"),
     }));
-    const active = activeConversation;
     if (active && !listed.some((session) => session.id === active.id)) {
-      listed.unshift({ id: active.id, label: "New conversation" });
+      listed.unshift({ id: active.id, label: messagePreview(openingInput ?? "New conversation") });
     }
     return listed;
   });
@@ -120,8 +124,10 @@
   const activeAgentModel = $derived(agentDefinitions.find(
     (definition) => definition.id === activeConversation?.agent_id,
   )?.model_id);
-  const composerModel = $derived(activeConversation?.selected_model_id ??
-    (activeAgentModel && modelOptions.includes(activeAgentModel) ? activeAgentModel : defaultModelId));
+  const sessionModel = $derived(activeConversation?.selected_model_id ?? activeAgentModel);
+  const composerModel = $derived(
+    sessionModel && modelOptions.includes(sessionModel) ? sessionModel : defaultModelId,
+  );
 
   function abandonBranch(): void {
     conversationStore.abandonActiveBranch?.().catch((error: unknown) => {
@@ -151,10 +157,7 @@
       <span class="agent-label">Agent: <span aria-label="Session agent">{sessionAgentLabel}</span></span>
     {/if}
     <div class="creation-controls" role="group" aria-label="New conversation">
-      {#if activeConversation}
-        <AgentPicker definitions={agentDefinitions} bind:selectedAgentId />
-      {/if}
-      <button class="new-session" aria-label="New conversation" onclick={() => onNewConversation?.(selectedAgentId || undefined)}>+ New</button>
+      <button class="new-session" aria-label="New conversation" onclick={() => onNewConversation?.()}>+ New</button>
     </div>
   </header>
   {#if activeConversation && branches.length > 0}
@@ -186,9 +189,7 @@
   {/if}
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
   <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} {onNavigate} />
-  <!-- Pinned to the foot of the channel's scroll, so a turn waiting on the
-       user's decision shows its approval card in view however long the
-       history above it is. -->
+  <!-- Keep the composer or approval visible while the transcript scrolls. -->
   <div class="composer-slot">
     {#if activeBranchAbandoned}
       <p class="thread-notice" role="status">This branch is abandoned — it takes no further messages. Switch to the main thread or another branch to continue.</p>
@@ -201,23 +202,23 @@
 </section>
 
 <style>
-  section { min-width: 0; overflow: auto; }
+  section {
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
 
   .composer-slot {
-    position: sticky;
-    bottom: 0;
-    z-index: 1;
+    flex: none;
+    max-height: 70%;
+    overflow: auto;
     background: var(--paper);
   }
 
-  /* One mono line above the history: which session is in the channel, and the
-     way to start another. Matches the conversation list's control register.
-     Sticky within the channel's own scroll, so cycling stays reachable however
-     far down the history the user has read. */
   .session-bar {
-    position: sticky;
-    top: 0;
-    z-index: 1;
+    flex: none;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -274,6 +275,7 @@
   /* The thread bar sits under the session bar in the same mono register:
      the switcher fills the line, the abandon control keeps to its end. */
   .thread-bar {
+    flex: none;
     display: flex;
     align-items: center;
     gap: 8px;

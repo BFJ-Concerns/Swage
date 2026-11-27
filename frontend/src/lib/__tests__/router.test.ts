@@ -346,10 +346,10 @@ describe("popstate", () => {
 
     window.history.replaceState(null, "", "/conversations/earlier-conv");
     popstateHandler!(new PopStateEvent("popstate"));
-    await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("earlier-conv"));
+    await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("earlier-conv", expect.any(Function)));
     window.history.replaceState(null, "", "/conversations/newer-conv");
     popstateHandler!(new PopStateEvent("popstate"));
-    await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("newer-conv"));
+    await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("newer-conv", expect.any(Function)));
 
     rejectEarlierSelection(
       new Error("HTTP 404 from GET /api/conversations/earlier-conv"),
@@ -464,7 +464,7 @@ describe("init with conversation store", () => {
     expect(popstateHandler).not.toBeNull();
     window.history.replaceState(null, "", "/conversations/new-conv");
     popstateHandler!(new PopStateEvent("popstate"));
-    await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("new-conv"));
+    await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("new-conv", expect.any(Function)));
     rejectExistenceCheck(new Error("HTTP 404 from GET /api/conversations/active-conv"));
     await initialisation;
 
@@ -547,7 +547,7 @@ describe("init with conversation store", () => {
 
     await router.init();
 
-    expect(selectConversation).toHaveBeenCalledWith("init-conv");
+    expect(selectConversation).toHaveBeenCalledWith("init-conv", expect.any(Function));
   });
 
   it("does not call selectConversation when URL is '/'", async () => {
@@ -607,7 +607,7 @@ describe("init with conversation store", () => {
 
     expect(checkConversationExists).not.toHaveBeenCalled();
     expect(selectConversation).toHaveBeenCalledOnce();
-    expect(selectConversation).toHaveBeenCalledWith("next-conv");
+    expect(selectConversation).toHaveBeenCalledWith("next-conv", expect.any(Function));
   });
 
   it("sets notFound and navigates to '/' when selectConversation rejects", async () => {

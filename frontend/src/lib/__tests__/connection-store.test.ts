@@ -352,7 +352,7 @@ describe("reconnect callback", () => {
     mock.triggerStatus("connected"); // reconnect succeeds
 
     expect(onReconnect).toHaveBeenCalledOnce();
-    expect(onReconnect).toHaveBeenCalledWith("conv-abc");
+    expect(onReconnect).toHaveBeenCalledWith("conv-abc", false);
   });
 
   it("reconciles the reconnected off-screen conversation", () => {
@@ -374,7 +374,7 @@ describe("reconnect callback", () => {
     a.triggerStatus("reconnecting");
     a.triggerStatus("connected");
 
-    expect(onReconnect).toHaveBeenCalledWith("conv-a");
+    expect(onReconnect).toHaveBeenCalledWith("conv-a", false);
     expect(store.status).toBe("connected");
   });
 

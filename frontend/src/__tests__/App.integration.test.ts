@@ -688,7 +688,7 @@ describe("App", () => {
     const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({
       id: "conv-linked",
-      message_preview: "Deep-linked conversation",
+      opening_message: "Deep-linked conversation",
     });
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
@@ -1323,8 +1323,17 @@ describe("App", () => {
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(topic.id, "new-model", null, null);
   });
 
-  it("creates and navigates when the sidebar starts a conversation", async () => {
-    const defaultTopic = makeTopic();
+  function sendDraft() {
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea")!;
+    flushSync(() => {
+      textarea.value = "My first message";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+  }
+
+  it("creates and navigates on the first send from a sidebar draft", async () => {
+    const defaultTopic = makeTopic({ effective_default_model: "local:reasoning" });
     const created: ConversationResponse = {
       id: "conv-new",
       agent_id: "gateway",
@@ -1365,12 +1374,12 @@ describe("App", () => {
 
     flushSync(() => newButton!.click());
     await settleUi();
+    expect(conversationsApi.createConversation).not.toHaveBeenCalled();
+    sendDraft();
 
+    await settleUi();
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(
-      defaultTopic.id,
-      undefined,
-      undefined,
-      undefined,
+      defaultTopic.id, "local:reasoning", null, null,
     );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
@@ -1378,7 +1387,7 @@ describe("App", () => {
     expect(document.querySelector(".message-display")).not.toBeNull();
   });
 
-  it("uses the active creation picker for both New controls", async () => {
+  it("offers the agent choice in the draft opened by either New control", async () => {
     const defaultTopic = makeTopic();
     const existing = makeConversationSummary({ id: "conv-existing" });
     const createdFromChannel: ConversationResponse = {
@@ -1427,48 +1436,26 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await settleUi();
 
-    const picker = document.querySelector<HTMLSelectElement>(
-      'select[aria-label="Agent"]',
-    );
-    expect(picker).not.toBeNull();
-    flushSync(() => {
-      picker!.value = "picker-witness";
-      picker!.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-
-    flushSync(() =>
-      (document.querySelector(".new-session") as HTMLButtonElement).click(),
-    );
-    await settleUi();
-
-    expect(conversationsApi.createConversation).toHaveBeenCalledTimes(1);
-    expect(conversationsApi.createConversation).toHaveBeenLastCalledWith(
-      defaultTopic.id,
-      undefined,
-      "picker-witness",
-      undefined,
-    );
-    expect(window.location.pathname).toBe(
-      `/conversations/${createdFromChannel.id}`,
-    );
-    expect(document.querySelectorAll(".conversation-item")).toHaveLength(2);
-
-    flushSync(() =>
-      (document.querySelector(".new-btn") as HTMLButtonElement).click(),
-    );
-    await settleUi();
-
-    expect(conversationsApi.createConversation).toHaveBeenCalledTimes(2);
-    expect(conversationsApi.createConversation).toHaveBeenLastCalledWith(
-      defaultTopic.id,
-      undefined,
-      "picker-witness",
-      undefined,
-    );
-    expect(window.location.pathname).toBe(
-      `/conversations/${createdFromSidebar.id}`,
-    );
-    expect(document.querySelectorAll(".conversation-item")).toHaveLength(3);
+    expect(document.querySelector('select[aria-label="Agent"]')).toBeNull();
+    for (const [index, button] of [".new-session", ".new-btn"].entries()) {
+      flushSync(() => document.querySelector<HTMLButtonElement>(button)!.click());
+      await settleUi();
+      expect(conversationsApi.createConversation).toHaveBeenCalledTimes(index);
+      const picker = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]')!;
+      flushSync(() => {
+        picker.value = "picker-witness";
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      sendDraft();
+      await settleUi();
+      expect(conversationsApi.createConversation).toHaveBeenCalledTimes(index + 1);
+      expect(conversationsApi.createConversation).toHaveBeenLastCalledWith(
+        defaultTopic.id, null, "picker-witness", null,
+      );
+      expect(window.location.pathname).toBe(
+        `/conversations/${[createdFromChannel, createdFromSidebar][index]!.id}`,
+      );
+    }
   });
 
   it("connects exactly once when the composer auto-creates a conversation", async () => {

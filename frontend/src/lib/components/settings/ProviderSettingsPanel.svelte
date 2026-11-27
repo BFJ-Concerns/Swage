@@ -90,15 +90,19 @@
   });
 
   onDestroy(() => {
+    discoveryRequest += 1;
     for (const poll of signInPolls.values()) clearTimeout(poll);
   });
 
+  let discoveryRequest = 0;
+
   async function loadModels(): Promise<void> {
+    const request = ++discoveryRequest;
+    discoveredModels = [];
     if (!selectedProvider) return;
     const provider = settings.providers[selectedProvider];
     if (!provider) return;
     if (provider.protocol === "codex" && savedProviderIds.has(selectedProvider) && !codexModelsUsable(selectedProvider)) {
-      discoveredModels = [];
       return;
     }
     // Discovery from the form uses its current policy even before autosave.
@@ -118,13 +122,15 @@
         };
     try {
       const response = await discoverModels(selectedProvider, modelQuery, discoveryDraft);
+      if (request !== discoveryRequest) return;
       discoveredModels = response.models;
       error = null;
     } catch (err) {
       // Discovery failures are non-fatal — leave the chip row empty and
       // surface the error in the notice band so the user knows why.
-      discoveredModels = [];
-      error = err instanceof Error ? err.message : "Failed to discover models.";
+      if (request === discoveryRequest) {
+        error = err instanceof Error ? err.message : "Failed to discover models.";
+      }
     }
   }
 

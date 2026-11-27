@@ -3426,6 +3426,7 @@ impl SessionStore for MockStorage {
                     latest_turn,
                     last_activity: latest.map_or(session.created_at, |message| message.created_at),
                     latest_message: latest.map(|message| message.content.clone()),
+                    opening_message: None,
                     has_interrupted_turn,
                     session: session.clone(),
                 }

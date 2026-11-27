@@ -94,6 +94,7 @@ fn row_to_session_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionA
         has_processing_turn,
         last_activity: parse_dt(&last_activity)?,
         latest_message,
+        opening_message: row.get(19)?,
         has_interrupted_turn,
         session,
     })
@@ -113,7 +114,16 @@ const SESSION_ACTIVITY_COLUMNS: &str = "
     turn_activity.state AS latest_turn_state,
     COALESCE(turn_activity.has_processing_turn, 0) AS has_processing_turn,
     turn_activity.active_turn_id,
-    turn_activity.active_turn_state";
+    turn_activity.active_turn_state,
+    (
+        SELECT messages.content
+        FROM threads JOIN messages ON messages.thread_id = threads.id
+        WHERE threads.session_id = sessions.id
+          AND messages.origin = 'user'
+          AND messages.content != ''
+        ORDER BY messages.created_at, threads.created_at, messages.position
+        LIMIT 1
+    ) AS opening_message";
 
 // Equal-time turns resolve to the one recorded last.
 const SESSION_ACTIVITY_JOIN: &str = "
