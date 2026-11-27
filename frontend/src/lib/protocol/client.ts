@@ -34,6 +34,8 @@ import type { MoveSurfaceModuleRequest } from "./MoveSurfaceModuleRequest";
 import type { PairClientRequest } from "./PairClientRequest";
 import type { PairClientResponse } from "./PairClientResponse";
 import type { PairingCodeResponse } from "./PairingCodeResponse";
+import type { PostWorkflowRunEventRequest } from "./PostWorkflowRunEventRequest";
+import type { PostWorkflowRunEventResponse } from "./PostWorkflowRunEventResponse";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RelinkWorkspaceAttachmentRequest } from "./RelinkWorkspaceAttachmentRequest";
@@ -57,6 +59,8 @@ import type { TopicResponse } from "./TopicResponse";
 import type { TurnContextResponse } from "./TurnContextResponse";
 import type { UpdateSurfaceAnnotationRequest } from "./UpdateSurfaceAnnotationRequest";
 import type { UpdateTopicRequest } from "./UpdateTopicRequest";
+import type { WorkflowRun } from "./WorkflowRun";
+import type { WorkflowRunDetailResponse } from "./WorkflowRunDetailResponse";
 import type { WorkspaceAttachmentResponse } from "./WorkspaceAttachmentResponse";
 import type { WriteSurfaceModuleRequest } from "./WriteSurfaceModuleRequest";
 import type { WriteSurfaceModuleResponse } from "./WriteSurfaceModuleResponse";
@@ -201,6 +205,26 @@ export async function deleteConversation(id: string): Promise<void> {
 /** Stop the conversation's running turn, whichever client holds its connection. */
 export async function cancelConversationTurn(id: string): Promise<void> {
   return request<void>("POST", `/api/conversations/${encodeURIComponent(id)}/cancel`);
+}
+
+/** Read a workflow run with its journal. */
+export async function getWorkflowRun(id: string): Promise<WorkflowRunDetailResponse> {
+  return request<WorkflowRunDetailResponse>("GET", `/api/workflow-runs/${encodeURIComponent(id)}`);
+}
+
+/** Post an event to a workflow run. */
+export async function postWorkflowRunEvent(id: string, body: PostWorkflowRunEventRequest): Promise<PostWorkflowRunEventResponse> {
+  return request<PostWorkflowRunEventResponse>("POST", `/api/workflow-runs/${encodeURIComponent(id)}/events`, body);
+}
+
+/** Request cancellation of a workflow run. */
+export async function cancelWorkflowRun(id: string): Promise<WorkflowRun> {
+  return request<WorkflowRun>("POST", `/api/workflow-runs/${encodeURIComponent(id)}/cancel`);
+}
+
+/** Resume an interrupted workflow run. */
+export async function resumeWorkflowRun(id: string): Promise<WorkflowRun> {
+  return request<WorkflowRun>("POST", `/api/workflow-runs/${encodeURIComponent(id)}/resume`);
 }
 
 /** Read a turn context report. */

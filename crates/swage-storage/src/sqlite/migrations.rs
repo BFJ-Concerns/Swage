@@ -363,6 +363,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         dispatch_bound_task_definition_ids_json TEXT NOT NULL,
         workflow_call_tools_json TEXT,
         wake_at              TEXT,
+        timer_wake_at        TEXT,
         inherited_worker_placement_json TEXT,
         -- The terminal account a run leaves when it ends by any path: the
         -- ending, the partition of its workers, and the completed work

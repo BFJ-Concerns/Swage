@@ -160,6 +160,7 @@ async fn list_operator_sessions(
                     state,
                     run_id,
                     state.storage.list_workflow_journal(run_id).await?,
+                    false,
                 )
                 .await
                 .map_err(GatewayError::ConfigError)?;

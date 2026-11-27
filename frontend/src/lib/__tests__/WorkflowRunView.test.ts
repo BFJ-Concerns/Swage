@@ -68,35 +68,17 @@ function emptyAccount(ending: WorkflowRunEnding): WorkflowRunTerminalAccount {
 describe("WorkflowRunView", () => {
   let component: MountedComponent | undefined;
 
-  it.each(["running", "parked"] as const)("cancels a %s run through its route and keeps the terminal account visible", async (state) => {
-    const fetch = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(detail(run(emptyAccount({ ending: "cancelled" })))), { status: 200 }));
+  it.each(["running", "parked"] as const)("keeps a %s run’s cancellation pending until its live update", async (state) => {
+    const fetch = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", fetch);
     try {
-      component = render({ ...run(null), state });
-      const button = document.querySelector<HTMLButtonElement>("header button");
-      expect(button?.textContent).toBe("Cancel");
-      flushSync(() => button!.click());
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-1/cancel", { method: "POST" }));
-      await vi.waitFor(() => expect(document.querySelector(".ending-line")?.textContent).toContain("Cancelled"));
-      expect(document.querySelector("header button")).toBeNull();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("keeps cancellation pending until the received detail is terminal", async () => {
-    const fetch = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(detail(run(null))), { status: 200 }));
-    vi.stubGlobal("fetch", fetch);
-    try {
-      const updates = writable(detail(run(null)));
+      const updates = writable(detail({ ...run(null), state }));
       const current = fromStore(updates);
       component = mount(WorkflowRunView, { target: document.body, props: {
         get detail() { return current.current; }, loadState: "loaded", errorMessage: "",
       } });
       flushSync(() => document.querySelector<HTMLButtonElement>("header button")!.click());
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-1/cancel", { method: "POST" }));
       await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>("header button")?.disabled).toBe(true));
       expect(document.querySelector("header button")?.textContent).toBe("Cancelling…");
       flushSync(() => { updates.set(detail(run(emptyAccount({ ending: "cancelled" })))); });
@@ -383,6 +365,7 @@ describe("run page completeness", () => {
     const sentinel = "2126-08-09T10:00:00.393288230Z";
     const wake = kind === "timer" ? "2026-09-03T10:00:00.393288230Z" : sentinel;
     const parked = detail({ ...run(null), state: "parked", wake_at: wake });
+    parked.timer_wake_at = kind === "timer" ? wake : null;
     parked.journal = [{
       id: "wait", seq: 0n, kind: kind === "event" ? "await_event" : kind === "hold" ? "hold" : "timer",
       status: "started", started_at: started,
@@ -390,6 +373,13 @@ describe("run page completeness", () => {
         ? { action: "await", kinds: ["review.finished"] }
         : { action: "raise", content: "Ship the findings?", verdicts: ["approve", "postpone"] },
     }];
+    if (kind === "event") {
+      // A worker won an earlier race, leaving its abandoned timer started.
+      parked.journal.unshift({
+        id: "abandoned-timer", seq: 0n, kind: "timer", status: "started",
+        started_at: started, request: { ms: 30000 },
+      });
+    }
     if (kind === "hold") parked.holds = [{ id: "decision", run_id: "run-1", seq: 1, content: "Ship the findings?", verdicts: ["approve", "postpone"], state: "open", raised_at: started, rejections: [] }];
     page = mount(WorkflowRunView, { target: document.body, props: { detail: parked, loadState: "loaded", errorMessage: "" } });
     const awaited = document.querySelector(".awaited")!;

@@ -2021,7 +2021,10 @@ async fn assemble_gate_state_digest(
         more_ended_workflow_runs = ended.len() > 100;
         ended.truncate(100);
         for run in ended {
-            ended_workflow_runs.push(crate::workflow::ending_notice(run));
+            ended_workflow_runs.push(
+                crate::workflow::ending_notice(run)
+                    .map_err(|error| GatewayError::ConfigError(error.message().to_owned()))?,
+            );
         }
         for run in open {
             if crate::tool::workflow_run_status::is_terminal_run_state(&run.state)

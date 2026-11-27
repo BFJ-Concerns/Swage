@@ -10456,6 +10456,41 @@ async fn a_parked_run_releases_its_workflow_thread() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_parked_event_wait_omits_an_abandoned_timer_deadline() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let (state, _) = scripted_state(&storage, vec![scripted_text_output("done")]);
+    let Json(started) = start_inline_run(
+        State(state.clone()),
+        Path(topic.id),
+        Json(StartInlineWorkflowRunRequest {
+            source: r#"
+                const worker = agentStart("finish first");
+                await wait({watches: [worker], timerMs: 30000});
+                await awaitEvent({kinds: ["operator.continue"]});
+            "#
+            .into(),
+            args: Value::Null,
+            budget: None,
+        }),
+    )
+    .await
+    .expect("start");
+    wait_for_run_state(&storage, started.id, "parked").await;
+    let Json(detail) = get_run(State(state), Path(started.id))
+        .await
+        .expect("run detail");
+    assert!(detail.run.wake_at.is_some());
+    assert!(
+        detail
+            .journal
+            .iter()
+            .any(|entry| entry.kind == WorkflowJournalEntryKind::Timer)
+    );
+    assert_eq!(detail.timer_wake_at, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_parked_run_survives_its_terminal_completion_task() {
     let provider = Arc::new(ScriptedGateProvider {
         replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
@@ -20575,6 +20610,37 @@ mod dispatch_attempt_reader_tests {
                 assert_eq!(actual.unwrap().redispatched_after_interruption, has_attempt);
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redispatch_names_the_attempts_recorded_provider_failure() {
+        let (storage, entry) = entry_with_attempts(Some(serde_json::json!([]))).await;
+        let run = storage
+            .get_workflow_run(entry.run_id)
+            .await
+            .expect("read run")
+            .expect("run");
+        let turn_id = worker_turn(&storage, run.topic_id, "first attempt").await;
+        dispatch_attempt(&storage, entry.id, WorkflowAttemptCause::First, turn_id).await;
+        open_round(&storage, turn_id, 1).await;
+        let failure = "provider refused the request".to_owned();
+        settle_round(
+            &storage,
+            turn_id,
+            1,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Failed {
+                message: failure.clone(),
+            },
+        )
+        .await;
+
+        let cause = attempt_cause_for(&storage, entry.run_id, entry.id)
+            .await
+            .expect("cause");
+        assert_eq!(
+            cause,
+            WorkflowAttemptCause::AfterProviderFailure { failure }
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

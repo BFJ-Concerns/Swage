@@ -482,7 +482,7 @@ describe("complete worker detail", () => {
     expect(attempts[1].querySelector("a")?.getAttribute("href")).toBe("/conversations/later-session");
     expect(document.querySelector(".liveness")?.textContent).toContain(new Date("2026-09-02T11:00:00Z").toLocaleString());
     expect(document.querySelector(".liveness")?.textContent).toContain(new Date("2026-09-02T11:00:04Z").toLocaleString());
-    expect(document.body.textContent).toContain("narrowed nothing");
+    expect(document.body.textContent).toContain("Uses the worker’s tool permissions");
     expect(document.body.textContent).toContain("/Worktree/ExactCase");
     expect(document.querySelector('a[href="/conversations/worker-session"]')).not.toBeNull();
   });
