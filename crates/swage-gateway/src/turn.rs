@@ -788,57 +788,72 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     };
     let output = assemble(&elements);
-    let succession_filler = active_graph
+    // A revision without the succession step runs none: the first assembly
+    // stands, and over the threshold the agent runtime compacts as it does
+    // when a pass fails.
+    let succession_step = active_graph
         .graph
-        .filler_for(swage_protocol::client::turn_graph::TurnSlot::Succession);
-    let (summariser, succession_fallback) = Box::pin(summariser_for(
-        state,
-        &config.experimentation,
-        &succession_filler,
-        &slot_context,
-        Some(topic_id),
-        session_id,
-        Some(prepared_turn_id),
-    ))
-    .await;
-    let succession_summariser = summariser.describe();
-    // Over the compaction threshold, or after the thread's recent turns kept
-    // hitting walls, the turn runs on a successor: the same elements rendered
-    // afresh, the older history summarised against them or diagnosed from
-    // outside (turn/succession.rs). Otherwise the first assembly stands.
-    let output = Box::pin(succession::succeed_over_threshold(
-        succession::SuccessionSite {
-            provider: state.provider.as_ref(),
-            threshold: &compaction_threshold(&config),
-            model: Some(config.default_model_id()).filter(|model| !model.is_empty()),
-            focus: compaction_focus.as_deref(),
-            variables: &session_variables,
-            tokeniser: &tokeniser,
-            degradation: succession::recent_degradation(state.storage.as_ref(), thread_id).await,
-            diagnosis_models: succession::diagnosis_models(&config),
-            summariser,
-            shadows: Box::pin(succession_shadows(
+        .live_step(swage_protocol::client::turn_graph::TurnSlot::Succession)
+        .cloned();
+    let (output, succession_record) = match succession_step {
+        None => (output, serde_json::json!({ "removed": true })),
+        Some(succession_step) => {
+            let succession_filler = succession_step.filler;
+            let (summariser, succession_fallback) = Box::pin(summariser_for(
                 state,
-                &active_graph.graph,
-                &config,
-                session_id,
-                prepared_turn_id,
+                &config.experimentation,
+                &succession_filler,
                 &slot_context,
                 Some(topic_id),
-            ))
-            .await,
-            summary_instructions: &succession::SessionSummaryInstructions {
-                state,
-                config: &config.experimentation,
                 session_id,
-                turn_id: prepared_turn_id,
-            },
-        },
-        elements,
-        output,
-        assemble,
-    ))
-    .await;
+                Some(prepared_turn_id),
+            ))
+            .await;
+            let succession_summariser = summariser.describe();
+            // Over the compaction threshold, or after the thread's recent turns kept
+            // hitting walls, the turn runs on a successor: the same elements rendered
+            // afresh, the older history summarised against them or diagnosed from
+            // outside (turn/succession.rs). Otherwise the first assembly stands.
+            let output = Box::pin(succession::succeed_over_threshold(
+                succession::SuccessionSite {
+                    provider: state.provider.as_ref(),
+                    threshold: &compaction_threshold(&config),
+                    model: Some(config.default_model_id()).filter(|model| !model.is_empty()),
+                    focus: compaction_focus.as_deref(),
+                    variables: &session_variables,
+                    tokeniser: &tokeniser,
+                    degradation: succession::recent_degradation(state.storage.as_ref(), thread_id)
+                        .await,
+                    diagnosis_models: succession::diagnosis_models(&config),
+                    summariser,
+                    shadows: Box::pin(succession_shadows(
+                        state,
+                        &active_graph.graph,
+                        &config,
+                        session_id,
+                        prepared_turn_id,
+                        &slot_context,
+                        Some(topic_id),
+                    ))
+                    .await,
+                    summary_instructions: &succession::SessionSummaryInstructions {
+                        state,
+                        config: &config.experimentation,
+                        session_id,
+                        turn_id: prepared_turn_id,
+                    },
+                },
+                elements,
+                output,
+                assemble,
+            ))
+            .await;
+            (
+                output,
+                serde_json::json!({ "summariser": succession_summariser, "filler": succession_filler, "fallback": succession_fallback }),
+            )
+        }
+    };
     let (assembled_messages, mut assembly_report) = (output.messages, output.report);
     redact_element_texts(state, &mut assembly_report).await;
     assembly_report.tool_scope = Some(serde_json::json!({
@@ -857,13 +872,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
             "served": context_program_served.served,
             "fallback": context_program_served.fallback,
         },
-        "succession": {
-            "filler": succession_filler,
-            "summariser": succession_summariser,
-            "served": succession_ran(&assembly_report.compaction_applied)
-                .then_some(&succession_summariser),
-            "fallback": succession_fallback,
-        },
+        "succession": succession_report(succession_record, &assembly_report.compaction_applied),
         "hooks": {
             "attached": turn_hooks.attached,
             "skipped": turn_hooks.skipped,
@@ -1275,6 +1284,22 @@ fn succession_ran(records: &[swage_protocol::client::context::CompactionRecord])
     records
         .iter()
         .any(|record| record.requested_strategy == swage_context::succession::THRESHOLD_STRATEGY)
+}
+
+/// The succession step's part of the turn's record: what the revision
+/// names and, on a turn the step ran, what served it; a revision without
+/// the step says it was removed.
+fn succession_report(
+    mut record: serde_json::Value,
+    compactions: &[swage_protocol::client::context::CompactionRecord],
+) -> serde_json::Value {
+    if record.get("removed").is_none() {
+        let served = succession_ran(compactions)
+            .then(|| record["summariser"].clone())
+            .unwrap_or(serde_json::Value::Null);
+        record["served"] = served;
+    }
+    record
 }
 
 /// A reason a slot is not served as chosen, after an earlier one where

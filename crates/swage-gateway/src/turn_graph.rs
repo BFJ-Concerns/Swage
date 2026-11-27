@@ -323,6 +323,15 @@ impl TurnGraphService {
             }
             self.validate_filler(step).await?;
         }
+        if let Some(missing) = TurnSlot::ALL
+            .iter()
+            .find(|slot| !slots.contains(*slot) && !removable(**slot))
+        {
+            return Err(format!(
+                "slot '{}' is not on the live path, and the kernel runs no turn without it; only the succession step can be removed",
+                missing.as_str()
+            ));
+        }
         let mut attachments = std::collections::HashSet::new();
         for hook in &graph.hooks {
             if !attachments.insert((hook.plugin.as_str(), hook.point)) {
@@ -500,6 +509,13 @@ fn takes(slot: TurnSlot, filler: &StepFiller) -> bool {
                 StepFiller::Plugin { .. } | StepFiller::Workflow { .. }
             )
     )
+}
+
+/// Whether a revision may leave `slot` off the live path: a turn without
+/// the succession step runs no succession pass, and every other step is
+/// one the kernel cannot run a turn without.
+fn removable(slot: TurnSlot) -> bool {
+    matches!(slot, TurnSlot::Succession)
 }
 
 fn takes_description(slot: TurnSlot) -> &'static str {
@@ -745,6 +761,47 @@ mod tests {
         empty.steps.clear();
         let refused = graph.propose(empty, None).await.unwrap();
         assert!(refused.failure.as_deref().unwrap().contains("no steps"));
+    }
+
+    /// The succession step can be left off the live path; a step the
+    /// kernel cannot run a turn without cannot, and the record says which.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_the_succession_step_can_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (graph, _, _) = service(dir.path()).await;
+        let mut without_context = TurnGraph::shipped();
+        without_context
+            .steps
+            .retain(|step| step.slot != TurnSlot::ContextProgram);
+        let refused = graph.propose(without_context, None).await.unwrap();
+        assert_eq!(refused.activation, RevisionActivation::Failed);
+        assert!(
+            refused
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("slot 'context_program' is not on the live path"),
+            "{refused:?}"
+        );
+        assert_eq!(graph.active().revision, 0);
+
+        let mut without_succession = TurnGraph::shipped();
+        without_succession
+            .steps
+            .retain(|step| step.slot != TurnSlot::Succession);
+        let accepted = graph.propose(without_succession, None).await.unwrap();
+        assert_eq!(
+            accepted.activation,
+            RevisionActivation::Active,
+            "{accepted:?}"
+        );
+        assert!(
+            graph
+                .active()
+                .graph
+                .live_step(TurnSlot::Succession)
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

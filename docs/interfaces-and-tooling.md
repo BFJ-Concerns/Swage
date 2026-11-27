@@ -1227,7 +1227,9 @@ shipped `context-program` plugin and the succession step by the shipped
 `succession-summariser` plugin, every other slot the kernel's own. `POST
 /api/turn-graph/revisions` proposes
 a new one: it is validated against what is installed now — known slots,
-each once on the live path, a filler of a kind the slot's kernel point
+each once on the live path and every one present but `succession` (a
+revision without the succession step runs no succession pass, and the
+turn's record says the step was removed), a filler of a kind the slot's kernel point
 runs (`context_program` takes a plugin; `succession` a plugin or a
 workflow; `tool_dispatch`, `curator` and `judge` are the kernel's own
 until their points take one), a plugin that provides the slot, a saved

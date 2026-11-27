@@ -17,12 +17,17 @@
   interface TurnGraphAccount {
     revision: number;
     context_program: { filler: StepFiller; served: string; fallback: string | null };
-    succession: {
-      filler: StepFiller;
-      summariser: string;
-      served: string | null;
-      fallback: string | null;
-    };
+    // A revision without the succession step records only that it was
+    // removed.
+    succession:
+      | { removed: true }
+      | {
+          removed?: undefined;
+          filler: StepFiller;
+          summariser: string;
+          served: string | null;
+          fallback: string | null;
+        };
     hooks: { attached: HookAttachment[]; skipped: HookAttachment[] };
     branches: string[];
   }
@@ -249,11 +254,15 @@
               : ""}
           </li>
           <li>
-            succession: {fillerLabel(turnGraph.succession.filler)}; {turnGraph.succession.served
-              ? `served by ${turnGraph.succession.served}`
-              : "not run this turn"}{turnGraph.succession.fallback
-              ? ` — fell back: ${turnGraph.succession.fallback}`
-              : ""}
+            {#if turnGraph.succession.removed}
+              succession: removed in this revision; not run
+            {:else}
+              succession: {fillerLabel(turnGraph.succession.filler)}; {turnGraph.succession.served
+                ? `served by ${turnGraph.succession.served}`
+                : "not run this turn"}{turnGraph.succession.fallback
+                ? ` — fell back: ${turnGraph.succession.fallback}`
+                : ""}
+            {/if}
           </li>
           {#if turnGraph.hooks.attached.length > 0}
             <li>

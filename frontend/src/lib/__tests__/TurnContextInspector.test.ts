@@ -154,6 +154,40 @@ describe("TurnContextInspector", () => {
     );
   });
 
+  it("says when the revision removed the succession step", async () => {
+    vi.mocked(fetchTurnContext).mockResolvedValue({
+      assembly_name: "default",
+      elements: [],
+      total_tokens: 10,
+      budget: null,
+      budget_remaining: null,
+      compaction_applied: [],
+      warnings: [],
+      errors: [],
+      declared_omissions: [],
+      effective_tool_permissions: undefined,
+      provider_visible: undefined,
+      turn_graph: {
+        revision: 3,
+        context_program: { filler: { kind: "builtin" }, served: "builtin", fallback: null },
+        succession: { removed: true },
+        hooks: { attached: [], skipped: [] },
+        branches: [],
+      },
+      duration: { secs: 0, nanos: 1_000_000 },
+    });
+
+    component = mount(TurnContextInspector, {
+      target: document.body,
+      props: { turnId: "turn-3", onClose: () => {} },
+    });
+    await vi.waitFor(() => {
+      expect(document.querySelector(".turn-graph")).not.toBeNull();
+    });
+    const text = document.querySelector(".turn-graph")!.textContent!.replace(/\s+/g, " ");
+    expect(text).toContain("succession: removed in this revision; not run");
+  });
+
   it("names each declared omission and the reason given for it", async () => {
     vi.mocked(fetchTurnContext).mockResolvedValue({
       assembly_name: "focus",

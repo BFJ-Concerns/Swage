@@ -550,6 +550,62 @@ async fn continuity_messages_route_summary_produces_succession_instead_of_fallba
     assert!(requests.iter().any(|request| request["stream"] == true));
 }
 
+/// A revision without the succession step runs no succession pass over
+/// the threshold, and the turn's record says the step was removed.
+#[tokio::test]
+async fn a_revision_without_the_succession_step_runs_no_succession() {
+    use swage_protocol::client::turn_graph::{RevisionActivation, StepFiller, TurnGraph, TurnSlot};
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    let mut graph = TurnGraph::shipped();
+    graph.steps.retain(|step| step.slot != TurnSlot::Succession);
+    for step in &mut graph.steps {
+        step.filler = StepFiller::Builtin;
+    }
+    let revision = state.turn_graph.propose(graph, None).await.unwrap();
+    assert_eq!(
+        revision.activation,
+        RevisionActivation::Active,
+        "{revision:?}"
+    );
+    seed_history_over_threshold(&storage, session_id).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs");
+
+    let db = storage.db.lock().await;
+    let (report_json, _) = db
+        .snapshots
+        .values()
+        .next()
+        .expect("the turn's context snapshot");
+    let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
+    assert_eq!(report["turn_graph"]["revision"], revision.revision);
+    assert_eq!(
+        report["turn_graph"]["succession"]["removed"], true,
+        "{report}"
+    );
+    assert!(
+        !report["compaction_applied"]
+            .as_array()
+            .expect("compaction records")
+            .iter()
+            .any(|record| record["requested_strategy"] == "succession"),
+        "no succession pass ran"
+    );
+}
+
 #[tokio::test]
 async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elements() {
     let storage = Arc::new(MockStorage::new());
@@ -5499,11 +5555,19 @@ impl PluginStore for MockStorage {
 
 #[async_trait]
 impl TurnGraphStore for MockStorage {
+    /// A revision is answered as recorded, so a turn test can run under
+    /// one; nothing is kept for a reload.
     async fn record_turn_graph_revision(
         &self,
-        _: swage_storage::model::NewTurnGraphRevision,
+        revision: swage_storage::model::NewTurnGraphRevision,
     ) -> Result<swage_storage::model::TurnGraphRevisionRecord, StorageError> {
-        Err(StorageError::QueryFailed("mock".into()))
+        Ok(swage_storage::model::TurnGraphRevisionRecord {
+            revision: revision.revision,
+            graph: revision.graph,
+            activation: revision.activation,
+            failure: revision.failure,
+            created_at: chrono::Utc::now(),
+        })
     }
     async fn list_turn_graph_revisions(
         &self,
@@ -5511,7 +5575,7 @@ impl TurnGraphStore for MockStorage {
         Ok(Vec::new())
     }
     async fn activate_turn_graph_revision(&self, _: u32) -> Result<(), StorageError> {
-        Err(StorageError::QueryFailed("mock".into()))
+        Ok(())
     }
 }
 
