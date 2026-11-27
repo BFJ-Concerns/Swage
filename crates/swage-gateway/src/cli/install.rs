@@ -59,6 +59,9 @@ async fn install_at_path(args: &InstallArgs, path: PathBuf) -> Result<(), Client
         port: args.port.or(saved.port),
         host: args.host.clone().or(saved.host),
     };
+    if let Some(host) = &config.host {
+        crate::startup::gateway_bind_address(host, config.port.unwrap_or_default())?;
+    }
     let json = serde_json::to_string_pretty(&config).map_err(|source| ClientError::MetadataIo {
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
     })?;

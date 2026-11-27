@@ -286,6 +286,45 @@ async fn start_reports_the_daemons_configuration_error_on_stderr() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_bare_ipv6_host_serves_at_the_address_printed_on_start() {
+    GatewayProbe::new()
+        .journey(async |probe| {
+            probe.assert_success(
+                probe
+                    .run(&["gateway", "set-defaults", "--host", "::1", "--port", "0"])
+                    .await,
+            );
+            let output = probe.run(&["gateway", "start"]).await;
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            probe.assert_success(output);
+            let address = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("Gateway started on "))
+                .expect("startup must print a browser address");
+            assert!(address.starts_with("http://[::1]:"), "{address}");
+            GatewayClient::new(address).health().await.unwrap();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_reports_the_missing_provider_on_a_healthy_gateway() {
+    GatewayProbe::new()
+        .journey(async |probe| {
+            probe.start().await;
+            let output = probe.run(&["run", "hello"]).await;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{stderr}");
+            assert!(
+                stderr.contains("no default provider/model pair is configured"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("Gateway is not running"), "{stderr}");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clean_stop_status_reports_not_running_without_an_error() {
     GatewayProbe::new()
         .journey(async |probe| {
