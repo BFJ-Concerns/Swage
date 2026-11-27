@@ -106,19 +106,7 @@ impl Tool for DelegateTool {
         true
     }
 
-    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
-        if params.get("context").is_some() {
-            return Err(ToolError::InvalidParameters {
-                name: DELEGATE_TOOL_NAME.to_string(),
-                message: "Put background for the child in task. The context argument is no longer accepted."
-                    .to_string(),
-            });
-        }
-        Ok(())
-    }
-
     async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-        self.validate_call(&params)?;
         // Parse required fields — the schema validator has already checked
         // these, but defensive parsing avoids panics if called directly.
         let target_agent_id = params
@@ -226,8 +214,11 @@ fn parse_completion_mode(value: Option<&Value>) -> Result<DelegateCompletionMode
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::context::MockToolContext;
+    use crate::dispatch::ToolDispatcher;
 
     #[tokio::test]
     async fn delegate_tool_returns_requires_delegation() {
@@ -360,20 +351,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegate_tool_sends_callers_with_context_to_task() {
-        let tool = DelegateTool;
+    async fn delegate_tool_ignores_undeclared_arguments() {
+        let dispatcher = ToolDispatcher::allow_all(vec![Arc::new(DelegateTool) as Arc<dyn Tool>]);
         let ctx = MockToolContext::new("test-agent", "session-1");
-        let params = json!({
-            "target_agent": "analyzer",
-            "task": "Analyze this data",
-            "context": [{"role": "user", "content": "some context"}]
-        });
+        let result = dispatcher
+            .dispatch(
+                DELEGATE_TOOL_NAME,
+                json!({
+                    "target_agent": "reviewer",
+                    "task": "Review the requested patch",
+                    "context": "This is an undeclared argument"
+                }),
+                &ctx,
+                "test-agent",
+            )
+            .await;
 
-        let result = tool.execute(params, &ctx).await;
-        assert!(matches!(
-            result,
-            Err(ToolError::InvalidParameters { message, .. }) if message.contains("task")
-        ));
+        match result.unwrap_err() {
+            ToolError::RequiresDelegation { request } => {
+                assert_eq!(request.task, "Review the requested patch");
+            }
+            other => panic!("expected RequiresDelegation, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
