@@ -14,6 +14,15 @@ pub(super) async fn rebuild_thread_history_messages(
     rebuild_thread_history(storage, thread_id, None, Some(&[])).await
 }
 
+#[cfg(test)]
+pub(super) async fn rebuild_thread_history_messages_with_secrets(
+    storage: &dyn swage_storage::store::Storage,
+    thread_id: Uuid,
+    secret_values: &[String],
+) -> Result<Vec<ChatMessage>, GatewayError> {
+    rebuild_thread_history(storage, thread_id, None, Some(secret_values)).await
+}
+
 pub(super) async fn rebuild_thread_history_messages_with_retrieval(
     state: &AppState,
     thread_id: Uuid,
@@ -178,16 +187,7 @@ fn compact_tool_replay_messages_with_retrieval(
         let mut tool_results = Vec::new();
 
         for record in round_records {
-            let model_result = replay_result(record, secret_values);
-            let model_result = match (
-                retrieval,
-                serde_json::from_str::<swage_core::CompactToolReplay>(&model_result),
-            ) {
-                (Some(retrieval), Ok(replay)) => {
-                    replay.with_elision_note(retrieval).to_stable_json()
-                }
-                _ => model_result,
-            };
+            let model_result = model_facing_replay(replay_result(record, secret_values), retrieval);
             tool_calls.push(ToolCall {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),
@@ -209,6 +209,31 @@ fn compact_tool_replay_messages_with_retrieval(
     }
 
     Ok(replay_messages)
+}
+
+/// A stored replay as the model reads it: an elided envelope gains the note
+/// on how to read the rest, and a delivered result's envelope is framed whole
+/// — never its shortened preview, which would lose the frame's close. An
+/// approval account before the envelope stays outside the frame, as it is on
+/// the immediate result.
+fn model_facing_replay(stored: String, retrieval: Option<swage_core::ReplayRetrieval>) -> String {
+    let (account, envelope) = match stored.rsplit_once('\n') {
+        Some((account, envelope)) => (Some(account), envelope),
+        None => (None, stored.as_str()),
+    };
+    let Ok(mut replay) = serde_json::from_str::<swage_core::CompactToolReplay>(envelope) else {
+        return stored;
+    };
+    if let Some(retrieval) = retrieval.filter(|_| account.is_none()) {
+        replay = replay.with_elision_note(retrieval);
+    } else if !replay.delivered {
+        return stored;
+    }
+    let envelope = replay.for_model();
+    match account {
+        Some(account) => format!("{account}\n{envelope}"),
+        None => envelope,
+    }
 }
 
 fn replay_result(record: &ToolCallRecord, secret_values: Option<&[String]>) -> String {
@@ -263,11 +288,14 @@ fn replay_result(record: &ToolCallRecord, secret_values: Option<&[String]>) -> S
         let is_error = replay
             .is_error
             .unwrap_or(record.status.as_deref() != Some("success"));
-        match replay.full_result_ref {
-            Some(reference) => swage_core::compact_tool_result_for_model_with_reference(
+        match (replay.delivered, replay.full_result_ref) {
+            (true, reference) => {
+                swage_core::compact_delivered_tool_result_for_model(&result, is_error, reference)
+            }
+            (false, Some(reference)) => swage_core::compact_tool_result_for_model_with_reference(
                 &result, is_error, reference,
             ),
-            None => swage_core::compact_tool_result_for_model(&result, is_error),
+            (false, None) => swage_core::compact_tool_result_for_model(&result, is_error),
         }
     } else {
         envelope.to_owned()

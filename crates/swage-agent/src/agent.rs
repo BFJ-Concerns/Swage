@@ -1155,10 +1155,9 @@ mod approval_tests {
                             )
                             .expect("compact replay");
                             assert!(
-                                replay.preview.starts_with("[Delivered material:")
-                                    && replay.preview.contains("survey complete"),
-                                "a delegated agent's result reaches the model framed: {}",
-                                replay.preview
+                                replay.delivered && replay.preview == result,
+                                "a delegated agent's result is replayed as delivered material, \
+                                 its preview the bare result: {replay:?}"
                             );
                             assert_eq!(
                                 call.execution,
@@ -2211,21 +2210,33 @@ impl Agent {
 
                     // Leak detection on tool result before feeding back to the model.
                     let scanned_result = self.scan_output(result_content);
-                    // Framed before compaction, so the replay's preview opens
-                    // with the same frame the immediate result carries.
-                    let scanned_result = if dispatch_result.delivered {
-                        swage_core::frame_delivered_material(&scanned_result)
+                    let reference = tool_result_reference(&turn.id.to_string(), &call.call_id);
+                    // Delivered material is compacted bare, so the replay's
+                    // preview and digest match the stored result, and carries
+                    // the flag that has every reader frame the whole of it;
+                    // the immediate result carries the same frame.
+                    let (model_result, immediate_result) = if dispatch_result.delivered {
+                        (
+                            swage_core::compact_delivered_tool_result_for_model(
+                                &scanned_result,
+                                is_error,
+                                Some(reference),
+                            ),
+                            swage_core::frame_delivered_material(&scanned_result),
+                        )
                     } else {
-                        scanned_result
+                        (
+                            compact_tool_result_for_model_with_reference(
+                                &scanned_result,
+                                is_error,
+                                reference,
+                            ),
+                            scanned_result,
+                        )
                     };
-                    let model_result = compact_tool_result_for_model_with_reference(
-                        &scanned_result,
-                        is_error,
-                        tool_result_reference(&turn.id.to_string(), &call.call_id),
-                    );
 
                     let model_result = dispatch_result.model_content(&model_result);
-                    let safe_result = dispatch_result.model_content(&scanned_result);
+                    let safe_result = dispatch_result.model_content(&immediate_result);
 
                     // Settle the started row. The raw result stays in the
                     // store; the scanned model-facing text is what history

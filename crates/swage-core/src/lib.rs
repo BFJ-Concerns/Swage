@@ -63,9 +63,9 @@ pub use swage_protocol::client::settings::{Effort, EffortCapability};
 pub use tool::{
     CompactToolReplay, ReplayRetrieval, ToolCall, ToolDefinition, ToolReplayReasoning, ToolResult,
     build_tool_round_messages, build_tool_round_messages_with_reasoning,
-    compact_tool_arguments_for_model, compact_tool_result_for_model,
-    compact_tool_result_for_model_with_reference, extract_tool_result_metadata,
-    parse_tool_result_reference, tool_result_reference,
+    compact_delivered_tool_result_for_model, compact_tool_arguments_for_model,
+    compact_tool_result_for_model, compact_tool_result_for_model_with_reference,
+    extract_tool_result_metadata, parse_tool_result_reference, tool_result_reference,
 };
 
 pub use swage_protocol::client::context::{ProviderAttemptOutcome, ProviderAttemptRecord};

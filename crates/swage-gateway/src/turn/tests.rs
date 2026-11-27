@@ -21281,6 +21281,102 @@ async fn delivered_material_is_framed_for_the_model_and_an_addressed_brief_is_no
     );
 }
 
+/// A delegated agent's long result replays inside the whole frame — its close
+/// is not lost to the shortened preview — and a registered secret it does
+/// not contain leaves the replay intact rather than omitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_delivered_tool_result_replays_inside_the_whole_frame() {
+    use swage_storage::store::ToolCallStore;
+    let storage = MockStorage::new();
+    let thread_id = Uuid::new_v4();
+    let turn_id = Uuid::new_v4();
+    let payload = "material ".repeat(450);
+    for (role, origin, content) in [
+        (Role::User, swage_storage::MessageOrigin::User, "Delegate."),
+        (
+            Role::Assistant,
+            swage_storage::MessageOrigin::Assistant,
+            "Done.",
+        ),
+    ] {
+        storage
+            .append_message(AppendMessage {
+                thread_id,
+                attachments: Vec::new(),
+                turn_id: Some(turn_id),
+                role,
+                origin,
+                delivered: false,
+                content: content.into(),
+                agent_id: "gateway".into(),
+            })
+            .await
+            .unwrap();
+    }
+    storage
+        .create_tool_call(swage_storage::NewToolCall {
+            execution: None,
+            turn_id,
+            agent_id: "gateway".into(),
+            call_id: "delegate-1".into(),
+            tool: "delegate".into(),
+            arguments: "{}".into(),
+            model_arguments: "{}".into(),
+            result: Some(payload.clone()),
+            model_result: Some(swage_core::compact_delivered_tool_result_for_model(
+                &payload,
+                false,
+                Some(swage_core::tool_result_reference(
+                    &turn_id.to_string(),
+                    "delegate-1",
+                )),
+            )),
+            status: Some("success".into()),
+            duration_ms: Some(1),
+            truncated: false,
+            total_bytes: None,
+            provider_round: 0,
+            position: 0,
+            parent_call_id: None,
+            display_summary: None,
+        })
+        .await
+        .unwrap();
+
+    for secrets in [
+        Vec::new(),
+        vec!["an-unrelated-registered-value".to_string()],
+    ] {
+        let rebuilt = super::history::rebuild_thread_history_messages_with_secrets(
+            &storage, thread_id, &secrets,
+        )
+        .await
+        .unwrap();
+        let replayed = rebuilt
+            .iter()
+            .filter_map(ChatMessage::tool_replay)
+            .flatten()
+            .find_map(|part| match part {
+                ToolReplayPart::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("the delegated result is replayed");
+        assert!(
+            replayed.starts_with("[Delivered material:")
+                && replayed.ends_with("\n\n[End of delivered material.]"),
+            "secrets {secrets:?}: {replayed}"
+        );
+        assert!(
+            replayed.contains("material material") && !replayed.contains("[REDACTED_SECRET]"),
+            "secrets {secrets:?}: the replay keeps its preview: {replayed}"
+        );
+        assert!(
+            !replayed.contains("\"delivered\""),
+            "the stored flag is not shown to the model: {replayed}"
+        );
+    }
+}
+
 /// A turn killed mid-tool leaves one settled call and one started call. On
 /// real SQLite: recovery settles the started row as interrupted, and the
 /// rebuilt history replays the turn's round — the completed call with its
