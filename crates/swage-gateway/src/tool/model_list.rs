@@ -109,8 +109,9 @@ impl Tool for ModelListTool {
          Each entry gives the `id`, any `aliases` that name the same model, `model` (the \
          provider's own name for it), `family` (`claude`, `gpt` or `gemini`; left out when the \
          name matches none of them), and `effort_levels`: the levels the model is served at as \
-         asked. A call asking for a level not in that list is clamped to a lower one, and a \
-         model whose list is empty takes no effort setting. `default` is the id a call that \
+         asked. A call asking for a level not in that list is served at the nearest listed \
+         level below it, or at the lowest listed level when none is below it, and a model \
+         whose list is empty takes no effort setting. `default` is the id a call that \
          names no model runs on. Listing changes nothing."
     }
 
