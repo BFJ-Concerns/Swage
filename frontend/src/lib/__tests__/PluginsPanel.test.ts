@@ -63,7 +63,7 @@ describe("PluginsPanel", () => {
     });
     const quiet = plugin("quiet", { grants: [], service: { state: "failed", reason: "SyntaxError: bad" }, profile: "process", sessions: ["s1", "s2"] });
     const shipped = plugin("succession-summariser", {
-      provides: { tools: [], slots: ["succession"], hooks: [] },
+      provides: { tools: [], slots: ["succession"], hooks: [{ point: "turn_end", mode: "observe" }] },
       grants: ["model"],
       provenance: "shipped",
       enabled_for_install: true,
@@ -101,6 +101,10 @@ describe("PluginsPanel", () => {
     expect(shippedDetail.textContent).toContain("Shipped with the gateway");
     expect(shippedDetail.textContent).toContain("shipped with the gateway");
     expect(shippedDetail.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(true);
+    // The turn steps and hooks a plugin provides are listed beside its tools.
+    const shippedText = shippedDetail.textContent!.replace(/\s+/g, " ");
+    expect(shippedText).toContain("Turn steps succession");
+    expect(shippedText).toContain("Hooks turn_end — observe");
   });
 
   it("enables a plugin for the selected topic through the enablement route", async () => {

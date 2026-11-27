@@ -226,6 +226,34 @@
                 {/if}
               </dd>
             </div>
+            <div>
+              <dt>Turn steps</dt>
+              <dd>
+                {#if !selected.provides.slots?.length}
+                  None
+                {:else}
+                  <ul class="plain">
+                    {#each selected.provides.slots as slot (slot)}
+                      <li><code>{slot}</code></li>
+                    {/each}
+                  </ul>
+                {/if}
+              </dd>
+            </div>
+            <div>
+              <dt>Hooks</dt>
+              <dd>
+                {#if !selected.provides.hooks?.length}
+                  None
+                {:else}
+                  <ul class="plain">
+                    {#each selected.provides.hooks as hook (hook.point)}
+                      <li><code>{hook.point}</code> — {hook.mode}</li>
+                    {/each}
+                  </ul>
+                {/if}
+              </dd>
+            </div>
             <div><dt>Grants</dt><dd>{selected.grants.length ? selected.grants.join(", ") : "None"}</dd></div>
             <div>
               <dt>Secrets</dt>
