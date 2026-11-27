@@ -54,6 +54,60 @@ pub async fn process_turn(
     .await
 }
 
+/// Run the turn a person's message starts, delivered to the session rather
+/// than to the connection that sent it: a view that reconnects while the turn
+/// runs receives its approvals, calls and ending. The turn is recorded before
+/// it runs, as a drained one is, so its delivery can be settled when the
+/// session is released.
+pub(crate) async fn process_person_turn(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    input: TurnInput,
+    subscription: Arc<Mutex<SubscriptionState>>,
+) -> Result<(), GatewayError> {
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await?
+        .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+    let thread = crate::thread_selection::resolve_thread_for_session(
+        state.storage.as_ref(),
+        session_id,
+        target_thread_id,
+    )
+    .await?;
+    let turn = state
+        .storage
+        .create_turn(swage_storage::model::NewTurn {
+            thread_id: thread.id,
+            agent_id: session.agent_id,
+            state: swage_storage::TurnState::Pending,
+            user_input: Some(input.text.clone()),
+            parent_turn_id: None,
+        })
+        .await
+        .map_err(|error| super::map_turn_creation_error(error, session_id))?;
+    let events = crate::turn_queue::deliver_turn_to_session(state, session_id, turn.id).await;
+    let result = Box::pin(process_turn_with_existing_turn(
+        state,
+        session_id,
+        Some(thread.id),
+        input,
+        events,
+        subscription,
+        None,
+        None,
+        None,
+        None,
+        Some(turn.id),
+        TurnAttendance::Attended,
+    ))
+    .await;
+    crate::turn_queue::fail_turn_left_undelivered(state, session_id, turn.id).await?;
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_turn_with_existing_turn(
     state: &AppState,

@@ -85,16 +85,7 @@ fn spawn_person_turn(
         let result = match crate::turn_queue::has_queued_input(&state, session_id).await {
             Ok(true) => Err(GatewayError::TurnInProgress { session_id }),
             Ok(false) => {
-                turn::process_turn(
-                    &state,
-                    session_id,
-                    thread_id,
-                    input,
-                    tx.clone(),
-                    subscription,
-                    None,
-                )
-                .await
+                turn::process_person_turn(&state, session_id, thread_id, input, subscription).await
             }
             Err(error) => Err(error),
         };
@@ -126,9 +117,13 @@ fn spawn_person_turn(
                     });
                 }
             }
+            // How the turn ended reaches the view open on the session now,
+            // which may not be the connection that sent the message.
             Err(e) => {
                 let (code, message) = classify_gateway_error(&e);
-                let _ = tx.send(ServerEvent::Error { code, message });
+                state
+                    .send_to_session(session_id, &ServerEvent::Error { code, message })
+                    .await;
             }
         }
     });

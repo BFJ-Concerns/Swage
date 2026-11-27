@@ -1143,9 +1143,10 @@ async fn tool_approval_timeout_interrupt_policy() {
     assert_eq!(message["failure_message"], error["message"]);
 }
 
-/// Journey: Pending approval survives WebSocket reconnection — re-emitted to new client.
+/// Journey: Pending approval survives WebSocket reconnection — re-emitted to
+/// the new client, which then receives the rest of the turn.
 ///
-/// Proves: storage + WS reconnect re-emission
+/// Proves: storage + WS reconnect re-emission + delivery to the session
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_approval_survives_reconnect() {
     let _guard = SwageHomeGuard::isolate();
@@ -1225,6 +1226,10 @@ async fn pending_approval_survives_reconnect() {
         ws_wait_for_event(&mut stream2, "approval_confirmed", WEBSOCKET_EVENT_DEADLINE)
             .await
             .expect("should receive ApprovalConfirmed after reconnect approval");
+    // The turn the first connection started settles on the one open now.
+    ws_wait_for_event(&mut stream2, "turn_complete", WEBSOCKET_EVENT_DEADLINE)
+        .await
+        .expect("the reconnected view should receive the turn's completion");
 }
 
 /// Journey: Hook returns RequestApproval → approval with hook's custom prompt.
