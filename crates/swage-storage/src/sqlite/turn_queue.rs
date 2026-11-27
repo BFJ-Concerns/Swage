@@ -188,8 +188,11 @@ impl TurnQueueStore for SqliteStorage {
 
     async fn enqueue_turn_inputs(
         &self,
-        inputs: Vec<NewQueuedTurnInput>,
+        mut inputs: Vec<NewQueuedTurnInput>,
     ) -> Result<Vec<QueuedTurnInput>, StorageError> {
+        for input in &mut inputs {
+            self.mask(&mut input.content);
+        }
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let queued = enqueue_inputs(&tx, inputs)?;
@@ -202,8 +205,9 @@ impl TurnQueueStore for SqliteStorage {
     async fn enqueue_delegation_continuation(
         &self,
         parent_turn_id: Uuid,
-        input: NewQueuedTurnInput,
+        mut input: NewQueuedTurnInput,
     ) -> Result<QueuedTurnInput, StorageError> {
+        self.mask(&mut input.content);
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             // Consume the recovery mark in the same transaction as the queue

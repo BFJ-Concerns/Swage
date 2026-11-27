@@ -1938,10 +1938,15 @@
           },
           "sandbox_enabled": {
             "type": "boolean"
+          },
+          "sandbox_network": {
+            "$ref": "#/components/schemas/SandboxNetwork",
+            "description": "What a sandboxed command reaches on the network."
           }
         },
         "required": [
           "sandbox_enabled",
+          "sandbox_network",
           "require_approval",
           "access_gate"
         ],
@@ -2326,6 +2331,20 @@
         "required": [
           "timeout",
           "timeout_policy"
+        ],
+        "type": "object"
+      },
+      "JudgeConfig": {
+        "additionalProperties": false,
+        "description": "The judging model: who answers for a request a session's grants do\nnot cover — alone in an unattended turn, and first in an attended one,\nwhere the person takes the cases it is not sure of.",
+        "properties": {
+          "model": {
+            "description": "The model catalogue key, or an alias, of the model that judges\nsuch requests. Empty means no judge, and an unattended request\nbeyond the session's grants then fails closed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
         ],
         "type": "object"
       },
@@ -4094,15 +4113,48 @@
           "allow_degraded_execution": {
             "type": "boolean"
           },
+          "egress_hosts": {
+            "description": "Under the recorded proxy, the hosts a sandboxed command reaches\nwithout the judge being asked: an exact host, or `*.suffix` for a\nhost and every name beneath it. Any other host goes to the request\njudge and fails closed without its yes. Read only when `network` is\n`proxy`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "enabled": {
             "type": "boolean"
+          },
+          "network": {
+            "$ref": "#/components/schemas/SandboxNetwork",
+            "description": "What a sandboxed command can reach on the network."
           }
         },
         "required": [
           "enabled",
-          "allow_degraded_execution"
+          "allow_degraded_execution",
+          "network",
+          "egress_hosts"
         ],
         "type": "object"
+      },
+      "SandboxNetwork": {
+        "description": "What a sandboxed command can reach on the network.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "The host's network, directly, as an unsandboxed command reaches it.",
+            "type": "string"
+          },
+          {
+            "const": "none",
+            "description": "No network at all.",
+            "type": "string"
+          },
+          {
+            "const": "proxy",
+            "description": "Only through the gateway's recording proxy: every destination is\nrecorded, a listed host is reached, and any other host is put to the\nrequest judge.",
+            "type": "string"
+          }
+        ]
       },
       "SaveProviderSettings": {
         "properties": {
@@ -4211,6 +4263,16 @@
               "boolean",
               "null"
             ]
+          },
+          "sandbox_network": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SandboxNetwork"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object"
@@ -4267,6 +4329,17 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/HitlConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "judge": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JudgeConfig"
               },
               {
                 "type": "null"
@@ -4948,6 +5021,16 @@
             "type": [
               "boolean",
               "null"
+            ]
+          },
+          "sandbox_network": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SandboxNetwork"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },
@@ -6217,6 +6300,9 @@
           "hitl": {
             "$ref": "#/components/schemas/HitlConfig"
           },
+          "judge": {
+            "$ref": "#/components/schemas/JudgeConfig"
+          },
           "memory": {
             "$ref": "#/components/schemas/MemoryConfig"
           },
@@ -6273,6 +6359,7 @@
           "communication",
           "sessions",
           "memory",
+          "judge",
           "attachments",
           "voice",
           "restart_required",

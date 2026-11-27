@@ -5,12 +5,14 @@
   import type { SaveSecuritySettingsRequest } from "../../protocol/SaveSecuritySettingsRequest";
   import type { RequireApprovalEntry } from "../../protocol/RequireApprovalEntry";
   import type { AccessGateMode } from "../../protocol/AccessGateMode";
+  import type { SandboxNetwork } from "../../protocol/SandboxNetwork";
   import ApprovalToolPicker from "./ApprovalToolPicker.svelte";
   import { CHECK_LABELS, relaxedBy } from "../../security-settings";
 
   let { topicId = null, onSaved }: { topicId?: string | null; onSaved?: () => void | Promise<void> } = $props();
   let security = $state<SecuritySettingsResponse | null>(null);
   let sandbox = $state("inherit");
+  let network = $state("inherit");
   let approvalMode = $state("inherit");
   let approvals = $state<RequireApprovalEntry[]>([]);
   let access = $state("inherit");
@@ -18,12 +20,18 @@
   let error = $state<string | null>(null);
   let notice = $state("");
   const edited = new Set<keyof SaveSecuritySettingsRequest>();
+  const NETWORK_LABELS: Record<SandboxNetwork, string> = {
+    open: "Open, as the host reaches it",
+    none: "None",
+    proxy: "Through the recording proxy",
+  };
   const scopeLabel = $derived(topicId ? "this topic" : "the install");
   function loaded(value: SecuritySettingsResponse): void {
     edited.clear();
     security = value;
     const own = value.overrides;
     sandbox = own.sandbox_enabled == null ? "inherit" : own.sandbox_enabled ? "on" : "off";
+    network = own.sandbox_network ?? "inherit";
     approvalMode = own.require_approval == null ? "inherit" : "own";
     approvals = own.require_approval ?? value.effective.require_approval;
     access = own.access_gate ?? "inherit";
@@ -36,6 +44,7 @@
     busy = true; error = null; notice = "";
     const overrides: SaveSecuritySettingsRequest = {};
     if (edited.has("sandbox_enabled")) overrides.sandbox_enabled = sandbox === "inherit" ? null : sandbox === "on";
+    if (edited.has("sandbox_network")) overrides.sandbox_network = network === "inherit" ? null : network as SandboxNetwork;
     if (edited.has("require_approval")) overrides.require_approval = approvalMode === "inherit" ? null : approvals;
     if (!topicId && edited.has("access_gate")) overrides.access_gate = access === "inherit" ? null : access as AccessGateMode;
     try {
@@ -54,6 +63,7 @@
   {#if security}
     <div aria-label="Effective security checks">
       <p>Sandbox: {security.effective.sandbox_enabled ? "On" : "Off"}</p>
+      <p>Sandbox network: {NETWORK_LABELS[security.effective.sandbox_network]}</p>
       <p>Approval prompts: {security.effective.require_approval.map((entry) => typeof entry === "string" ? entry : entry.tool).join(", ") || "none"}</p>
       <p>Access gate: {security.effective.access_gate}{topicId ? " (install setting)" : ""}</p>
     </div>
@@ -68,6 +78,13 @@
           <select aria-label={`Sandbox for ${scopeLabel}`} bind:value={sandbox} onchange={() => edited.add("sandbox_enabled")}>
             <option value="inherit">{topicId ? "Follow the install" : "Use shipped default"}</option>
             <option value="on">On</option><option value="off">Off (relaxed)</option>
+          </select>
+        </label>
+        <label>Sandbox network
+          <select aria-label={`Sandbox network for ${scopeLabel}`} bind:value={network} onchange={() => edited.add("sandbox_network")}>
+            <option value="inherit">{topicId ? "Follow the install" : "Use shipped default"}</option>
+            <option value="open">{NETWORK_LABELS.open}</option><option value="none">{NETWORK_LABELS.none}</option>
+            {#if network === "proxy"}<option value="proxy">{NETWORK_LABELS.proxy}</option>{/if}
           </select>
         </label>
         <label>Approval prompts

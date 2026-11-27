@@ -302,7 +302,9 @@ this setting is false in both configurations.
 A fresh configuration allows all tools (`allow: ["*"]`), denies none, and
 requires approval for four tools: `shell`, `file_edit`, `file_write` and
 `python_execute`. In an attended session each call to one of these pauses
-until you approve or reject it. Browser actions do not require approval by
+until you approve or reject it. A Python program's own calls to these tools
+through the `swage` module run under the answer given for the `python_execute`
+call that runs it and do not ask again. Browser actions do not require approval by
 default. This default is defined in `ToolPermissionConfig::default()` and
 applies unless a config
 file replaces the approval list — a `require_approval` list in a global,
@@ -422,47 +424,130 @@ isolation described below.
 ### Bubblewrap
 
 The outer layer uses bubblewrap (bwrap) for Linux namespace isolation:
-PID, network, mount, user, IPC, and UTS namespaces are all unshared
-(`--unshare-all`), and the child dies with its parent
-(`--die-with-parent`). The root filesystem is bind-mounted read-only, with
-explicit read-write overlays for the working directory and any configured
-additional mounts.
+PID, mount, user, IPC and UTS namespaces are unshared, and the network
+namespace too unless the sandbox shares the host's network (see
+*Network* below); the child dies with its parent (`--die-with-parent`).
 
-The sandbox launcher strips `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and
-`GOOGLE_API_KEY` from the child's environment. This is a fixed list:
-provider `api_key_env` names are configurable, and a differently named
-environment variable is not stripped by this mechanism. LLM completions are
-proxied back through the host via IPC, so the child does not need provider
-credentials for completion requests.
+The sandbox reads broadly and writes narrowly. Everything the host can see
+is readable except the private paths it masks: SSH and GnuPG key material,
+cloud and cluster credentials (`~/.aws`, `~/.azure`, `~/.config/gcloud`,
+`~/.kube`), plaintext token files (`~/.netrc`, `~/.git-credentials`, the
+`gh` and Forgejo token files), package-registry tokens (Cargo's
+`credentials.toml` in its home, `~/.npmrc`, `~/.pypirc`, `~/.gem/credentials`, Docker's
+`config.json`), the desktop keyrings and `pass` store, and the gateway's own
+data root. A masked
+directory reads as empty and a masked file as `/dev/null`. Of `~/.ssh`, the
+files that hold no key — `config`, `known_hosts` and the `.pub` halves —
+stay readable. The shipped skills' files, written beneath the data root,
+are readable and runnable but not writable. A grant that names the data
+root reopens it.
+
+Writes go only to the workspace (when its grant allows), the workspace's
+git metadata where a linked worktree keeps it outside the tree, temporary
+space, the shared build and package caches under the home (`~/.cache`,
+the `registry` and `git` caches in Cargo's home — `CARGO_HOME`, else
+`~/.cargo`, the rest of which stays read-only — `~/.npm`,
+`~/.local/share/pnpm/store`, `~/go/pkg`) and any attachment
+granted write. A cache that does not exist yet is created before the turn
+where its tool is installed, so a first fetch can fill it; a token kept
+inside a cache stays masked.
+
+The child receives only named settings from the gateway's environment
+(`PATH`, `HOME`, the locale, the XDG directories, `CARGO_HOME`, the
+`RUSTUP_*` settings and git's configuration-file selectors) and never a
+provider credential. LLM completions are proxied back through the host via
+IPC, so the child does not need provider credentials.
+
+### Git on the operator's behalf
+
+Sandboxed git runs on the operator's own system and global git
+configuration, located as the gateway's environment locates it, together
+with the repository's own. Configuration carried in the gateway's
+environment (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`) and repository
+selectors (`GIT_DIR`, `GIT_WORK_TREE`) do not cross into the sandbox.
+
+Authentication goes through the operator's agent and credential helpers,
+never through key or token files inside the sandbox. Over SSH, the sandbox
+is given the operator's SSH agent (`SSH_AUTH_SOCK`), and git's ssh reads
+the operator's own `~/.ssh/config` alone (`ssh -F`) unless they set
+`core.sshCommand`: inside the sandbox's user namespace the system's
+root-owned ssh configuration shows as owned by nobody, which OpenSSH
+refuses. Over HTTPS, the
+sandboxed git's one credential helper asks the gateway through the turn's
+private socket, and the gateway runs `git credential fill` on the host, so
+the operator's own helpers answer with their own stores. A secret
+registered with the gateway is never an answer: governed secrets do not
+reach the sandbox. Nothing prompts, and every lookup is in the audit
+trail.
+
+Commit signing runs on the host: when the operator signs commits with SSH
+(`gpg.format ssh` and a `user.signingkey`), the sandboxed git is configured
+to sign with the `swage` binary as its signing program and with the
+operator's public key as a literal; the program forwards each payload to
+the gateway, which signs with the operator's key — the private file beside
+the public one, or the operator's agent — and records every signing in the
+audit trail with the key named and the turn attributed, under its
+fingerprint. The configuration is read as the turn's workspace sees it,
+conditional includes and all. A key the operator has not configured is
+refused, and a host that cannot sign — a key with no readable public half,
+a key named by a key command, a signing that waits on a hardware token or
+a passphrase — fails the commit with the cause rather than leaving it
+unsigned. An operator who signs with OpenPGP is served the same way: the
+sandboxed git's signing program forwards each payload, and the gateway
+signs with the operator's own `gpg` (`gpg.openpgp.program` or
+`gpg.program`, read from their global or system configuration and the
+files it includes, never from the repository's) and key — `user.signingkey`, or the committer identity git
+signs as without one — through their gpg-agent; the keyring stays masked.
+A format the host cannot forward (`x509`) fails the commit with that
+cause, which the gateway log also gives at the turn's start.
+
+### Network
+
+A sandboxed command reaches the network as the host does, through the
+operator's own proxy settings where there are any. `sandbox.network`
+confines it, for the install or a topic, in `config.toml` or under
+**Settings → Security** (which offers `open` and `none`):
+
+| Value | A sandboxed command reaches |
+|---|---|
+| `open` (default) | the host's network, directly |
+| `none` | nothing beyond its own loopback |
+| `proxy` | only the gateway's recording proxy |
+
+Under `proxy`, every destination is recorded in the audit trail as an
+`egress_connection` event. A host matching `sandbox.egress_hosts` (an exact
+host, or `*.suffix` for a host and every name beneath it) is reached; any
+other host is put to the request judge (`[judge] model`), and without its
+yes the connection is refused. With no judge configured, only the listed
+hosts are reachable.
 
 ### Landlock
 
 The inner layer applies Landlock — a kernel-enforced, per-path filesystem
-access-control mechanism. It supports ABI 1 (Linux 5.13+), ABI 2 (5.19+,
-adding the `REFER` permission), and ABI 3 (6.2+, adding `TRUNCATE`), and
-degrades gracefully on kernels that predate it.
-
-System paths required for tool execution (`/bin`, `/lib`, `/lib64`,
-`/usr/bin`, `/usr/lib`, `/usr/lib64`, `/etc/ld.so.cache`) are mounted
-read-only. The working directory and `/tmp` are always writable, along with
-any explicitly configured write paths. Landlock restrictions are irrevocable
-within the process.
+access-control mechanism — with the same write set: everything is readable
+and executable, and only the paths above are writable. It supports ABI 1
+(Linux 5.13+), ABI 2 (5.19+, adding the `REFER` permission), and ABI 3
+(6.2+, adding `TRUNCATE`), and degrades gracefully on kernels that predate
+it. Landlock restrictions are irrevocable within the process.
 
 ### Configuration
 
 Sandboxing is on by default, so the gateway host needs
-[bubblewrap](https://github.com/containers/bubblewrap) installed. Two config
-options govern sandbox behaviour:
+[bubblewrap](https://github.com/containers/bubblewrap) installed. These
+config options govern sandbox behaviour:
 
 | Option | Default | Effect |
 |---|---|---|
 | `sandbox.enabled` | `true` | Whether to set up sandbox isolation for each turn |
 | `sandbox.allow_degraded_execution` | `false` | Whether to allow unsandboxed execution after sandbox setup fails |
+| `sandbox.network` | `open` | What a sandboxed command reaches on the network (see *Network*) |
+| `sandbox.egress_hosts` | `[]` | Under `network = "proxy"`, the hosts reached without the judge |
 
-With sandboxing disabled, local gateway turns run without sandbox isolation
-and record that the sandbox was switched off (`sandbox_disabled`), which is
-distinct from degraded execution after a sandbox failed to start.
-`allow_degraded_execution` is not required for this configuration choice.
+With sandboxing disabled, local gateway turns, Python included, run without
+sandbox isolation and record that the sandbox was switched off
+(`sandbox_disabled`), which is distinct from degraded execution after a
+sandbox failed to start. `allow_degraded_execution` is not required for
+this configuration choice.
 
 To turn sandboxing off for a topic, add this to its `config.toml`:
 
@@ -544,6 +629,34 @@ require_approval = ["write_file", { tool = "execute_command", timeout = 600 }]
 
 The object form accepts `tool` (required), `timeout` (seconds), and
 `timeout_policy` for individual tools.
+
+### Requests beyond the grants
+
+A tool call that asks for a location outside the session's granted
+locations is decided before it runs. In a session nobody attends — a turn
+started by the API, a schedule, a workflow or a delegation — the request is
+refused unless a judge allows it, and the agent is told why: with no judge
+configured, the refusal says so. An attended session asks the person, as
+above.
+
+A judge is a model named in settings, off by default:
+
+```toml
+[judge]
+model = "claude-haiku"   # a model catalogue key or alias
+```
+
+Given the tool, its arguments, the agent's stated justification and the
+task the turn is doing, the judge answers yes or no with a reason. In an
+unattended session it decides alone, and anything but a clear yes — a no,
+an unreadable reply, a judge that could not be reached — refuses. In an
+attended session the person is asked unless the judge is confident. A yes
+lets that one request through and adds nothing to the session's grants.
+Every judgement is recorded as a `request_judged` audit event with the
+tool, the arguments, the justification, the verdict and the reason. Under
+`sandbox.network = "proxy"` the same judge decides a host the listed hosts
+do not cover. The judge's instruction is the `prompts.request_judge`
+experiment location.
 
 ## Context configuration
 
@@ -659,9 +772,10 @@ Restart the gateway after changing either key.
 
 The shipped locations are `context.assembly`, `context.working_norms`,
 `context.material_quoting` (how much reference material a turn quotes whole),
-`task.prompt`, `prompts.memory_curator`, and `prompts.succession_summary`
-(the instruction a conversation summary is written under, selected when a
-session first needs a summary).
+`task.prompt`, `prompts.memory_curator`, `prompts.succession_summary` (the
+instruction a conversation summary is written under, selected when a
+session first needs a summary), and `prompts.request_judge` (the judge's
+instruction).
 
 ### Alternatives
 

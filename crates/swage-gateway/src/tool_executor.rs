@@ -25,8 +25,20 @@ use crate::secret::SecretManager;
 use crate::state::AppState;
 use crate::websocket::ServerEvent;
 
+#[derive(Clone)]
+pub struct PythonExecution {
+    pub sandbox: Option<swage_sandbox::SandboxConfig>,
+    pub egress: Option<swage_sandbox::EgressSetup>,
+    pub dispatcher: Arc<swage_tool::dispatch::ToolDispatcher>,
+    // Keep the private IPC services alive through nested calls and workers.
+    pub credentials: Arc<crate::git_credential::CredentialServer>,
+    /// The host signer, when the operator signs commits with SSH.
+    pub signer: Option<Arc<crate::git_signer::SignerServer>>,
+}
+
 pub struct GatewayToolContext {
     base: SerializableToolContext,
+    pub(crate) python_execution: Option<PythonExecution>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     storage: Arc<dyn Storage>,
     /// The full gateway state, present when the tool runs inside a live host
@@ -45,6 +57,7 @@ impl GatewayToolContext {
     ) -> Self {
         Self {
             base: serialise_tool_context(ctx),
+            python_execution: None,
             ws_tx,
             storage,
             app_state: None,
@@ -170,6 +183,7 @@ impl ToolExecutionStrategy for SandboxedExecutor {
 pub struct GatewayExecutionStrategy {
     /// Optional inner strategy — e.g. `SandboxedExecutor` when sandbox is enabled.
     inner: Option<Arc<dyn ToolExecutionStrategy>>,
+    python_execution: Option<PythonExecution>,
     /// WebSocket sender for sub-tool lifecycle events inside Python.
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     /// Resolved device for the current turn.
@@ -195,12 +209,17 @@ impl GatewayExecutionStrategy {
     ) -> Self {
         Self {
             inner,
+            python_execution: None,
             ws_tx,
             device,
             secret_manager,
             storage,
             app_state,
         }
+    }
+    pub fn with_python_execution(mut self, execution: PythonExecution) -> Self {
+        self.python_execution = Some(execution);
+        self
     }
 }
 
@@ -224,9 +243,10 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
             )
             .await?
         };
-        let gateway_ctx =
+        let mut gateway_ctx =
             GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage))
                 .with_app_state(self.app_state.clone());
+        gateway_ctx.python_execution = self.python_execution.clone();
 
         if let Some(device) = self
             .device
@@ -719,15 +739,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn gateway_strategy_resolves_secret_refs_on_host_and_bypasses_inner_strategy() {
         // The managed-secret backend reads its encryption key from the
-        // environment. Provide one so the test is self-contained (mirroring
-        // the swage-storage secret tests) rather than passing only in shells
-        // that happen to export a dev key.
-        unsafe {
-            std::env::set_var(
-                "SWAGE_MANAGED_SECRET_KEY",
-                "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
-            );
-        }
+        // environment; the guard sets it and holds it against the other
+        // tests that set it, for as long as this test runs.
+        let _key = crate::secret::tests::with_secret_env();
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());

@@ -403,6 +403,26 @@ fn create_secret_record(
 
 #[async_trait]
 impl SecretStore for SqliteStorage {
+    fn registered_secret_values(&self) -> swage_core::RegisteredSecretValues {
+        self.secret_values.clone()
+    }
+
+    async fn stored_keys_among(
+        &self,
+        candidates: Vec<String>,
+    ) -> Result<std::collections::HashSet<String>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut keys = std::collections::HashSet::new();
+            for candidate in candidates {
+                if super::record_masking::is_stored_key(conn, &candidate)? {
+                    keys.insert(candidate);
+                }
+            }
+            Ok(keys)
+        })
+        .await
+    }
+
     async fn write_credentials_with_audit(
         &self,
         creations: Vec<NewSecretRecord>,
@@ -843,6 +863,7 @@ mod tests {
 
         let storage = SqliteStorage {
             conn: tokio::sync::Mutex::new(conn),
+            secret_values: swage_core::RegisteredSecretValues::default(),
         };
         let restored = storage.get_managed_secret_value(secret_id).await.unwrap();
         assert_eq!(restored, Some("legacy-secret".into()));

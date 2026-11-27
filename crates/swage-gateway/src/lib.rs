@@ -41,6 +41,7 @@
 //! in `Processing` state by a previous unclean exit as `Interrupted`.
 
 pub mod access_gate;
+pub mod answer_masking;
 pub mod approval_scope;
 pub mod assets;
 pub mod attachment;
@@ -57,6 +58,7 @@ pub mod completion_record;
 pub mod config_change;
 pub mod context;
 pub mod device;
+pub mod egress;
 pub mod error;
 pub mod experimentation;
 #[cfg(feature = "test-fixtures")]
@@ -74,6 +76,7 @@ pub mod presence;
 pub mod provider_credential_exposure;
 pub mod recent_sessions;
 pub mod record_durability;
+pub mod request_judge;
 pub mod schedule;
 pub mod secret;
 pub mod security_settings;
@@ -411,3 +414,6 @@ pub(crate) mod test_support {
         }
     }
 }
+
+pub mod git_credential;
+pub mod git_signer;

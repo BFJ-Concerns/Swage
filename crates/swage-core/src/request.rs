@@ -116,7 +116,7 @@ pub struct ProviderResponseWitness {
     pub terminal_event: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
-    pub usage: TokenUsage,
+    pub usage: Option<TokenUsage>,
     #[serde(default)]
     pub content_blocks: Vec<ProviderContentBlockWitness>,
 }

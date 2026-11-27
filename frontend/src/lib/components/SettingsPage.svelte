@@ -222,6 +222,7 @@
       tool_permissions: settings.tool_permissions,
       hitl: settings.hitl,
       sandbox: settings.sandbox,
+      judge: settings.judge,
       context: settings.context,
       pricing: settings.pricing,
       observability: settings.observability,

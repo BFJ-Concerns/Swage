@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
-use swage_core::{StorageError, compact_tool_arguments_for_model, compact_tool_result_for_model};
+use swage_core::{StorageError, compact_tool_result_for_model};
 
 use crate::model::{NewToolCall, ToolCallRecord};
 use crate::sqlite::SqliteStorage;
@@ -16,24 +16,21 @@ use crate::store::ToolCallStore;
 // ---------------------------------------------------------------------------
 
 /// Map a row from `SELECT id, turn_id, agent_id, call_id, tool, arguments,
-/// model_arguments, result, model_result, status, duration_ms, truncated,
+/// result, model_result, status, duration_ms, truncated,
 /// total_bytes, provider_round, position, created_at, parent_call_id,
 /// display_summary`.
 fn row_to_tool_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord> {
     let id: String = row.get(0)?;
     let turn_id: String = row.get(1)?;
-    let created: String = row.get(15)?;
+    let created: String = row.get(14)?;
 
     // SQLite stores booleans as integers; map 0/1 back to bool.
-    let truncated_int: i64 = row.get(11)?;
+    let truncated_int: i64 = row.get(10)?;
     let arguments: String = row.get(5)?;
-    let model_arguments = row
-        .get::<_, Option<String>>(6)?
-        .unwrap_or_else(|| compact_arguments_from_raw(&arguments));
-    let result: Option<String> = row.get(7)?;
-    let status: Option<String> = row.get(9)?;
+    let result: Option<String> = row.get(6)?;
+    let status: Option<String> = row.get(8)?;
     let model_result = row
-        .get::<_, Option<String>>(8)?
+        .get::<_, Option<String>>(7)?
         .or_else(|| compact_result_from_raw(result.as_deref(), status.as_deref()));
 
     Ok(ToolCallRecord {
@@ -43,24 +40,23 @@ fn row_to_tool_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord>
         call_id: row.get(3)?,
         tool: row.get(4)?,
         arguments,
-        model_arguments,
         result,
         model_result,
         status,
-        duration_ms: row.get(10)?,
+        duration_ms: row.get(9)?,
         truncated: truncated_int != 0,
-        total_bytes: row.get(12)?,
-        provider_round: row.get(13)?,
-        position: row.get(14)?,
+        total_bytes: row.get(11)?,
+        provider_round: row.get(12)?,
+        position: row.get(13)?,
         created_at: parse_dt(&created)?,
-        parent_call_id: row.get(16)?,
-        display_summary: row.get(17)?,
+        parent_call_id: row.get(15)?,
+        display_summary: row.get(16)?,
         execution: row
-            .get::<_, Option<String>>(18)?
+            .get::<_, Option<String>>(17)?
             .map(|encoded| {
                 serde_json::from_str(&encoded).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        18,
+                        17,
                         rusqlite::types::Type::Text,
                         Box::new(error),
                     )
@@ -68,12 +64,6 @@ fn row_to_tool_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord>
             })
             .transpose()?,
     })
-}
-
-fn compact_arguments_from_raw(arguments: &str) -> String {
-    let value = serde_json::from_str(arguments)
-        .unwrap_or_else(|_| serde_json::Value::String(arguments.to_string()));
-    compact_tool_arguments_for_model(&value)
 }
 
 fn compact_result_from_raw(result: Option<&str>, status: Option<&str>) -> Option<String> {
@@ -102,8 +92,12 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 impl ToolCallStore for SqliteStorage {
     async fn create_tool_call(
         &self,
-        tool_call: NewToolCall,
+        mut tool_call: NewToolCall,
     ) -> Result<ToolCallRecord, StorageError> {
+        self.mask(&mut tool_call.arguments);
+        self.mask_option(&mut tool_call.result);
+        self.mask_option(&mut tool_call.model_result);
+        self.mask_option(&mut tool_call.display_summary);
         self.with_conn(|conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
@@ -111,11 +105,11 @@ impl ToolCallStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO tool_calls
-                 (id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
+                 (id, turn_id, agent_id, call_id, tool, arguments,
                   result, model_result, status,
                   duration_ms, truncated, total_bytes, provider_round, position, created_at,
                   parent_call_id, display_summary, execution)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     id.to_string(),
                     tool_call.turn_id.to_string(),
@@ -123,7 +117,6 @@ impl ToolCallStore for SqliteStorage {
                     &tool_call.call_id,
                     &tool_call.tool,
                     &tool_call.arguments,
-                    &tool_call.model_arguments,
                     &tool_call.result,
                     &tool_call.model_result,
                     &tool_call.status,
@@ -147,7 +140,6 @@ impl ToolCallStore for SqliteStorage {
                 call_id: tool_call.call_id,
                 tool: tool_call.tool,
                 arguments: tool_call.arguments,
-                model_arguments: tool_call.model_arguments,
                 result: tool_call.result,
                 model_result: tool_call.model_result,
                 status: tool_call.status,
@@ -167,7 +159,7 @@ impl ToolCallStore for SqliteStorage {
     async fn get_tool_call(&self, id: Uuid) -> Result<Option<ToolCallRecord>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
+                "SELECT id, turn_id, agent_id, call_id, tool, arguments,
                         result, model_result, status, duration_ms, truncated, total_bytes,
                         provider_round, position, created_at, parent_call_id,
                         display_summary, execution
@@ -188,7 +180,7 @@ impl ToolCallStore for SqliteStorage {
         let call_id = call_id.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
+                "SELECT id, turn_id, agent_id, call_id, tool, arguments,
                         result, model_result, status, duration_ms, truncated, total_bytes,
                         provider_round, position, created_at, parent_call_id,
                         display_summary, execution
@@ -213,8 +205,10 @@ impl ToolCallStore for SqliteStorage {
         execution: Option<swage_protocol::client::conversation::ToolExecution>,
     ) -> Result<(), StorageError> {
         let id = id.to_string();
-        let result = result.to_owned();
-        let model_result = model_result.to_owned();
+        let mut result = result.to_owned();
+        let mut model_result = model_result.to_owned();
+        self.mask(&mut result);
+        self.mask(&mut model_result);
         let status = status.to_owned();
 
         self.with_conn(move |conn| {
@@ -253,7 +247,7 @@ impl ToolCallStore for SqliteStorage {
     ) -> Result<Vec<ToolCallRecord>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
+                "SELECT id, turn_id, agent_id, call_id, tool, arguments,
                         result, model_result, status, duration_ms, truncated, total_bytes,
                         provider_round, position, created_at,
                         parent_call_id, display_summary, execution
@@ -341,7 +335,6 @@ mod tests {
             call_id: call_id.into(),
             tool: "shell".into(),
             arguments: r#"{"cmd":"ls"}"#.into(),
-            model_arguments: compact_arguments_from_raw(r#"{"cmd":"ls"}"#),
             result: None,
             model_result: None,
             status: None,
@@ -666,7 +659,6 @@ mod tests {
                 call_id: "toolu_a".into(),
                 tool: "file_read".into(),
                 arguments: r#"{"path":"/etc/hosts"}"#.into(),
-                model_arguments: compact_arguments_from_raw(r#"{"path":"/etc/hosts"}"#),
                 result: None,
                 model_result: None,
                 status: None,
@@ -689,7 +681,6 @@ mod tests {
                 call_id: "toolu_b".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"pwd"}"#.into(),
-                model_arguments: compact_arguments_from_raw(r#"{"cmd":"pwd"}"#),
                 result: None,
                 model_result: None,
                 status: None,

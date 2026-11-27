@@ -715,6 +715,25 @@
       ],
       "type": "object"
     },
+    "Duration": {
+      "properties": {
+        "nanos": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ],
+      "type": "object"
+    },
     "EffectiveAgentDefinitionListResponse": {
       "properties": {
         "definitions": {
@@ -877,6 +896,135 @@
           "type": "object"
         }
       ]
+    },
+    "GitCredentialRequest": {
+      "description": "One HTTPS git credential lookup on the turn's private IPC socket.",
+      "properties": {
+        "directory": {
+          "default": null,
+          "description": "The directory git ran the helper in: the repository asking, which\ndecides the operator's directory-conditional configuration.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "host"
+      ],
+      "type": "object"
+    },
+    "GitCredentialResponse": {
+      "description": "An absent credential makes git continue without this helper's answer.",
+      "properties": {
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GitSignRequest": {
+      "description": "One request to sign a git payload on the host, from the sandboxed git's\nsigning program over the turn's private IPC socket, in the operator's\nsigning format. The payload is base64-encoded.",
+      "oneOf": [
+        {
+          "description": "`ssh-keygen -Y sign`: the signing namespace git names (`git`) and the\npublic key git was configured with.",
+          "properties": {
+            "format": {
+              "const": "ssh",
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "string"
+            },
+            "public_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "namespace",
+            "public_key",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`gpg -bsau <key>`: the key git names.",
+          "properties": {
+            "format": {
+              "const": "openpgp",
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "key",
+            "payload"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "GitSignResponse": {
+      "description": "The armoured signature for the payload, or the refusal that explains why\nthe host did not sign. An OpenPGP signature comes with the signer's\nstatus lines, which git reads to confirm the signature was made.",
+      "properties": {
+        "refusal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signature": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "KnowledgeMirrorRegenerateResponse": {
       "description": "Result of regenerating a topic's knowledge-base browse mirror — a\ndisposable markdown projection of the database-authoritative store.",
@@ -1294,6 +1442,151 @@
       ],
       "type": "object"
     },
+    "PythonExecuteToolConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "idle_ttl_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_workers": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "require_sandbox": {
+          "type": "boolean"
+        },
+        "runtime_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime_policy": {
+          "$ref": "#/$defs/PythonRuntimePolicy"
+        },
+        "startup_timeout_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeout_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warm_target": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "enabled",
+        "timeout_secs",
+        "startup_timeout_secs",
+        "idle_ttl_secs",
+        "warm_target",
+        "max_workers",
+        "runtime_policy",
+        "require_sandbox"
+      ],
+      "type": "object"
+    },
+    "PythonRuntimePolicy": {
+      "enum": [
+        "bundled_then_system"
+      ],
+      "type": "string"
+    },
+    "SandboxPolicy": {
+      "description": "Per-turn sandbox policy and timeouts.\n\nSerialised to the sandboxed child, which applies the write set and the\nbroad read through Landlock; the host applies the same policy through\nbubblewrap's mounts, where the masks and the read-only paths are enforced.",
+      "properties": {
+        "environment": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Host-selected environment inherited by sandboxed commands.",
+          "type": "object"
+        },
+        "host_network": {
+          "description": "Whether sandboxed commands share the host's network. Without it the\nsandbox has its own network namespace, reaching the network only\nthrough an egress proxy when the host binds one in.",
+          "type": "boolean"
+        },
+        "llm_request_timeout": {
+          "$ref": "#/$defs/Duration",
+          "description": "Per-LLM-request IPC timeout."
+        },
+        "masked_paths": {
+          "description": "Private paths hidden from the sandbox altogether. A directory reads as\nempty; a file reads as empty. Enforced by the mount layer, so the\nfallback backend cannot honour them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "read_only_paths": {
+          "description": "Paths kept read-only even where a write path above them would allow\nwriting: a read-only attachment inside a writable tree, say.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "shutdown_grace_period": {
+          "$ref": "#/$defs/Duration",
+          "description": "Time to wait for graceful shutdown before SIGKILL."
+        },
+        "tool_call_timeout": {
+          "$ref": "#/$defs/Duration",
+          "description": "Per-tool-call IPC timeout."
+        },
+        "tool_output_directory": {
+          "description": "Where tools keep their output artefacts, carried to the child\nindependently of its working directory; writable, as a write path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_runtime": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolRuntimeSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Session tool settings carried to the child, which builds its tools\nfrom them."
+        },
+        "working_directory": {
+          "description": "The directory the agent's commands run in. Writable only when it is\nalso in `write_paths`.",
+          "type": "string"
+        },
+        "write_paths": {
+          "description": "Paths the sandboxed process may write. Everything else it can see is\nread-only.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "working_directory",
+        "write_paths",
+        "read_only_paths",
+        "masked_paths",
+        "host_network",
+        "environment",
+        "shutdown_grace_period",
+        "tool_call_timeout",
+        "llm_request_timeout"
+      ],
+      "type": "object"
+    },
     "Schedule": {
       "description": "A schedule as returned by the API.",
       "properties": {
@@ -1492,6 +1785,22 @@
         }
       ]
     },
+    "SearchProviderConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "base_url": {
+          "type": "string"
+        },
+        "provider_type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_type",
+        "base_url"
+      ],
+      "type": "object"
+    },
     "SecretListResponse": {
       "properties": {
         "managed_backend": {
@@ -1626,6 +1935,45 @@
         }
       ]
     },
+    "ToolRuntimeSettings": {
+      "properties": {
+        "max_output_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "plugin_directory": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "python_execute": {
+          "$ref": "#/$defs/PythonExecuteToolConfig"
+        },
+        "search": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProviderConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shell_timeout_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "shell_timeout_secs",
+        "python_execute",
+        "max_output_bytes"
+      ],
+      "type": "object"
+    },
     "UpdateAgentDefinitionRequest": {
       "description": "Whole replacement supplied when updating a durable agent definition.",
       "properties": {
@@ -1752,6 +2100,18 @@
     "effective_agent_definition_list": {
       "$ref": "#/$defs/EffectiveAgentDefinitionListResponse"
     },
+    "git_credential_request": {
+      "$ref": "#/$defs/GitCredentialRequest"
+    },
+    "git_credential_response": {
+      "$ref": "#/$defs/GitCredentialResponse"
+    },
+    "git_sign_request": {
+      "$ref": "#/$defs/GitSignRequest"
+    },
+    "git_sign_response": {
+      "$ref": "#/$defs/GitSignResponse"
+    },
     "knowledge_mirror": {
       "$ref": "#/$defs/KnowledgeMirrorRegenerateResponse"
     },
@@ -1764,11 +2124,19 @@
     "presence": {
       "$ref": "#/$defs/PresenceSnapshotResponse"
     },
+    "sandbox": {
+      "$ref": "#/$defs/SandboxPolicy"
+    },
     "secrets": {
       "$ref": "#/$defs/SecretListResponse"
     }
   },
   "required": [
+    "sandbox",
+    "git_credential_request",
+    "git_credential_response",
+    "git_sign_request",
+    "git_sign_response",
     "secrets",
     "presence",
     "approvals",

@@ -253,6 +253,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
         eprintln!("Failed to register the Codex auth store as governed secrets: {error}");
         std::process::exit(1);
     }
+    // Every record written from here on is masked against the registered
+    // values, so they are read before the gateway takes any work.
+    state.secret_manager.refresh_registered_values().await;
     if let Err(error) = recover_worktrees_after_crash(&state).await {
         eprintln!("Worktree startup recovery failed: {error}");
         std::process::exit(1);
@@ -883,12 +886,6 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         }
     }
 
-    // Sub-dispatcher: all non-python tools, excluding python_execute to prevent
-    // recursive invocation through the python_execute tool.
-    let sub_dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(
-        non_python_tools.iter().cloned(),
-    ));
-
     let mut all_tools = non_python_tools;
 
     if !config.tools.python_execute.enabled {
@@ -901,12 +898,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
                 let runtime = Arc::new(runtime);
                 match swage_python::WorkerPool::new(Arc::clone(&runtime)) {
                     Ok(pool) => {
-                        all_tools.push(Arc::new(PythonExecuteTool::new(
-                            runtime,
-                            pool,
-                            sub_dispatcher,
-                            storage,
-                        )));
+                        all_tools.push(Arc::new(PythonExecuteTool::new(runtime, pool, storage)));
                         info!("Python worker runtime available — python_execute tool registered");
                     }
                     Err(error) => {

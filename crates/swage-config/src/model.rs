@@ -202,7 +202,7 @@ pub fn resolve_provider_route<'a>(
 }
 
 /// Sandbox isolation settings.
-pub use swage_protocol::client::settings::SandboxConfig;
+pub use swage_protocol::client::settings::{SandboxConfig, SandboxNetwork};
 
 /// Log verbosity levels.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -797,7 +797,9 @@ impl Default for SchedulingConfig {
 // Declared once in swage-protocol: the wire type and the resolved config
 // type are one definition, with the partial, schema and semantics beside it.
 pub use swage_protocol::client::access::AccessGateMode;
-pub use swage_protocol::client::settings::{AttachmentsConfig, MemoryConfig, SessionsConfig};
+pub use swage_protocol::client::settings::{
+    AttachmentsConfig, JudgeConfig, MemoryConfig, SessionsConfig,
+};
 
 /// Model routes for voice. Voice speaks only to the default provider's
 /// endpoint; each id is the model that endpoint serves for that audio API.
@@ -912,6 +914,8 @@ pub struct ResolvedConfig {
     pub sessions: SessionsConfig,
     /// `[memory]` — when the curator passes over an attended conversation.
     pub memory: MemoryConfig,
+    /// `[judge]` — the model that decides a request beyond a session's grants.
+    pub judge: JudgeConfig,
     /// Image reference schemes admitted before provider capability checks.
     pub attachments: AttachmentsConfig,
     /// Model routes for transcription and speech synthesis.

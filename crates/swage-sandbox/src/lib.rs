@@ -2,8 +2,8 @@
 //!
 //! Provides platform-abstracted isolation using bubblewrap and Landlock on Linux,
 //! with a fallback mode for unsupported platforms. Tool calls are dispatched and
-//! LLM requests are proxied through the host via IPC — credentials never enter
-//! the agent process.
+//! LLM requests are proxied through the host via IPC — provider credentials stay on
+//! the host.
 
 use std::path::PathBuf;
 
@@ -12,6 +12,7 @@ use swage_core::SandboxError;
 mod agent_loop;
 mod bubblewrap;
 mod config;
+pub mod egress;
 mod fallback;
 pub mod ipc;
 mod landlock;
@@ -21,12 +22,16 @@ mod provider;
 mod sandbox;
 mod socket;
 
+/// Provider credentials stay on the host; children use the IPC provider.
+pub(crate) const CREDENTIAL_ENV_VARS: &[&str] =
+    &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
+
 pub(crate) const SANDBOX_AGENT_BINARY_ENV: &str = "SWAGE_SANDBOX_AGENT_BINARY";
 
 #[cfg(test)]
 pub(crate) static SANDBOX_TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub(crate) fn resolve_agent_binary() -> Result<PathBuf, SandboxError> {
+pub fn resolve_agent_binary() -> Result<PathBuf, SandboxError> {
     if let Some(path) = std::env::var_os(SANDBOX_AGENT_BINARY_ENV) {
         return Ok(PathBuf::from(path));
     }
@@ -38,10 +43,15 @@ pub(crate) fn resolve_agent_binary() -> Result<PathBuf, SandboxError> {
 
 pub use agent_loop::{child_sandbox_config_from_env, run_agent_loop};
 pub use bubblewrap::BubblewrapSandbox;
-pub use bubblewrap::find_bwrap;
+pub use bubblewrap::{find_bwrap, policy_command};
 pub use config::{SandboxConfig, SandboxConfigError};
+pub use egress::{
+    EgressConnection, EgressPolicy, EgressRecorder, EgressRequest, EgressSetup, EgressVerdict,
+};
 pub use fallback::FallbackSandbox;
 pub use process::{ChildProcessManager, cleanup_failed_startup_process};
 pub use provider::IpcCompletionProvider;
 pub use sandbox::{Sandbox, ToolCallResult};
 pub use socket::SocketManager;
+
+pub use agent_loop::run_sandboxed_command;
