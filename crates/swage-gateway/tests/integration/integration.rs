@@ -918,7 +918,7 @@ async fn queued_messages_reach_real_sockets_in_turn_order_and_stay_in_their_sess
         }
         if [
             "turn_complete",
-            "message_appended",
+            "queued_message_sent",
             "queue_drained",
             "token",
         ]
@@ -934,7 +934,7 @@ async fn queued_messages_reach_real_sockets_in_turn_order_and_stay_in_their_sess
             .collect::<Vec<_>>(),
         vec![
             "turn_complete",
-            "message_appended",
+            "queued_message_sent",
             "queue_drained",
             "token",
             "turn_complete"
