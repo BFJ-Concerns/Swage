@@ -23,7 +23,7 @@
     <div class="tool-row">
       <span>{name(entry)}</span>
       <label>Timeout (seconds)
-        <input type="number" min="1" step="1" aria-label={`Timeout for ${name(entry)}`}
+        <input type="number" min="1" max={Number.MAX_SAFE_INTEGER} step="1" aria-label={`Timeout for ${name(entry)}`}
           value={typeof entry === "string" ? "" : entry.timeout ?? ""} placeholder="Use default"
           onchange={(event) => timeout(entry, event.currentTarget.value)} />
       </label>

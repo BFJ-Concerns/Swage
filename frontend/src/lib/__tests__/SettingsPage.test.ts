@@ -624,6 +624,30 @@ describe("SettingsPage", () => {
     expect(document.querySelector('[aria-label="Remove file_write approval"]')).toBeNull();
   });
 
+  it("refuses an approval timeout too large to save instead of saving without it", async () => {
+    const reading: SecuritySettingsResponse = {
+      available_tools: ["shell"], scope: { kind: "install" as const },
+      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: [] },
+      overrides: {}, relaxed: [],
+    };
+    vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);
+    vi.mocked(settingsApi.saveInstallSecuritySettings).mockResolvedValue(reading);
+    component = mount(SettingsPage, { target: document.body, props: { tab: "security" } });
+    await flushUi();
+    const approvals = document.querySelector<HTMLSelectElement>('[aria-label="Approval prompts for the install"]')!;
+    approvals.value = "own"; approvals.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    const tool = document.querySelector<HTMLSelectElement>('[aria-label="Tool to require approval"]')!;
+    tool.value = "shell"; tool.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi(); buttonNamed("Add tool").click(); await flushUi();
+    const timeout = document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')!;
+    timeout.value = "9007199254740992"; timeout.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    expect(timeout.validity.rangeOverflow).toBe(true);
+    buttonNamed("Save security settings").click(); await flushUi();
+    expect(settingsApi.saveInstallSecuritySettings).not.toHaveBeenCalled();
+  });
+
   it("refuses invalid provider URL drafts before autosave and accepts corrections or clearing", async () => {
     const originalUrl = "https://api.example.org/v1";
     vi.mocked(settingsApi.fetchSettings).mockResolvedValue({
