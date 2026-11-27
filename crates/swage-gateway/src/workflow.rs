@@ -1615,11 +1615,22 @@ pub trait WorkflowLauncher: Send + Sync {
 
 pub struct GatewayWorkflowLauncher {
     state: AppState,
+    /// How long a call that waits holds for its run to settle.
+    wait_limit: std::time::Duration,
 }
 
 impl GatewayWorkflowLauncher {
     pub fn new(state: AppState) -> Self {
-        Self { state }
+        Self {
+            state,
+            wait_limit: std::time::Duration::from_secs(600),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_wait_limit(mut self, wait_limit: std::time::Duration) -> Self {
+        self.wait_limit = wait_limit;
+        self
     }
 }
 
@@ -1757,7 +1768,10 @@ impl GatewayWorkflowLauncher {
         .await
         .map_err(|error| error.message().to_owned())?;
         if wait {
-            tokio::time::timeout(std::time::Duration::from_secs(600), async {
+            // A run still going when the wait ends is returned below as it
+            // stands, `running`, with its id and page: the run goes on, and the
+            // caller reads it later instead of starting the work again.
+            let settled = tokio::time::timeout(self.wait_limit, async {
                 loop {
                     let record = self
                         .state
@@ -1772,8 +1786,10 @@ impl GatewayWorkflowLauncher {
                     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                 }
             })
-            .await
-            .map_err(|_| "workflow wait timed out".to_string())??;
+            .await;
+            if let Ok(settled) = settled {
+                settled?;
+            }
         } else {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
