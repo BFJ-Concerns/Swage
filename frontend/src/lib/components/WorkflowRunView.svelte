@@ -41,6 +41,8 @@
   const run = $derived(detail?.run ?? null);
   const cancelling = $derived(cancellingRunId === run?.id && (run?.state === "running" || run?.state === "parked"));
   const account = $derived(run?.terminal_account ?? null);
+  const parked = $derived(run?.state === "parked");
+  const openHolds = $derived((detail?.holds ?? []).filter((hold) => hold.state === "open"));
 
   // The four standings, in the order a reader wants them: what came back,
   // what broke, what the ending stopped, and what nothing ever settled.
@@ -104,7 +106,7 @@
     [...new Set(partitions.flatMap(([, workers]) => workers.map((worker) => worker.placement ?? null)))],
   );
   const waits = $derived((detail?.journal ?? []).filter((entry) =>
-    entry.status === "started" && ["timer", "await_event"].includes(entry.kind),
+    entry.status === "started" && entry.kind === "await_event",
   ));
 
   function awaitedKinds(request: unknown): string {
@@ -250,20 +252,20 @@
         </section>
       {/if}
     {:else}
-      {#if run.state === "parked"}
+      {#if parked || openHolds.length > 0}
         <section class="awaited" aria-label="Awaited work">
           <h3>Waiting for</h3>
-          {#if detail?.timer_wake_at}<p>Timer wakes at {@render recordedTime(detail.timer_wake_at)}</p>{/if}
-          {#each detail?.holds ?? [] as hold (hold.id)}
-            {#if hold.state === "open"}
-              <p>Decision hold: {hold.content}</p>
-              <p>Permitted verdicts: {hold.verdicts.join(", ")}</p>
-              <p>An agent answers this decision through its granted tool.</p>
-            {/if}
+          {#if parked && detail?.timer_wake_at}<p>Timer wakes at {@render recordedTime(detail.timer_wake_at)}</p>{/if}
+          {#each openHolds as hold (hold.id)}
+            <p>Decision hold: {hold.content}</p>
+            <p>Permitted verdicts: {hold.verdicts.join(", ")}</p>
+            <p>An agent answers this decision through its granted tool.</p>
           {/each}
-          {#each waits.filter((entry) => entry.kind === "await_event") as wait (wait.id)}
-            <p>Awaiting {awaitedKinds(wait.request)}</p>
-          {/each}
+          {#if parked}
+            {#each waits as wait (wait.id)}
+              <p>Awaiting {awaitedKinds(wait.request)}</p>
+            {/each}
+          {/if}
         </section>
       {/if}
       <p class="notice">This run has not ended yet, so it has no account of its ending.</p>

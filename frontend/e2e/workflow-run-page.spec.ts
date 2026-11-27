@@ -15,6 +15,34 @@ async function startWorkflow(request: APIRequestContext, name: string, source: s
   return run.id;
 }
 
+test("shows a newly opened decision while another worker is still running", async ({ page, request }) => {
+  const runId = await startWorkflow(request, "Decision alongside a worker", `
+    const worker = agentStart("Keep this workflow worker pending");
+    await awaitEvent({ kinds: ["review.ready"] });
+    const decision = hold({ content: "Publish the preview?", verdicts: ["publish", "keep"] });
+    return await Promise.all([worker.done, decision]);
+  `);
+
+  await page.goto(`/workflow-runs/${runId}`);
+  const worker = page.getByText("Still working", { exact: true });
+  await expect(worker).toBeVisible();
+
+  const event = await request.post(`/api/workflow-runs/${runId}/events`, {
+    data: { kind: "review.ready", payload: null },
+  });
+  expect(event.ok()).toBe(true);
+
+  const awaited = page.getByRole("region", { name: "Awaited work" });
+  await expect(awaited.getByText("Decision hold: Publish the preview?")).toBeVisible();
+  await expect(awaited.getByText("Permitted verdicts: publish, keep")).toBeVisible();
+  await expect(worker).toBeVisible();
+  await expect(page.getByText("running", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Ending", exact: true })).toBeVisible();
+  await expect(awaited).toHaveCount(0);
+});
+
 test("gives the worker's attempts room under their label on wide and narrow screens", async ({ page, request }) => {
   const runId = await startWorkflow(
     request,

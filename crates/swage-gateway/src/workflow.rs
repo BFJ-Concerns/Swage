@@ -6130,6 +6130,11 @@ async fn run_host_commands_inner(
                         continue;
                     }
                 };
+                // The journal intent can reach readers before the hold exists.
+                // Announce the open decision even when the run cannot park.
+                let _ = state
+                    .broadcast
+                    .send(ServerEvent::WorkflowRunUpdated { run_id });
                 match settle_answered_hold(&state, entry_id, hold.id).await {
                     Ok(Some(result)) => {
                         let _ = reply.send(Ok(result));
