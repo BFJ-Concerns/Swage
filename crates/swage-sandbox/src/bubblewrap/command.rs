@@ -155,6 +155,10 @@ pub(crate) fn build_bwrap_command_for_with_path(
     Ok(cmd)
 }
 
+/// The runtime directory every sandboxed command is given, inside the
+/// sandbox's own `/tmp`.
+const RUNTIME_DIRECTORY: &str = "/tmp/runtime";
+
 /// Construct the shared namespace and filesystem boundary for a child.
 pub fn policy_command(
     bwrap_path: &Path,
@@ -187,10 +191,17 @@ pub fn policy_command(
         "XDG_CACHE_HOME",
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
-        "XDG_RUNTIME_DIR",
         "CARGO_HOME",
         "RUSTUP_HOME",
         "RUSTUP_TOOLCHAIN",
+        // Where the operator keeps Go's, uv's and npm's caches, which the
+        // policy opens where these name them.
+        "GOPATH",
+        "GOMODCACHE",
+        "GOCACHE",
+        "UV_CACHE_DIR",
+        "npm_config_cache",
+        "NPM_CONFIG_CACHE",
         // Which system and global git configuration the operator uses.
         "GIT_CONFIG_GLOBAL",
         "GIT_CONFIG_SYSTEM",
@@ -226,6 +237,11 @@ pub fn policy_command(
     cmd.args(["--dev", "/dev"]);
     cmd.args(["--proc", "/proc"]);
     cmd.args(["--tmpfs", "/tmp"]);
+    // A runtime directory of the command's own, private to it as a
+    // session's is: pnpm and others keep their locks there, and the host's,
+    // holding the operator's session sockets, is not the command's to use.
+    cmd.args(["--perms", "0700", "--dir", RUNTIME_DIRECTORY]);
+    cmd.args(["--setenv", "XDG_RUNTIME_DIR", RUNTIME_DIRECTORY]);
 
     if let Some(egress) = egress_socket {
         cmd.arg("--setenv")
@@ -237,9 +253,9 @@ pub fn policy_command(
     // point wins: a mask inside a writable tree still hides, and a grant
     // inside a masked tree reopens only its own subtree. The write set binds
     // writable (the working directory only when the policy lists it), the
-    // read-only paths overlay, and a mask makes a directory an empty tmpfs
-    // and a file read as /dev/null. A masked path absent on the host needs
-    // no mask.
+    // read-only paths overlay, a mask makes a directory an empty tmpfs and
+    // a file read as /dev/null, and a substituted file shows its source. A
+    // masked path absent on the host needs no mask.
     for (path, kind) in policy_mounts(config, sockets, executables, egress_socket) {
         let p = path.as_os_str();
         match kind {
@@ -247,6 +263,7 @@ pub fn policy_command(
             PolicyMount::ReadOnly => cmd.arg("--ro-bind").arg(p).arg(p),
             PolicyMount::MaskDirectory => cmd.arg("--tmpfs").arg(p),
             PolicyMount::MaskFile => cmd.arg("--ro-bind").arg("/dev/null").arg(p),
+            PolicyMount::Substitute(source) => cmd.arg("--ro-bind").arg(source).arg(p),
         };
     }
 
@@ -266,11 +283,13 @@ pub fn policy_command(
 
 /// One mount the policy asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PolicyMount {
+enum PolicyMount<'a> {
     Write,
     ReadOnly,
     MaskDirectory,
     MaskFile,
+    /// The file at this host path, shown read-only in place of the mount's.
+    Substitute(&'a Path),
 }
 
 /// The policy's mounts in the order they bind, deepest last so it wins;
@@ -282,11 +301,11 @@ fn policy_mounts<'a>(
     sockets: &[&'a Path],
     executables: &[&'a Path],
     egress_socket: Option<&'a Path>,
-) -> Vec<(&'a Path, PolicyMount)> {
+) -> Vec<(&'a Path, PolicyMount<'a>)> {
     // Service sockets can sit beneath a private data root or /tmp. They
     // reopen only their own file after the containing mask, just as a grant
     // does; binding them before the masks would hide the transport itself.
-    let mut mounts: Vec<(&Path, PolicyMount)> = sockets
+    let mut mounts: Vec<(&Path, PolicyMount<'a>)> = sockets
         .iter()
         .copied()
         .chain(egress_socket)
@@ -304,6 +323,12 @@ fn policy_mounts<'a>(
             .iter()
             .map(|path| (path.as_path(), PolicyMount::ReadOnly)),
     );
+    mounts.extend(config.substituted_files.iter().map(|file| {
+        (
+            file.path.as_path(),
+            PolicyMount::Substitute(file.source.as_path()),
+        )
+    }));
     for path in &config.masked_paths {
         if path.is_dir() {
             mounts.push((path.as_path(), PolicyMount::MaskDirectory));
@@ -342,7 +367,8 @@ fn policy_mounts<'a>(
 /// The order the policy's mounts bind in, and so which of two mounts over
 /// one path wins: depth first, so a deeper mount shows through the one
 /// above it; at one depth a mask, then a write grant, then a read-only
-/// grant. So a grant that names exactly a masked path — a workspace at
+/// grant or a substituted file.
+/// So a grant that names exactly a masked path — a workspace at
 /// `~/.ssh`, the data root under C64 — reopens what it names, while a
 /// grant above the mask (the home directory) still leaves the mask in
 /// place, being a shallower mount; and a path both written and held
@@ -351,7 +377,7 @@ fn bind_order(path: &Path, kind: PolicyMount) -> (usize, u8) {
     let rank = match kind {
         PolicyMount::MaskDirectory | PolicyMount::MaskFile => 0,
         PolicyMount::Write => 1,
-        PolicyMount::ReadOnly => 2,
+        PolicyMount::ReadOnly | PolicyMount::Substitute(_) => 2,
     };
     (path.components().count(), rank)
 }

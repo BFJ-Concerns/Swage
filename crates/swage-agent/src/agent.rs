@@ -3423,7 +3423,7 @@ impl Agent {
         skip_tool_permission_gate: bool,
         dispatch_started_at: std::time::Instant,
     ) -> Result<ToolDispatchResult, AgentError> {
-        use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
+        use crate::approval::DEFAULT_APPROVAL_TIMEOUT_SECS;
 
         let gate_timeout =
             std::time::Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS));
@@ -3461,7 +3461,44 @@ impl Agent {
             path: path.clone(),
             access: access.clone(),
         };
-        let judgement = self.judge_reach(action, execution, &reach).await;
+        // A judge the operator has not switched on is no judge: the
+        // person answers an attended request, and nobody can allow an
+        // unattended one.
+        let judge = self
+            .request_judge
+            .as_ref()
+            .filter(|judge| judge.is_configured());
+        let Some(judge) = judge else {
+            if approval_scope.routes_reach_to_judge() {
+                let result: ToolDispatchResult = (
+                    crate::judge::unanswered_location_feedback(&action.name, &path, &access),
+                    true,
+                    "refused".to_string(),
+                )
+                    .into();
+                return Ok(result);
+            }
+            return self
+                .ask_person_for_location(
+                    dispatcher,
+                    call,
+                    action,
+                    execution,
+                    event_tx,
+                    cancel_token,
+                    approval_scope,
+                    ctx,
+                    &approved_ctx,
+                    prompt,
+                    context,
+                    gate_timeout,
+                    policy,
+                    skip_tool_permission_gate,
+                    dispatch_started_at,
+                )
+                .await;
+        };
+        let judgement = self.judge_reach(judge, action, execution, &reach).await;
         let recording_failed = judgement.is_err();
         let judgement = judgement.unwrap_or_else(|error| {
             crate::judge::Judgement::unavailable(format!(
@@ -3501,6 +3538,49 @@ impl Agent {
             });
         }
 
+        self.ask_person_for_location(
+            dispatcher,
+            call,
+            action,
+            execution,
+            event_tx,
+            cancel_token,
+            approval_scope,
+            ctx,
+            &approved_ctx,
+            prompt,
+            context,
+            gate_timeout,
+            policy,
+            skip_tool_permission_gate,
+            dispatch_started_at,
+        )
+        .await
+    }
+
+    /// Put a request for a location beyond the session's grants to the
+    /// person, and run the call with the location added when they approve.
+    #[allow(clippy::too_many_arguments)]
+    async fn ask_person_for_location(
+        &self,
+        dispatcher: &ToolDispatcher,
+        call: &ToolCall,
+        action: &ToolCall,
+        execution: &TurnExecutionContext,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        cancel_token: &tokio_util::sync::CancellationToken,
+        approval_scope: &mut TurnApprovalScope,
+        ctx: &AgentToolContext,
+        approved_ctx: &AgentToolContext,
+        prompt: String,
+        context: serde_json::Value,
+        gate_timeout: std::time::Duration,
+        policy: swage_core::ApprovalTimeoutPolicy,
+        skip_tool_permission_gate: bool,
+        dispatch_started_at: std::time::Instant,
+    ) -> Result<ToolDispatchResult, AgentError> {
+        use crate::approval::ApprovalGateOutcome;
+
         match self
             .handle_approval_gate(
                 execution,
@@ -3519,39 +3599,20 @@ impl Agent {
             .await?
         {
             ApprovalGateOutcome::Approved { scope } => {
-                let result = if skip_tool_permission_gate {
-                    self.race_tool_dispatch(
-                        dispatcher.dispatch_approved(
-                            &action.name,
-                            action.arguments.clone(),
-                            &approved_ctx,
-                            &self.config.agent_id,
-                        ),
+                let result = self
+                    .dispatch_into_location(
+                        dispatcher,
                         call,
+                        action,
                         execution,
                         event_tx,
                         cancel_token,
+                        approved_ctx,
+                        skip_tool_permission_gate,
                         dispatch_started_at,
                         ctx,
                     )
-                    .await?
-                } else {
-                    self.race_tool_dispatch(
-                        dispatcher.dispatch(
-                            &action.name,
-                            action.arguments.clone(),
-                            &approved_ctx,
-                            &self.config.agent_id,
-                        ),
-                        call,
-                        execution,
-                        event_tx,
-                        cancel_token,
-                        dispatch_started_at,
-                        ctx,
-                    )
-                    .await?
-                };
+                    .await?;
                 tool_dispatch_result(result)
                     .map(|result| crate::approval::with_user_approval_note(result, scope))
             }
@@ -3619,11 +3680,11 @@ impl Agent {
     }
 
     /// Put a request beyond the session's grants to the judge and record the
-    /// judgement. No judge, or a judgement that cannot be recorded, reads as
-    /// a refusal: a request nobody answered for never runs, and a judgement
-    /// that leaves no record is one the operator cannot see.
+    /// judgement. A judgement that cannot be recorded reads as a refusal: a
+    /// judgement that leaves no record is one the operator cannot see.
     async fn judge_reach(
         &self,
+        judge: &crate::judge::SharedRequestJudge,
         call: &ToolCall,
         execution: &TurnExecutionContext,
         reach: &crate::judge::RequestedReach,
@@ -3643,9 +3704,9 @@ impl Agent {
                 "the turn's task could not be read for the judge: {error}"
             )),
         };
-        let judgement = match (&self.request_judge, task) {
-            (_, Err(reason)) => Judgement::unavailable(reason),
-            (Some(judge), Ok(task)) => {
+        let judgement = match task {
+            Err(reason) => Judgement::unavailable(reason),
+            Ok(task) => {
                 judge
                     .judge(JudgeRequest {
                         session_id: execution.session_id,
@@ -3659,7 +3720,6 @@ impl Agent {
                     })
                     .await
             }
-            (None, Ok(_)) => Judgement::unavailable("no judge is configured for this session"),
         };
         // The judgement is part of the local record (C15, C68): it is written
         // before the request can run, and a failed write refuses the request.
@@ -4769,6 +4829,21 @@ mod judge_seam_tests {
         }
     }
 
+    /// A judge the operator has not switched on, as the gateway's is by
+    /// default.
+    struct SwitchedOffJudge;
+
+    #[async_trait]
+    impl RequestJudge for SwitchedOffJudge {
+        async fn judge(&self, _: JudgeRequest) -> Judgement {
+            panic!("a judge that is switched off is never asked");
+        }
+
+        fn is_configured(&self) -> bool {
+            false
+        }
+    }
+
     fn scripted(verdict: JudgeVerdict, reason: &str) -> Arc<ScriptedJudge> {
         Arc::new(ScriptedJudge {
             judgement: Judgement {
@@ -4882,18 +4957,25 @@ mod judge_seam_tests {
             .expect("dispatch settles")
     }
 
-    async fn recorded_judgement(
+    async fn recorded_judgements(
         storage: &SqliteStorage,
         execution: &TurnExecutionContext,
-    ) -> Value {
-        let events = storage
+    ) -> Vec<swage_storage::AuditEvent> {
+        storage
             .list_audit_events_filtered(swage_storage::AuditEventFilter {
                 session_id: Some(execution.session_id),
                 event_kind: Some("request_judged".into()),
                 ..Default::default()
             })
             .await
-            .expect("audit read");
+            .expect("audit read")
+    }
+
+    async fn recorded_judgement(
+        storage: &SqliteStorage,
+        execution: &TurnExecutionContext,
+    ) -> Value {
+        let events = recorded_judgements(storage, execution).await;
         assert_eq!(
             events.len(),
             1,
@@ -5108,33 +5190,38 @@ mod judge_seam_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn with_no_judge_the_request_fails_closed_and_is_still_recorded() {
-        let (mut agent, execution, storage) = unattended_fixture(None).await;
+    async fn with_no_judge_an_unattended_request_is_refused_and_no_judgement_recorded() {
+        for judge in [None, Some(Arc::new(SwitchedOffJudge) as SharedRequestJudge)] {
+            let (mut agent, execution, storage) = unattended_fixture(judge).await;
 
-        let executions = observe_outside_reads(&mut agent);
-        let result = dispatch_outside_read(&agent, &execution).await;
+            let executions = observe_outside_reads(&mut agent);
+            let result = dispatch_outside_read(&agent, &execution).await;
 
-        assert_eq!(
-            executions.load(Ordering::SeqCst),
-            0,
-            "a refused request must not execute the tool"
-        );
-        assert!(result.is_error);
-        assert_eq!(result.status, "refused");
-        assert_eq!(
-            result.execution,
-            swage_protocol::client::conversation::ToolExecution::refused()
-        );
-        assert!(
-            result
-                .content
-                .contains("no judge could allow it (no judge is configured for this session)"),
-            "{}",
-            result.content
-        );
-        let recorded = recorded_judgement(&storage, &execution).await;
-        assert_eq!(recorded["verdict"], "unavailable");
-        assert_eq!(recorded["judge"], Value::Null);
+            assert_eq!(
+                executions.load(Ordering::SeqCst),
+                0,
+                "a refused request must not execute the tool"
+            );
+            assert!(result.is_error);
+            assert_eq!(result.status, "refused");
+            assert_eq!(
+                result.execution,
+                swage_protocol::client::conversation::ToolExecution::refused()
+            );
+            assert!(
+                result
+                    .content
+                    .contains("in this turn nobody is asked to allow a request beyond them"),
+                "{}",
+                result.content
+            );
+            assert!(
+                !result.content.contains("judge"),
+                "an installation with no judge does not point at one: {}",
+                result.content
+            );
+            assert!(recorded_judgements(&storage, &execution).await.is_empty());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5241,13 +5328,16 @@ mod judge_seam_tests {
             usize::from(card),
             "only uncertain cases ask the person"
         );
-        let record = recorded_judgement(&storage, &execution).await;
-        assert_eq!(
-            record["confident"],
-            judge.as_ref().is_some_and(|j| j.judgement.confident)
-        );
-        if let Some(judge) = judge {
-            assert_eq!(judge.asked.lock().unwrap().len(), 1);
+        match &judge {
+            Some(judge) => {
+                let record = recorded_judgement(&storage, &execution).await;
+                assert_eq!(record["confident"], judge.judgement.confident);
+                assert_eq!(judge.asked.lock().unwrap().len(), 1);
+            }
+            None => assert!(
+                recorded_judgements(&storage, &execution).await.is_empty(),
+                "a question put to the person with no judge leaves no judgement"
+            ),
         }
         if expected == "refused" {
             assert_eq!(

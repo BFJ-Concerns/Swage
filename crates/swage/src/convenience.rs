@@ -49,8 +49,8 @@ pub fn provider_with_reliability(provider: impl LlmProvider + 'static) -> Box<dy
 ///
 /// # Errors
 ///
-/// Returns [`StorageError`] if the database file cannot be opened or the
-/// schema migration fails.
+/// Returns [`StorageError`] if the database file cannot be opened, the
+/// schema cannot be built, or the store was built by another build.
 pub fn sqlite_storage(path: impl AsRef<Path>) -> Result<SqliteStorage, StorageError> {
     let path = path.as_ref();
     // The special SQLite in-memory DSN — delegate to the dedicated constructor

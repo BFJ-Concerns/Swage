@@ -5,9 +5,11 @@
 //! The judging model sees the call and the agent's stated justification and
 //! says yes or no with a reason. In an attended session it decides confident
 //! cases and passes uncertain or unavailable judgements to the person. In an
-//! unattended session nobody is watching, so without a yes — a refusal, an
-//! unreadable verdict, no judge configured — the request fails closed and
-//! the model is told why.
+//! unattended session nobody is watching, so without a yes — a refusal or an
+//! unreadable verdict — the request fails closed and the model is told why.
+//! The judge is off unless the operator switches it on; while it is off, an
+//! attended request goes straight to the person, an unattended one is
+//! refused, and neither leaves a judgement in the record.
 //!
 //! The agent runtime owns the seam and the fail-closed rule; what judges, and
 //! how, is the caller's: the gateway supplies a [`RequestJudge`] backed by its
@@ -25,6 +27,14 @@ use uuid::Uuid;
 /// its grants. Tools that may reach outside the session's granted locations
 /// declare it in their schema; the judge reads it from the call's arguments.
 pub const JUSTIFICATION_PARAMETER: &str = "justification";
+
+/// What a tool's schema says of [`JUSTIFICATION_PARAMETER`]. It holds for
+/// every session that reads it, whoever answers for its requests: the
+/// person, the judge when one is switched on, or nobody, when none is.
+pub const JUSTIFICATION_DESCRIPTION: &str = "Why this file is needed, in one or two sentences, \
+     when it lies outside the session's granted locations. It is kept in the session's record \
+     with the request, and a judge configured to answer such requests weighs it; a person asked \
+     to allow the request sees the location, not this reason.";
 
 /// The reach a request asks for beyond the session's grants.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +157,13 @@ impl Judgement {
 #[async_trait]
 pub trait RequestJudge: Send + Sync {
     async fn judge(&self, request: JudgeRequest) -> Judgement;
+
+    /// Whether the operator has switched this judge on. One that is off
+    /// answers nothing and leaves nothing in the record: an attended
+    /// request goes straight to the person, an unattended one is refused.
+    fn is_configured(&self) -> bool {
+        true
+    }
 }
 
 pub type SharedRequestJudge = Arc<dyn RequestJudge>;
@@ -202,6 +219,17 @@ pub(crate) fn refused_feedback(
             judgement.reason
         ),
     }
+}
+
+/// What the model reads when an unattended turn asks for a location
+/// beyond its grants and no judge is switched on to answer for it.
+pub(crate) fn unanswered_location_feedback(tool_name: &str, path: &str, access: &str) -> String {
+    format!(
+        "Tool error: `{tool_name}` may not {access} `{path}`: the location lies outside this \
+         session's granted locations, and in this turn nobody is asked to allow a request beyond \
+         them. The call did not run. Work within the session's granted locations; if the task cannot be done \
+         without this location, say so in your reply, naming the location and why it is needed."
+    )
 }
 
 /// What the model reads above a result the judge let through.

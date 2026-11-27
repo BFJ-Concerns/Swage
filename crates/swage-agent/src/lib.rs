@@ -41,8 +41,8 @@ pub use error::AgentError;
 pub use event::{AgentEvent, ProviderRoundOutcome};
 pub use expiry::{DEFAULT_EXPIRY_INTERVAL, DEFAULT_MESSAGE_TTL};
 pub use judge::{
-    JUSTIFICATION_PARAMETER, JudgeRequest, JudgeVerdict, Judgement, RequestJudge, RequestedReach,
-    SharedRequestJudge,
+    JUSTIFICATION_DESCRIPTION, JUSTIFICATION_PARAMETER, JudgeRequest, JudgeVerdict, Judgement,
+    RequestJudge, RequestedReach, SharedRequestJudge,
 };
 pub use mailbox::{MailboxContents, check_mailbox};
 pub use message::{ErrorResponse, OutboundMessage, TurnRequest};
