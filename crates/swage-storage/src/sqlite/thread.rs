@@ -127,17 +127,24 @@ fn copy_tool_calls_for_branch(
         source_model_result,
     ) in calls
     {
-        // The source's model-facing replay is what the model read, which may
-        // differ from the raw result (a delivered result carries its frame),
-        // so the branch keeps it and points it at the branch's own copy. A
-        // replay that is not a compact envelope is rebuilt from the result.
-        let kept_replay = source_model_result
-            .as_deref()
-            .and_then(|replay| serde_json::from_str::<CompactToolReplay>(replay).ok())
-            .map(|mut replay| {
-                replay.full_result_ref = Some(tool_result_reference(child_turn_id, &call_id));
-                replay.to_stable_json()
-            });
+        // The source's stored replay carries what the raw result does not —
+        // an approval account before the envelope, the flag that a delivered
+        // result is framed for the model — so the branch keeps it whole and
+        // points its envelope at the branch's own copy. A replay with no
+        // compact envelope is rebuilt from the result.
+        let kept_replay = source_model_result.as_deref().and_then(|stored| {
+            let (account, envelope) = match stored.rsplit_once('\n') {
+                Some((account, envelope)) => (Some(account), envelope),
+                None => (None, stored),
+            };
+            let mut replay = serde_json::from_str::<CompactToolReplay>(envelope).ok()?;
+            replay.full_result_ref = Some(tool_result_reference(child_turn_id, &call_id));
+            let envelope = replay.to_stable_json();
+            Some(match account {
+                Some(account) => format!("{account}\n{envelope}"),
+                None => envelope,
+            })
+        });
         let model_result = kept_replay.or_else(|| {
             result.as_deref().map(|result| {
                 compact_tool_result_for_model_with_reference(
@@ -1189,6 +1196,96 @@ mod tests {
             Some(expected_model_result.as_str())
         );
         assert_eq!(child_tool_calls[0].provider_round, 2);
+    }
+
+    /// A branch keeps a replay the raw result cannot rebuild: the approval
+    /// account before the envelope and the flag that frames a delivered
+    /// result for the model.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_branch_keeps_an_approved_delivered_replay() {
+        let (storage, _, session_id) = make_session().await;
+        let parent = ThreadStore::create(&storage, new_thread(session_id))
+            .await
+            .unwrap();
+        let parent_turn = storage
+            .create_turn(NewTurn {
+                thread_id: parent.id,
+                agent_id: "agent-1".into(),
+                state: TurnState::Completed,
+                user_input: Some("delegate".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let assistant_message = storage
+            .create_message(NewMessage {
+                thread_id: parent.id,
+                attachments: Vec::new(),
+                turn_id: Some(parent_turn.id),
+                role: Role::Assistant,
+                origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
+                content: "done".into(),
+                position: 0,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        let account = "The user approved this call once.";
+        storage
+            .create_tool_call(NewToolCall {
+                execution: None,
+                turn_id: parent_turn.id,
+                agent_id: "agent-1".into(),
+                call_id: "call_1".into(),
+                tool: "delegate".into(),
+                arguments: "{}".into(),
+                model_arguments: "{}".into(),
+                result: Some("the child's answer".into()),
+                model_result: Some(format!(
+                    "{account}\n{}",
+                    swage_core::compact_delivered_tool_result_for_model(
+                        "the child's answer",
+                        false,
+                        Some(tool_result_reference(&parent_turn.id.to_string(), "call_1")),
+                    )
+                )),
+                status: Some("success".into()),
+                duration_ms: Some(1),
+                truncated: false,
+                total_bytes: None,
+                provider_round: 0,
+                position: 0,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+
+        let branch = storage
+            .create_branch(parent.id, assistant_message.id)
+            .await
+            .unwrap();
+        let child_turn = storage
+            .list_turns_by_thread(branch.child_thread_id)
+            .await
+            .unwrap()
+            .remove(0);
+        let copied = storage
+            .list_tool_calls_by_turn(child_turn.id)
+            .await
+            .unwrap()
+            .remove(0)
+            .model_result
+            .expect("copied replay");
+        let (copied_account, envelope) = copied.rsplit_once('\n').expect("account kept");
+        assert_eq!(copied_account, account);
+        let replay: CompactToolReplay = serde_json::from_str(envelope).unwrap();
+        assert!(replay.delivered, "the delivered flag survives the branch");
+        assert_eq!(
+            replay.full_result_ref,
+            Some(tool_result_reference(&child_turn.id.to_string(), "call_1"))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
