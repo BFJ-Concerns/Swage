@@ -663,8 +663,24 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // afresh, the older history summarised against them or diagnosed from
     // outside (turn/succession.rs). Otherwise the first assembly stands.
     // The summary is written on the selected entry's own provider, as the
-    // turn is.
+    // turn is, and each diagnosis stage on its own entry's provider.
     let succession_provider = crate::startup::selected_model_provider(state, &config).await;
+    let diagnosis_models = succession::diagnosis_models(&config);
+    let diagnosis_entries = diagnosis_models.as_ref().ok();
+    let reader_provider = succession::diagnosis_stage_provider(
+        state,
+        &config,
+        diagnosis_entries.and_then(|models| models.reader_entry.as_deref()),
+        &succession_provider,
+    )
+    .await;
+    let synthesis_provider = succession::diagnosis_stage_provider(
+        state,
+        &config,
+        diagnosis_entries.and_then(|models| models.synthesis_entry.as_deref()),
+        &succession_provider,
+    )
+    .await;
     let output = COMPLETION_ATTRIBUTION
         .scope(
             CompletionAttribution {
@@ -674,6 +690,10 @@ pub(super) async fn process_turn_with_composition_and_focus(
             succession::succeed_over_threshold(
                 succession::SuccessionSite {
                     provider: succession_provider.as_ref(),
+                    diagnosis_providers: succession::DiagnosisProviders {
+                        reader: reader_provider.as_ref(),
+                        synthesis: synthesis_provider.as_ref(),
+                    },
                     threshold: &compaction_threshold(&config),
                     model: Some(config.default_model_id()).filter(|model| !model.is_empty()),
                     focus: compaction_focus.as_deref(),
@@ -681,7 +701,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
                     tokeniser: &tokeniser,
                     degradation: succession::recent_degradation(state.storage.as_ref(), thread_id)
                         .await,
-                    diagnosis_models: succession::diagnosis_models(&config),
+                    diagnosis_models,
                     summary_instructions: &succession::SessionSummaryInstructions {
                         state,
                         config: &config.experimentation,

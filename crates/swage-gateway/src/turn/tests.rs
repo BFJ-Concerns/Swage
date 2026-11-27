@@ -1132,6 +1132,10 @@ async fn a_turn_whose_walls_changed_is_diagnosed_afresh_on_the_configured_models
     )
     .await;
     let mut config = state.active_config();
+    config.providers.entries.insert(
+        "mock".to_string(),
+        swage_config::ProviderEndpointConfig::default(),
+    );
     config.models.entries.insert(
         "cheap-reader".to_string(),
         swage_config::ModelEndpointConfig {
