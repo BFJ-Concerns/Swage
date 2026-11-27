@@ -122,7 +122,7 @@
             {#if revision.revision > 0 && diffs[revision.revision]}
               <span class="description">{changeSummary(diffs[revision.revision])}</span>
             {:else if revision.revision === 0}
-              <span class="description">The shipped graph: every step the kernel's own.</span>
+              <span class="description">The graph the gateway ships with.</span>
             {/if}
           </button>
         {/each}
