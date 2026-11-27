@@ -2048,6 +2048,7 @@ two sandbox-eligible tools.
 |---|---|
 | `workflow_run` | `workflow_run.rs` |
 | `workflow_list` | `workflow_list.rs` |
+| `model_list` | `model_list.rs` — the session's model catalogue: ids, aliases, provider model name, vendor family (`ModelFamily` in `swage-context`), and the effort levels each serves unclamped (`served_effort_capability`). |
 | `workflow_save` | `workflow_save.rs` |
 | `workflow_run_account` | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session topic; a run in another topic reads as absent. |
 | `workflow_run_status` | `workflow_run_status.rs` — lists the topic's runs that have not ended, each with its undelivered events (a pipeline's pending hold among them), or reads one named run in any state. Same topic scoping as `workflow_run_account`. |
