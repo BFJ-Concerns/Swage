@@ -747,6 +747,15 @@ pub(crate) fn build_sandbox_config(
     for path in ssh_files_without_keys(&roots.home) {
         builder = builder.read_only_path(path);
     }
+    let ssh_configuration = ssh_configuration(roots);
+    // The operator's own files ssh includes as configuration — host entries
+    // kept in `~/.ssh/config.d`, say — show at the names ssh opens them by
+    // where a mask hides them.
+    for path in &ssh_configuration.included {
+        if masked.iter().any(|private| path.starts_with(private)) {
+            builder = builder.read_only_path(path);
+        }
+    }
     let ssh_agent = operator_ssh_agent();
     if let Some(socket) = &ssh_agent {
         builder = builder.read_only_path(socket);
@@ -771,7 +780,7 @@ pub(crate) fn build_sandbox_config(
         .map_err(|error| swage_core::SandboxError::SpawnFailed {
             message: format!("failed to build sandbox config: {error}"),
         })?;
-    policy.substituted_files = ssh_configuration_substitutes(roots);
+    policy.substituted_files = ssh_configuration.substitutes;
     if let Some(socket) = ssh_agent {
         policy
             .environment
@@ -797,8 +806,19 @@ const SYSTEM_SSH_DIRECTORY: &str = "/etc/ssh";
 /// How many configuration files the walk of ssh's includes reads at most.
 const SSH_CONFIGURATION_FILE_LIMIT: usize = 256;
 
-/// The configuration files ssh includes that the gateway's user does not
-/// own, each with a copy they own to show in its place.
+/// What the sandbox shows of ssh's configuration beyond `~/.ssh/config`
+/// and the system's own file.
+struct SshConfiguration {
+    /// Every file the configuration includes, at the path ssh opens it by,
+    /// except a private key.
+    included: Vec<PathBuf>,
+    /// The included files the gateway's user does not own, each with a copy
+    /// they own to show in its place.
+    substitutes: Vec<swage_sandbox::SubstitutedFile>,
+}
+
+/// The files ssh's configuration includes, walked from the system's file
+/// and the operator's `~/.ssh/config`.
 ///
 /// Inside the sandbox's user namespace the host's root-owned files show as
 /// owned by nobody, and OpenSSH refuses an included configuration file owned
@@ -808,7 +828,7 @@ const SSH_CONFIGURATION_FILE_LIMIT: usize = 256;
 /// the user, reads as theirs. The copies are kept beneath the gateway's data
 /// root, which the sandbox masks, and are refreshed each time a policy is
 /// built.
-fn ssh_configuration_substitutes(roots: &PolicyRoots) -> Vec<swage_sandbox::SubstitutedFile> {
+fn ssh_configuration(roots: &PolicyRoots) -> SshConfiguration {
     use std::os::unix::fs::MetadataExt;
 
     // Safety: geteuid has no preconditions and cannot fail.
@@ -826,9 +846,12 @@ fn ssh_configuration_substitutes(roots: &PolicyRoots) -> Vec<swage_sandbox::Subs
         (user_directory.join("config"), user_directory.clone(), false),
     ];
     let mut read: Vec<PathBuf> = Vec::new();
-    let mut substitutes = Vec::new();
-    while let Some((file, base, included)) = pending.pop() {
-        let Ok(file) = file.canonicalize() else {
+    let mut configuration = SshConfiguration {
+        included: Vec::new(),
+        substitutes: Vec::new(),
+    };
+    while let Some((opened, base, included)) = pending.pop() {
+        let Ok(file) = opened.canonicalize() else {
             continue;
         };
         if read.contains(&file) || read.len() >= SSH_CONFIGURATION_FILE_LIMIT {
@@ -854,16 +877,32 @@ fn ssh_configuration_substitutes(roots: &PolicyRoots) -> Vec<swage_sandbox::Subs
                 pending.push((path, base.clone(), true));
             }
         }
+        if !included {
+            continue;
+        }
+        // A private key is never configuration, whatever an include matches.
+        if String::from_utf8_lossy(&content).contains("PRIVATE KEY-----") {
+            continue;
+        }
+        // The link's own name in a directory resolved as the sandbox sees
+        // it, so a linked file shows where ssh looks for it.
+        if let (Some(directory), Some(name)) = (opened.parent(), opened.file_name()) {
+            configuration
+                .included
+                .push(sandbox_path(directory).join(name));
+        }
         let owned = std::fs::metadata(&file).is_ok_and(|metadata| metadata.uid() == user);
-        if !included || owned {
+        if owned {
             continue;
         }
         let copy = copies.join(file.strip_prefix("/").unwrap_or(&file));
         match write_owned_copy(&copy, &content) {
-            Ok(()) => substitutes.push(swage_sandbox::SubstitutedFile {
-                path: file,
-                source: copy,
-            }),
+            Ok(()) => configuration
+                .substitutes
+                .push(swage_sandbox::SubstitutedFile {
+                    path: file,
+                    source: copy,
+                }),
             Err(error) => tracing::warn!(
                 path = %file.display(),
                 %error,
@@ -871,7 +910,7 @@ fn ssh_configuration_substitutes(roots: &PolicyRoots) -> Vec<swage_sandbox::Subs
             ),
         }
     }
-    substitutes
+    configuration
 }
 
 /// The patterns of every `Include` directive in an ssh configuration, each
@@ -2601,10 +2640,22 @@ mod tests {
         // In the workspace, so the sandbox sees the link itself.
         let linked = workspace.join("system ssh");
         std::os::unix::fs::symlink(SYSTEM_SSH_CONFIGURATION, &linked).unwrap();
+        // The operator's own host entries, kept in `~/.ssh/config.d` and
+        // included from the configuration; one linked into place.
+        std::fs::create_dir_all(home.join(".ssh/config.d")).unwrap();
+        std::fs::write(
+            home.join(".ssh/config.d/extra"),
+            "Host extra\n  Port 3333\n",
+        )
+        .unwrap();
+        std::fs::write(dotfiles.join("linked"), "Host linked\n  Port 4444\n").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("linked"), home.join(".ssh/config.d/linked"))
+            .unwrap();
         std::fs::write(
             dotfiles.join("ssh_config"),
             format!(
-                "Host forge\n  Port 2222\nInclude \"{}\"\n",
+                "Include {}/*\nHost forge\n  Port 2222\nInclude \"{}\"\n",
+                home.join(".ssh/config.d").display(),
                 linked.display()
             ),
         )
@@ -2631,7 +2682,7 @@ mod tests {
         )
         .unwrap();
         // `.host` is a name the systemd drop-in, where installed, matches.
-        let hosts = ["forge", ".host"];
+        let hosts = ["forge", ".host", "extra", "linked"];
         let mut outside = Vec::new();
         for host in hosts {
             let output = tokio::process::Command::new("ssh")
@@ -2647,7 +2698,8 @@ mod tests {
         }
         let script = format!(
             "ssh -F {config} -G forge > {cache}/forge && ssh -F {config} -G .host > {cache}/.host \
-             && touch {cache}/written && TMPDIR={temporary} mktemp >/dev/null \
+             && ssh -F {config} -G extra > {cache}/extra \
+             && ssh -F {config} -G linked > {cache}/linked && touch {cache}/written && TMPDIR={temporary} mktemp >/dev/null \
              && mkdir \"$XDG_RUNTIME_DIR/pnpm\" && test ! -e {runtime}/session.sock",
             config = home.join(".ssh/config").display(),
             cache = cache.display(),
@@ -2677,6 +2729,40 @@ mod tests {
             );
         }
         assert!(String::from_utf8_lossy(&outside[0]).contains("port 2222"));
+        assert!(String::from_utf8_lossy(&outside[2]).contains("port 3333"));
+        assert!(String::from_utf8_lossy(&outside[3]).contains("port 4444"));
+    }
+
+    /// A file the operator's configuration includes shows in the sandbox,
+    /// and a private key an include happens to match does not.
+    #[test]
+    fn an_included_private_key_is_never_shown_as_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let included = home.join(".ssh/config.d");
+        std::fs::create_dir_all(&included).unwrap();
+        std::fs::write(
+            home.join(".ssh/config"),
+            format!("Include {}/*\n", included.display()),
+        )
+        .unwrap();
+        std::fs::write(included.join("hosts"), "Host forge\n").unwrap();
+        std::fs::write(
+            included.join("id_forge"),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let roots = PolicyRoots {
+            home: home.clone(),
+            data_root: home.join(".swage"),
+            environment: Default::default(),
+        };
+
+        let shown = ssh_configuration(&roots).included;
+
+        let included = sandbox_path(&included);
+        assert!(shown.contains(&included.join("hosts")), "{shown:?}");
+        assert!(!shown.contains(&included.join("id_forge")), "{shown:?}");
     }
 
     #[test]
