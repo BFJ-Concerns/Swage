@@ -272,8 +272,15 @@ impl BoundedRead {
     async fn kept_to(mut self, kept: usize) -> ReportedStream {
         let truncated = self.total_bytes > kept;
         if truncated {
+            let tail_kept = kept / 2;
+            let missing_tail = tail_kept.saturating_sub(self.tail.len());
+            // A tail smaller than its final share is contiguous with the
+            // captured head. Move its missing bytes before shortening the head.
+            for &byte in self.head.iter().rev().take(missing_tail) {
+                self.tail.push_front(byte);
+            }
+            self.tail.drain(..self.tail.len().saturating_sub(tail_kept));
             self.head.truncate(kept.div_ceil(2));
-            self.tail.drain(..self.tail.len().saturating_sub(kept / 2));
         } else {
             self.head.extend(self.tail.drain(..));
             if let Some(path) = self.artifact_path.as_ref() {
@@ -688,6 +695,28 @@ mod tests {
             std::fs::read_to_string(dir.path().join(artifact_path)).expect("stdout file"),
             "1234567890".repeat(10)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_cut_streams_keep_their_final_diagnostics() {
+        let tool = ShellTool {
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 100,
+        };
+        let result = tool
+            .execute(
+                json!({"command": "printf '%045dERROR!' 0; printf '%045dFAILED' 0 >&2; exit 1"}),
+                &ctx(),
+            )
+            .await
+            .expect("the command should return both streams");
+
+        let output = result["output"].as_str().expect("shell output");
+        assert_eq!(result["exit_code"], 1);
+        assert_eq!(result["stdout_truncated"], true);
+        assert_eq!(result["stderr_truncated"], true);
+        assert!(output.contains("ERROR!\nstderr:"), "{output}");
+        assert!(output.ends_with("FAILED"), "{output}");
     }
 
     #[test]
