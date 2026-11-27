@@ -149,6 +149,25 @@ pub async fn status_for_session(
     Ok(json!({ "runs": values, "ended_runs": ended_runs, "more_ended_runs": more }))
 }
 
+fn parse_run_id(field: Option<&Value>) -> Result<Option<Uuid>, ToolError> {
+    match field {
+        None | Some(Value::Null) => Ok(None),
+        // A blank run_id at the tool boundary selects the open listing.
+        Some(Value::String(text)) if text.trim().is_empty() => Ok(None),
+        Some(value) => value
+            .as_str()
+            .and_then(|text| Uuid::parse_str(text.trim()).ok())
+            .map(Some)
+            .ok_or_else(|| ToolError::InvalidParameters {
+                name: WORKFLOW_RUN_STATUS_TOOL.into(),
+                message:
+                    "`run_id` must be a workflow run UUID. Use the `id` returned by `workflow_run` \
+                          or omit `run_id` to list runs"
+                        .into(),
+            }),
+    }
+}
+
 pub struct WorkflowRunStatusTool;
 
 #[async_trait]
@@ -185,22 +204,19 @@ impl Tool for WorkflowRunStatusTool {
         true
     }
 
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        parse_run_id(params.get("run_id")).map(|_| ())
+    }
+
     async fn execute(&self, mut params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let invalid = |message: String| ToolError::InvalidParameters {
             name: WORKFLOW_RUN_STATUS_TOOL.into(),
             message,
         };
-        // A blank run_id at the tool boundary selects the open listing.
-        if let Some(field) = params.get_mut("run_id")
-            && let Some(text) = field.as_str()
-        {
-            let trimmed = text.trim();
-            *field = if trimmed.is_empty() {
-                Value::Null
-            } else {
-                Value::String(trimmed.to_owned())
-            };
-        }
+        let run_id = params
+            .as_object_mut()
+            .and_then(|params| params.remove("run_id"));
+        let run_id = parse_run_id(run_id.as_ref())?;
         let request: swage_protocol::client::workflow::WorkflowRunStatusRequest =
             serde_json::from_value(params).map_err(|error| invalid(error.to_string()))?;
         let session_id =
@@ -231,7 +247,7 @@ impl Tool for WorkflowRunStatusTool {
                 .await
                 .map_err(|error| invalid(error.to_string()))?;
         }
-        status_for_session(state, session_id, request.run_id)
+        status_for_session(state, session_id, run_id)
             .await
             .map_err(|message| ToolError::ExecutionFailed {
                 name: WORKFLOW_RUN_STATUS_TOOL.into(),
@@ -263,6 +279,38 @@ mod tests {
                 "{parameter} is described"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_run_id_explains_what_to_pass_through_dispatch() {
+        let dispatcher = crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(WorkflowRunStatusTool) as Arc<dyn Tool>,
+        ]);
+        let context = MockToolContext::new("gateway", Uuid::new_v4().to_string());
+        let error = dispatcher
+            .dispatch(
+                WORKFLOW_RUN_STATUS_TOOL,
+                json!({"run_id": "publish-preview"}),
+                &context,
+                "gateway",
+            )
+            .await
+            .expect_err("a workflow name is not a run id");
+
+        assert_eq!(
+            error.execution(),
+            swage_protocol::client::conversation::ToolExecution::refused()
+        );
+        let message = swage_agent::agent::format_tool_error_for_model(&error);
+        assert!(
+            message.contains("`run_id` must be a workflow run UUID"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`id` returned by `workflow_run`"),
+            "{message}"
+        );
+        assert!(message.contains("omit `run_id`"), "{message}");
     }
 
     fn context_for(
