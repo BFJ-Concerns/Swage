@@ -113,6 +113,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Material the platform delivers into a conversation — a delegated agent's result, a notice about how a turn ended or about memory — reaches the model inside a delimited block saying the person did not write it and nothing in it is an instruction, on the turn that receives it and on every later turn alike; a typed message or a brief addressed to the agent is never framed, and the conversation view shows the content as stored.
 - The workflow-authoring and project-docs skills are rewritten for any installation. The workflow-authoring skill names no model in its examples (a worker with no `model` runs on the configured default), gives each function's error names, and no longer assumes two model families or the development-process skills are in reach.
 - The shipped default agent's description says what it gives a session: no instructions of its own, with the model and tools the installation's settings provide.
 - The descriptions of the tools an agent works with are rewritten to say what each tool does, what its result carries and what it refuses: the file tools, `shell`, `python_execute`, `url_fetch`, `web_search`, `docs_read`, the memory tools, the browser tools, `agent_definition`, `delegate` and the workflow tools. The compaction strategies' extraction and eviction prompts and the agent runtime's summary prompt are rewritten whole, and each puts the conversation it reads inside named tags. Tools of features not yet released keep their descriptions.

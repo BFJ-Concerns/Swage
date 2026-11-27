@@ -2056,6 +2056,7 @@ mod settlement_tests {
                 turn_id: Some(turn.id),
                 role: swage_core::Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: if ending == TurnState::Cancelled {
                     "Partial child reply"
                 } else {

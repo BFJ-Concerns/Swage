@@ -2573,6 +2573,7 @@ impl Agent {
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: safe_content.clone(),
                 agent_id: self.config.agent_id.clone(),
             })
@@ -2588,6 +2589,7 @@ impl Agent {
                         turn_id: Some(turn.id),
                         role: Role::User,
                         origin: swage_storage::MessageOrigin::Platform,
+                        delivered: true,
                         content: format!(
                             "Response incomplete: {} ({reason}).",
                             if reason == "content_filter" {
@@ -4131,6 +4133,7 @@ impl Agent {
                 turn_id: Some(execution.turn_id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: safe_content.clone(),
                 agent_id: self.config.agent_id.clone(),
             })
@@ -4155,6 +4158,7 @@ impl Agent {
                 turn_id: Some(turn_id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: safe_content.clone(),
                 agent_id: self.config.agent_id.clone(),
             })
