@@ -64,6 +64,130 @@ describe("TurnContextInspector", () => {
     );
   });
 
+  it("names the turn-graph revision the turn ran under and what served each slot", async () => {
+    vi.mocked(fetchTurnContext).mockResolvedValue({
+      assembly_name: "default",
+      elements: [],
+      total_tokens: 10,
+      budget: null,
+      budget_remaining: null,
+      compaction_applied: [],
+      warnings: [],
+      errors: [],
+      declared_omissions: [],
+      effective_tool_permissions: undefined,
+      provider_visible: undefined,
+      turn_graph: {
+        revision: 1,
+        context_program: { filler: { kind: "builtin" }, served: "builtin", fallback: null },
+        succession: {
+          filler: { kind: "plugin", name: "marker-summariser" },
+          summariser: "plugin marker-summariser",
+          served: "plugin marker-summariser",
+          fallback: null,
+        },
+        hooks: {
+          attached: [{ point: "tool_call", plugin: "guard", mode: "veto" }],
+          skipped: [{ point: "turn_end", plugin: "gone", mode: "observe" }],
+        },
+        branches: ["trial"],
+      },
+      duration: { secs: 0, nanos: 1_000_000 },
+    });
+
+    component = mount(TurnContextInspector, {
+      target: document.body,
+      props: { turnId: "turn-1", onClose: () => {} },
+    });
+    await vi.waitFor(() => {
+      expect(document.querySelector(".turn-graph")).not.toBeNull();
+    });
+    const text = document.querySelector(".turn-graph")!.textContent!.replace(/\s+/g, " ");
+    expect(text).toContain("Revision 1");
+    expect(text).toContain("succession: plugin marker-summariser; served by plugin marker-summariser");
+    expect(text).toContain("context program: the kernel's own; served by builtin");
+    expect(text).toContain("guard at tool_call (veto)");
+    expect(text).toContain("hooks skipped (plugin not serving): gone at turn_end");
+    expect(text).toContain("branches: trial");
+  });
+
+  it("says when the succession step did not run this turn", async () => {
+    vi.mocked(fetchTurnContext).mockResolvedValue({
+      assembly_name: "default",
+      elements: [],
+      total_tokens: 10,
+      budget: null,
+      budget_remaining: null,
+      compaction_applied: [],
+      warnings: [],
+      errors: [],
+      declared_omissions: [],
+      effective_tool_permissions: undefined,
+      provider_visible: undefined,
+      turn_graph: {
+        revision: 0,
+        context_program: { filler: { kind: "plugin", name: "composer" }, served: "builtin", fallback: "composer: the slot answered without messages" },
+        succession: {
+          filler: { kind: "plugin", name: "gone" },
+          summariser: "builtin",
+          served: null,
+          fallback: "plugin 'gone' is not serving or not enabled for this scope",
+        },
+        hooks: { attached: [], skipped: [] },
+        branches: [],
+      },
+      duration: { secs: 0, nanos: 1_000_000 },
+    });
+
+    component = mount(TurnContextInspector, {
+      target: document.body,
+      props: { turnId: "turn-2", onClose: () => {} },
+    });
+    await vi.waitFor(() => {
+      expect(document.querySelector(".turn-graph")).not.toBeNull();
+    });
+    const text = document.querySelector(".turn-graph")!.textContent!.replace(/\s+/g, " ");
+    expect(text).toContain("not run this turn");
+    expect(text).toContain("fell back: composer: the slot answered without messages");
+    expect(text).toContain(
+      "succession: plugin gone; not run this turn — fell back: plugin 'gone' is not serving",
+    );
+  });
+
+  it("says when the revision removed the succession step", async () => {
+    vi.mocked(fetchTurnContext).mockResolvedValue({
+      assembly_name: "default",
+      elements: [],
+      total_tokens: 10,
+      budget: null,
+      budget_remaining: null,
+      compaction_applied: [],
+      warnings: [],
+      errors: [],
+      declared_omissions: [],
+      effective_tool_permissions: undefined,
+      provider_visible: undefined,
+      turn_graph: {
+        revision: 3,
+        context_program: { filler: { kind: "builtin" }, served: "builtin", fallback: null },
+        succession: { removed: true },
+        hooks: { attached: [], skipped: [] },
+        branches: [],
+      },
+      duration: { secs: 0, nanos: 1_000_000 },
+    });
+
+    component = mount(TurnContextInspector, {
+      target: document.body,
+      props: { turnId: "turn-3", onClose: () => {} },
+    });
+    await vi.waitFor(() => {
+      expect(document.querySelector(".turn-graph")).not.toBeNull();
+    });
+    const text = document.querySelector(".turn-graph")!.textContent!.replace(/\s+/g, " ");
+    expect(text).toContain("succession: removed in this revision; not run");
+  });
+
   it("names each declared omission and the reason given for it", async () => {
     vi.mocked(fetchTurnContext).mockResolvedValue({
       assembly_name: "focus",

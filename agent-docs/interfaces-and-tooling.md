@@ -1214,8 +1214,18 @@ does not create files or directories in an attached workspace.
 Paired-device execution still stores artefacts in its working directory at
 `.swage/tool-output/` and reports relative paths.
 
-Plugin tools (`plugin.rs`) are dynamically registered from operator
-configuration; their names come from the plugin manifest. Each enters
-through `ToolRegistry::register`, so one named after a built-in
-(`PROTECTED_NAMES`) or after a tool already registered is left out with a
-startup warning.
+Plugin tools come from installed plugins (`crates/swage-plugin`, the kernel;
+`crates/swage-gateway/src/plugin/`, the install records, enablement and the
+`PluginTool` wrapper). A plugin is a package directory with a `plugin.toml`
+manifest and a script; the manifest declares the tools it provides, the host
+grants it needs, the secrets it holds and the function it is a variant of.
+Installing (`POST /api/plugins`, Settings → Plugins) copies the package under
+`<data root>/plugins/<name>/<revision>/`, records the revision, loads the
+script in a V8 isolate of its own and rebuilds the tool dispatcher. A
+plugin's tools register beside the built-ins; a scope that does not enable
+the plugin (`PUT /api/plugins/{name}/enablement`, per install or topic) has
+them withheld at the turn. The script's `swage.callTool` runs through the
+turn's own dispatcher as a nested call, so a plugin's effects meet the same
+permission, approval and audit gates as the model's. A package whose tool
+takes a built-in tool's name (`PROTECTED_NAMES`, or any tool the dispatcher
+registers as built in) is refused at install, the refusal naming the tool.

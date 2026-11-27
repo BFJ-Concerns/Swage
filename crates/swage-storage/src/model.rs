@@ -1763,6 +1763,76 @@ pub struct ActiveSkillRecord {
     pub activated_at: DateTime<Utc>,
 }
 
+/// One installed revision of a plugin: the package as it was copied into the
+/// install root, and whether it is the revision serving now. Revisions are
+/// immutable; a reinstall records the next one and makes it active.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginRevisionRecord {
+    pub id: Uuid,
+    pub plugin_name: String,
+    pub revision: u32,
+    pub version: String,
+    pub description: String,
+    /// The manifest as installed, so the settings surface lists what a
+    /// revision provides without reading the package again.
+    pub manifest: serde_json::Value,
+    /// Where the package was installed from.
+    pub installed_from: String,
+    /// `shipped` for a package compiled into the gateway and installed by
+    /// its startup; `installed` for one an operator installed.
+    pub provenance: String,
+    /// The revision's directory under the install root.
+    pub install_dir: String,
+    pub installed_at: DateTime<Utc>,
+    pub active: bool,
+}
+
+/// Input for recording an installed revision. The caller chooses the revision
+/// number (the next after the plugin's last); the store refuses a repeat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewPluginRevision {
+    pub plugin_name: String,
+    pub revision: u32,
+    pub version: String,
+    pub description: String,
+    pub manifest: serde_json::Value,
+    pub installed_from: String,
+    /// See `PluginRevisionRecord::provenance`.
+    pub provenance: String,
+    pub install_dir: String,
+}
+
+/// One recorded revision of the turn graph: the declaration as proposed,
+/// and whether it serves, failed validation, or was replaced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnGraphRevisionRecord {
+    pub revision: u32,
+    pub graph: serde_json::Value,
+    /// `active`, `failed` or `superseded`.
+    pub activation: String,
+    pub failure: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewTurnGraphRevision {
+    pub revision: u32,
+    pub graph: serde_json::Value,
+    pub activation: String,
+    pub failure: Option<String>,
+}
+
+/// Whether a plugin is enabled for one scope: the install (`topic_id` absent)
+/// or one topic. A scope with no row defers: a topic without one takes the
+/// install's answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginEnablementRecord {
+    pub plugin_name: String,
+    pub topic_id: Option<Uuid>,
+    pub enabled: bool,
+    pub changed_at: DateTime<Utc>,
+}
+
 // Wire-visible schedule types come from the protocol crate — one
 // definition, stored as TEXT columns via their string forms.
 pub use swage_protocol::client::schedule::{
