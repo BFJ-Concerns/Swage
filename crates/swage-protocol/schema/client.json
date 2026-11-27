@@ -4269,7 +4269,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "communication": {
           "anyOf": [

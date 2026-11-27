@@ -731,6 +731,8 @@ pub struct SaveSettingsRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub judge: Option<JudgeConfig>,
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub attachments: Option<AttachmentsConfig>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
