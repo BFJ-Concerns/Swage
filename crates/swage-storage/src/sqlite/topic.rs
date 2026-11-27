@@ -129,45 +129,12 @@ impl TopicStore for SqliteStorage {
     }
 
     async fn general_scope(&self) -> Result<Topic, StorageError> {
-        if let Some(topic) = self
-            .with_conn(|conn| {
-                conn.query_row(
-                    &format!(
-                        "SELECT {TOPIC_COLUMNS}
-                     FROM topics
-                     WHERE is_general = 1"
-                    ),
-                    [],
-                    row_to_topic,
-                )
-                .optional()
-            })
-            .await?
-        {
-            return Ok(topic);
-        }
-
         self.with_conn(|conn| {
-            let id = Uuid::new_v4();
-            let now = Utc::now();
-            let now_str = now.to_rfc3339();
-
-            conn.execute(
-                "INSERT INTO topics (id, name, description, is_general, slug, created_at, updated_at)
-                 VALUES (?1, 'general', '', 1, 'general', ?2, ?2)",
-                params![id.to_string(), &now_str],
-            )?;
-
-            Ok(Topic {
-                id,
-                name: "general".into(),
-                description: String::new(),
-                is_general: true,
-                slug: "general".into(),
-                tags: Vec::new(),
-                created_at: now,
-                updated_at: now,
-            })
+            conn.query_row(
+                &format!("SELECT {TOPIC_COLUMNS} FROM topics WHERE is_general = 1"),
+                [],
+                row_to_topic,
+            )
         })
         .await
     }

@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
 use rusqlite::params;
 use uuid::Uuid;
 
@@ -137,93 +136,6 @@ fn row_to_background_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Background
         started_at: started_at.as_deref().map(parse_dt).transpose()?,
         completed_at: completed_at.as_deref().map(parse_dt).transpose()?,
     })
-}
-
-pub fn migrate_attachment_ingested_markdown_dedup(conn: &Connection) -> Result<(), StorageError> {
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
-    let result = (|| -> Result<(), StorageError> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT
-                    a.id,
-                    a.scope_kind,
-                    a.session_id,
-                    a.topic_id,
-                    a.filename,
-                    a.ingested_markdown,
-                    a.created_at,
-                    a.updated_at
-                 FROM attachments a
-                 LEFT JOIN materials m ON m.source_attachment_id = a.id
-                 WHERE a.ingested_markdown IS NOT NULL
-                   AND m.id IS NULL",
-            )
-            .map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                ))
-            })
-            .map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
-
-        for row in rows {
-            let (
-                attachment_id,
-                scope_kind,
-                session_id,
-                topic_id,
-                filename,
-                content_text,
-                created_at,
-                updated_at,
-            ) = row.map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
-            conn.execute(
-                "INSERT INTO materials (
-                    id, scope_kind, session_id, topic_id, source_kind, source_attachment_id,
-                    status, title, relative_path, mime_type, content_text, created_at, updated_at, archived_at
-                ) VALUES (?1, ?2, ?3, ?4, 'attachment_ingestion', ?5, 'active', ?6, ?7, 'text/markdown', ?8, ?9, ?10, NULL)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    scope_kind,
-                    session_id,
-                    topic_id,
-                    attachment_id,
-                    filename,
-                    format!("attachments/{attachment_id}-attachment.md"),
-                    content_text,
-                    created_at,
-                    updated_at,
-                ],
-            )
-            .map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
-        }
-
-        conn.execute(
-            "UPDATE attachments SET ingested_markdown = NULL WHERE ingested_markdown IS NOT NULL",
-            [],
-        )
-        .map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => conn
-            .execute_batch("COMMIT")
-            .map_err(|error| StorageError::MigrationFailed(error.to_string())),
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(error)
-        }
-    }
 }
 
 #[async_trait]
@@ -547,7 +459,6 @@ impl BackgroundJobStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
     use serde_json::json;
 
     use super::*;
@@ -708,87 +619,6 @@ mod tests {
         assert_eq!(runnable.len(), 2);
         assert!(runnable.iter().any(|job| job.id == running_job_id));
         assert!(runnable.iter().any(|job| job.id == queued_job_id));
-    }
-
-    #[test]
-    fn attachment_markdown_migration_moves_legacy_content_into_materials() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE attachments (
-                id TEXT NOT NULL PRIMARY KEY,
-                scope_kind TEXT NOT NULL,
-                session_id TEXT,
-                topic_id TEXT,
-                kind TEXT NOT NULL,
-                status TEXT NOT NULL,
-                filename TEXT NOT NULL,
-                mime_type TEXT NOT NULL,
-                content_bytes BLOB NOT NULL,
-                byte_count INTEGER NOT NULL,
-                ingested_markdown TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE materials (
-                id TEXT NOT NULL PRIMARY KEY,
-                scope_kind TEXT NOT NULL,
-                session_id TEXT,
-                topic_id TEXT,
-                source_kind TEXT NOT NULL,
-                source_attachment_id TEXT,
-                status TEXT NOT NULL,
-                title TEXT NOT NULL,
-                relative_path TEXT NOT NULL,
-                mime_type TEXT NOT NULL,
-                content_text TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                archived_at TEXT
-            );
-            CREATE UNIQUE INDEX idx_materials_source_attachment_id
-                ON materials(source_attachment_id)
-                WHERE source_attachment_id IS NOT NULL;
-            ",
-        )
-        .unwrap();
-
-        let attachment_id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO attachments (
-                id, scope_kind, session_id, topic_id, kind, status, filename, mime_type,
-                content_bytes, byte_count, ingested_markdown, created_at, updated_at
-            ) VALUES (?1, 'topic', NULL, ?2, 'document', 'ready', 'legacy.txt', 'text/plain', ?3, 6, ?4, ?5, ?5)",
-            params![
-                attachment_id,
-                Uuid::new_v4().to_string(),
-                b"legacy".to_vec(),
-                "legacy markdown",
-                now,
-            ],
-        )
-        .unwrap();
-
-        migrate_attachment_ingested_markdown_dedup(&conn).unwrap();
-
-        let material_content: String = conn
-            .query_row(
-                "SELECT content_text FROM materials WHERE source_attachment_id = ?1",
-                params![attachment_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(material_content, "legacy markdown");
-
-        let attachment_markdown: Option<String> = conn
-            .query_row(
-                "SELECT ingested_markdown FROM attachments WHERE id = ?1",
-                params![attachment_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(attachment_markdown.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
