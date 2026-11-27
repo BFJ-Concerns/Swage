@@ -156,7 +156,7 @@ impl Summariser {
                 succession::succeed_with(
                     request,
                     instructions,
-                    |completion| async move { slot.summarise(completion).await },
+                    |completion| async move { slot.summarise(completion, calls).await },
                     tokeniser,
                 )
                 .await

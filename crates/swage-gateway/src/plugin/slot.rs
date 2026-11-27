@@ -22,6 +22,7 @@ use swage_context::succession::SuccessionError;
 use swage_context::tokeniser::Tokeniser;
 use swage_core::{ChatMessage, CompletionRequest, Role};
 use swage_plugin::{HostCallFailure, InvocationContext, PluginHost, PluginRuntime};
+use swage_protocol::client::context::{SuccessionCall, SuccessionStage};
 use swage_protocol::client::turn_graph::{HookAttachment, HookMode, HookPoint, TurnGraph};
 use swage_storage::model::NewAuditEvent;
 use swage_tool::context::ToolContext;
@@ -88,8 +89,11 @@ pub async fn complete_via_provider(
         metadata: None,
         tool_definitions: Vec::new(),
     };
-    let response = state
-        .active_provider()
+    let provider = state.active_provider();
+    let answered_by = model
+        .clone()
+        .unwrap_or_else(|| provider.model_id().to_owned());
+    let response = provider
         .complete(completion)
         .await
         .map_err(|error| HostCallFailure {
@@ -117,9 +121,71 @@ pub async fn complete_via_provider(
     }
     Ok(json!({
         "content": response.content,
+        "model": answered_by,
         "input_tokens": response.input_tokens,
         "output_tokens": response.output_tokens,
+        "cost": response.cost,
+        "finish_reason": response.finish_reason,
     }))
+}
+
+/// A slot's host that keeps each completion it answers, for the step to
+/// record as its own calls.
+struct CompletionRecorder {
+    inner: Arc<dyn PluginHost>,
+    completions: std::sync::Mutex<Vec<Value>>,
+}
+
+#[async_trait]
+impl PluginHost for CompletionRecorder {
+    async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, HostCallFailure> {
+        self.inner.call_tool(name, arguments).await
+    }
+
+    async fn complete(&self, request: Value) -> Result<Value, HostCallFailure> {
+        let reply = self.inner.complete(request).await;
+        if let Ok(reply) = &reply {
+            self.completions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(reply.clone());
+        }
+        reply
+    }
+
+    async fn context(&self, request: Value) -> Result<Value, HostCallFailure> {
+        self.inner.context(request).await
+    }
+
+    fn log(&self, message: &str) {
+        self.inner.log(message);
+    }
+}
+
+/// A completion a summariser made, as the succession record's call: one
+/// cut at its output limit is the pass's failure, as the kernel's is.
+fn summary_call(reply: &Value) -> SuccessionCall {
+    let tokens = |key: &str| {
+        reply
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|count| u32::try_from(count).ok())
+            .unwrap_or(0)
+    };
+    SuccessionCall {
+        stage: SuccessionStage::Summary,
+        model: reply
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        input_tokens: tokens("input_tokens"),
+        output_tokens: tokens("output_tokens"),
+        cost: reply.get("cost").and_then(Value::as_f64),
+        report: None,
+        failure_reason: (reply.get("finish_reason").and_then(Value::as_str) == Some("length"))
+            .then(|| SuccessionError::SummaryCut.to_string()),
+    }
 }
 
 /// The host a slot or hook runs under: the log, the model under the
@@ -194,10 +260,13 @@ impl PluginSlot {
 
     /// The succession slot: the summariser's request — the completion the
     /// provider would get, as `{ messages, model, max_tokens, temperature }`
-    /// — goes to the plugin, which answers `{ summary }`.
+    /// — goes to the plugin, which answers `{ summary }`. Each completion
+    /// the plugin asks for is appended to `calls`, and a summary written
+    /// while one was cut at its output limit is refused as cut.
     pub async fn summarise(
         &self,
         completion: CompletionRequest,
+        calls: &mut Vec<SuccessionCall>,
     ) -> Result<String, SuccessionError> {
         let input = json!({
             "messages": completion
@@ -209,11 +278,35 @@ impl PluginSlot {
             "max_tokens": completion.max_tokens,
             "temperature": completion.temperature,
         });
+        let recorder = Arc::new(CompletionRecorder {
+            inner: Arc::clone(&self.host),
+            completions: std::sync::Mutex::new(Vec::new()),
+        });
         let output = self
             .runtime
-            .invoke_slot("succession", &input, &self.context, Arc::clone(&self.host))
-            .await
+            .invoke_slot(
+                "succession",
+                &input,
+                &self.context,
+                Arc::clone(&recorder) as Arc<dyn PluginHost>,
+            )
+            .await;
+        let made: Vec<SuccessionCall> = recorder
+            .completions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(summary_call)
+            .collect();
+        let cut = made.iter().any(|call| call.failure_reason.is_some());
+        calls.extend(made);
+        let output = output
             .map_err(|error| SuccessionError::Summariser(format!("{}: {error}", self.plugin)))?;
+        // Notes cut at the output limit stop mid-account, and nothing in
+        // them says so: they are not handed on as though they were whole.
+        if cut {
+            return Err(SuccessionError::SummaryCut);
+        }
         output
             .get("summary")
             .and_then(Value::as_str)
@@ -861,6 +954,8 @@ mod tests {
     #[derive(Default)]
     struct SummarisingHost {
         completions: Mutex<Vec<Value>>,
+        /// The completion's reply ends at its output limit.
+        cut: bool,
     }
 
     #[async_trait]
@@ -873,7 +968,14 @@ mod tests {
         }
         async fn complete(&self, request: Value) -> Result<Value, HostCallFailure> {
             self.completions.lock().unwrap().push(request);
-            Ok(json!({ "content": "the gist", "input_tokens": 1, "output_tokens": 1 }))
+            Ok(json!({
+                "content": "the gist",
+                "model": "m",
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "cost": 0.5,
+                "finish_reason": if self.cut { "length" } else { "stop" },
+            }))
         }
         fn log(&self, _: &str) {}
     }
@@ -998,11 +1100,51 @@ mod tests {
             metadata: None,
             tool_definitions: Vec::new(),
         };
-        let summary = slot.summarise(completion).await.expect("summarises");
+        let mut calls = Vec::new();
+        let summary = slot
+            .summarise(completion.clone(), &mut calls)
+            .await
+            .expect("summarises");
         assert_eq!(summary, "Summary: the gist (2 messages)");
         let asked = host.completions.lock().unwrap().clone();
         assert_eq!(asked[0]["model"], "m");
         assert_eq!(asked[0]["messages"][1]["content"], "one");
+        assert_eq!(
+            calls,
+            vec![SuccessionCall {
+                stage: SuccessionStage::Summary,
+                model: "m".into(),
+                input_tokens: 3,
+                output_tokens: 2,
+                cost: Some(0.5),
+                report: None,
+                failure_reason: None,
+            }],
+            "the plugin's completion is the pass's summary call"
+        );
+
+        // A reply cut at its output limit is recorded, and the summary
+        // written from it is refused as cut.
+        let host = Arc::new(SummarisingHost {
+            cut: true,
+            ..SummarisingHost::default()
+        });
+        let slot = super::PluginSlot::new(
+            "summariser".into(),
+            Arc::clone(&slot.runtime),
+            host,
+            context(),
+        );
+        let mut calls = Vec::new();
+        let error = slot
+            .summarise(completion, &mut calls)
+            .await
+            .expect_err("cut");
+        assert!(matches!(error, SuccessionError::SummaryCut), "{error}");
+        assert_eq!(
+            calls[0].failure_reason.as_deref(),
+            Some(SuccessionError::SummaryCut.to_string().as_str())
+        );
     }
 
     /// The shipped summariser forwards the step's request to the model
@@ -1040,7 +1182,10 @@ mod tests {
             metadata: None,
             tool_definitions: Vec::new(),
         };
-        let summary = slot.summarise(completion).await.expect("summarises");
+        let summary = slot
+            .summarise(completion, &mut Vec::new())
+            .await
+            .expect("summarises");
         assert_eq!(summary, "the gist");
         let asked = host.completions.lock().unwrap().clone();
         assert_eq!(asked.len(), 1);

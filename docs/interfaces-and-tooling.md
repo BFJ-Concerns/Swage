@@ -1247,8 +1247,14 @@ same.
 
 A plugin filling a slot runs in its isolate with the `model` grant's
 `swage.complete({ messages, model?, max_tokens?, temperature? })` answered
-by the gateway's active provider and recorded as the plugin's completion;
-the succession slot receives the summariser's request as those same fields. The context-program
+by the gateway's active provider — `{ content, model, input_tokens,
+output_tokens, cost, finish_reason }`, `finish_reason` being `length` when
+the reply was cut at its output limit — and recorded as the plugin's
+completion;
+the succession slot receives the summariser's request as those same fields,
+its completions are the compaction record's summary calls, and a summary
+written from a completion cut at its limit is refused as cut, the turn
+falling back as it does when the kernel's summary is cut. The context-program
 slot receives the turn's elements with their messages in the
 conversation's own shape and answers with messages handed back as given
 or composed afresh as `{ role, content }` text; a message in neither
