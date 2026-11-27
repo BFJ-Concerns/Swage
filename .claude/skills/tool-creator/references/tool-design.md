@@ -118,21 +118,14 @@ sit behind `require_approval` by default.
 
 ## Secrets and where the tool runs
 
-- **`sensitive_keys()`** names the parameter keys whose values are replaced
-  with `[REDACTED]` in logs and hook output (`redact_params` in
-  `params.rs`). `execute` still receives the real value. Set it for any
-  parameter that carries a token, a password or another secret. It covers
-  the input; the scan of the return value is separate.
 - **`device_secret_keys()`** names the parameter keys that may hold a
   reference to a registered secret. The gateway resolves the reference at the
   host boundary, so the tool receives the secret and the model only ever
-  holds the reference. Use it when the tool needs a real credential.
+  holds the reference. Use it when the tool needs a real credential: the
+  tool names the keys and the framework does the resolving.
 - **`requires_device_execution()`** returning true keeps the tool in the
   gateway process. The skill's *Wiring a tool* says when a tool must, and
   what a tool that does not must also be added to.
-
-The first two name parameter keys, and the framework does the redaction and
-resolution.
 
 ## Changing a tool that exists
 

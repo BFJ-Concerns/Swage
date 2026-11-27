@@ -727,6 +727,9 @@ add(byName.history);
 
 Each assembly has separate 32 MiB ceilings for its heap and its
 fixed-length buffer backing stores. Resizable buffers are unavailable.
+`Math.random()` and host-locale methods such as `localeCompare()` and
+`toLocaleString()` throw `NondeterministicCallError`, even when the script
+supplies an explicit locale.
 
 When a script errors or reaches a limit, the built-in default assembly
 runs and the context report records the reason. A script that runs without error but

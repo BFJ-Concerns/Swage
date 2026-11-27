@@ -23,7 +23,9 @@ a Svelte 5 web UI and an Electron desktop shell.
 >   starting from a fresh data directory.
 > - **Single operator, Linux only.** One person's gateway on their own
 >   machine, by design. Sandboxing relies on Linux (bubblewrap, Landlock).
-> - **No authentication.** Run it on loopback or a network you fully trust.
+> - **Private networks only.** Beyond loopback the gateway serves only
+>   clients paired with its token; that is not authentication fit for the
+>   public internet.
 
 ## Why Swage
 
@@ -61,7 +63,7 @@ things those tend to leave out:
 | **Providers** | Anthropic, OpenAI Chat Completions and Responses, Google, OpenRouter, and the built-in Codex app server (temporarily disabled); retries; interactive turns honour the selected model's provider; per-model reasoning effort |
 | **Tools** | File read/write/edit/search, shell, URL fetch, web search¹, a Chromium browser¹, Python execution¹, memory, a knowledge base with citations, schedules, workflows, and agent-built *surfaces* |
 | **Safety** | Per-tool permissions with interactive approvals, grants that narrow as work is delegated, per-turn bubblewrap + Landlock sandboxing, and credential leak detection with redaction |
-| **Workflows** | A JavaScript workflow engine (V8, one isolate per run) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause for a human decision |
+| **Workflows** | A JavaScript workflow engine (V8, one isolate per run) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause on a decision until an agent answers it |
 | **Automation** | Schedules that start or continue sessions, external channels (Telegram¹), delivery targets, and remote *devices* that dial in and execute tools on other machines |
 | **Context** | Scriptable context assembly, compaction, and recovery for sessions that keep failing: separate readers diagnose what went wrong and the session continues from their notes |
 | **Interfaces** | Web UI, desktop shell and CLI; a wire contract defined once in Rust and projected to TypeScript, JSON Schema and OpenAPI |
@@ -70,8 +72,8 @@ things those tend to leave out:
 
 ## Quick start
 
-Swage targets Linux. Install the Rust toolchain with
-[rustup](https://rustup.rs/) (the version is pinned by
+The supported build targets x86-64 Linux with glibc. Install the Rust toolchain
+with [rustup](https://rustup.rs/) (the version is pinned by
 `rust-toolchain.toml`) and **Node 24 with npm**. The frontend dependencies
 support Node 22 from **22.13.0**, or **24 and later**; Node 24 is recommended.
 
@@ -97,7 +99,9 @@ export PATH="$PWD/target/debug:$PATH"
 
 The fetch command downloads the V8 static library and verifies its checksum
 against `v8-archive.toml`. The repository's `just` build and verification
-recipes run this step automatically.
+recipes run this step automatically. Other targets would require an
+[experimental V8 source build](docs/interfaces-and-tooling.md#building-v8-from-source),
+which currently fails on x86-64 Linux with glibc.
 
 The `PATH` change applies to this terminal only. In each new terminal,
 repeat the `export PATH` command from the repository root. Examples using

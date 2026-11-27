@@ -116,6 +116,7 @@ pub(super) async fn settle_turn_dispatcher(
                     SandboxDegradationApprovalRequest {
                     config,
                     ws_tx,
+                    session_id,
                     turn_id: prepared_turn_id,
                     agent_id,
                     prompt:

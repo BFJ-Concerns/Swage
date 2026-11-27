@@ -38,7 +38,7 @@
       return;
     }
     // Fragments keep browser scrolling, including on child-session paths.
-    if (url.hash) return;
+    if (url.href.includes("#")) return;
     const childAddress = url.protocol === "swage:"
       ? attribute.attrValue.split("?")[0]
       : url.origin === window.location.origin ? url.pathname : "";
@@ -168,7 +168,7 @@
             link.hasAttribute("download") || (link.target && link.target !== "_self")) return;
         const url = new URL(link.href);
         // Fragments keep browser scrolling, including on child-session paths.
-        if (url.hash) return;
+        if (url.href.includes("#")) return;
         if (url.origin !== window.location.origin) return;
         // Unknown paths are gateway resources.
         try {
@@ -178,6 +178,7 @@
           return;
         }
         const path = url.pathname + url.search;
+        if (window.location.hash && path === window.location.pathname + window.location.search) return;
         event.preventDefault();
         onNavigate(path);
       }),
@@ -932,6 +933,26 @@
     padding: 0;
     color: inherit;
     font-size: 0.85em;
+  }
+
+  .markdown-body :global(pre) :global(.hljs-keyword),
+  .markdown-body :global(pre) :global(.hljs-built_in),
+  .markdown-body :global(pre) :global(.hljs-selector-tag),
+  .markdown-body :global(pre) :global(.hljs-meta),
+  .markdown-body :global(pre) :global(.hljs-deletion) {
+    color: var(--code-keyword);
+  }
+
+  .markdown-body :global(pre) :global(.hljs-string),
+  .markdown-body :global(pre) :global(.hljs-number),
+  .markdown-body :global(pre) :global(.hljs-literal),
+  .markdown-body :global(pre) :global(.hljs-regexp),
+  .markdown-body :global(pre) :global(.hljs-addition) {
+    color: var(--code-literal);
+  }
+
+  .markdown-body :global(pre) :global(.hljs-comment) {
+    color: var(--code-comment);
   }
 
   .markdown-body :global(blockquote) {

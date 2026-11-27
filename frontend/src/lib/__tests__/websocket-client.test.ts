@@ -180,24 +180,12 @@ describe("send", () => {
     });
   });
 
-  it("serialises a cancel event as JSON", () => {
-    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
-    client.connect("conv-abc");
-    latestWs().simulateOpen();
-
-    client.send({ type: "cancel" });
-
-    // sentMessages[0] is the automatic tools subscribe; sentMessages[1] is cancel.
-    const sent = latestWs().sentMessages;
-    expect(JSON.parse(sent[sent.length - 1])).toEqual({ type: "cancel" });
-  });
-
   it("does not throw when called before the socket is open", () => {
     const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
     client.connect("conv-abc");
     // Intentionally do NOT call simulateOpen.
 
-    expect(() => client.send({ type: "cancel" })).not.toThrow();
+    expect(() => client.send({ type: "unsubscribe", channels: ["tools"] })).not.toThrow();
     expect(latestWs().sentMessages).toHaveLength(0);
   });
 

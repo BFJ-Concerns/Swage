@@ -598,6 +598,9 @@ pub(super) async fn project_agent_events(
             | AgentEvent::ApprovalConfirmed { .. }
             | AgentEvent::ApprovalExpired { .. }) => {
                 route_approval_agent_event(event, ws_tx);
+                // A request waiting on the person, or its answer, changes what
+                // views of running work show for the session.
+                crate::service::announce_session_updated(&state.broadcast, session_id);
             }
         }
     }

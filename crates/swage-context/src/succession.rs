@@ -22,10 +22,7 @@
 //! context, the runtime's compactor handles it as before, and the report
 //! records the attempt.
 
-use swage_core::{
-    ChatMessage, CompletionRequest, ProviderError, Role, ToolReplayPart,
-    render_message_for_model_context, role_label_for_model_context,
-};
+use swage_core::{ChatMessage, CompletionRequest, ProviderError, Role, ToolReplayPart};
 use swage_protocol::client::context::{SuccessionCall, SuccessionStage};
 use swage_provider::LlmProvider;
 
@@ -81,6 +78,8 @@ pub enum SuccessionError {
     Provider(#[from] ProviderError),
     #[error("the summarising provider returned an empty summary")]
     EmptySummary,
+    #[error("the summary reached its output limit and was cut short")]
+    SummaryCut,
     #[error("the diagnosis could not be written: {0}")]
     Diagnosis(String),
     #[error("the summariser's instruction could not be selected: {0}")]
@@ -206,13 +205,18 @@ pub async fn summarise(
     let mut call = recorded_call(provider, SuccessionStage::Summary, None, &response);
     if let Ok(response) = &response {
         if response.finish_reason == swage_core::FinishReason::Length {
-            call.failure_reason = Some("the summary reached its output limit".to_string());
+            call.failure_reason = Some(SuccessionError::SummaryCut.to_string());
         } else if response.content.trim().is_empty() {
             call.failure_reason = Some(SuccessionError::EmptySummary.to_string());
         }
     }
     calls.push(call);
     let response = response?;
+    // Notes cut at the output limit stop mid-account, and nothing in them
+    // says so: they are not handed on as though they were whole.
+    if response.finish_reason == swage_core::FinishReason::Length {
+        return Err(SuccessionError::SummaryCut);
+    }
     if response.content.trim().is_empty() {
         return Err(SuccessionError::EmptySummary);
     }
@@ -391,8 +395,10 @@ pub fn failure_record(
 /// The instruction the hand-over notes are written under unless the caller
 /// selects another. Instruction text: it decides what every successor knows
 /// of its own conversation. It names the tags `summary_request` wraps each
-/// part in, and its word limit keeps the notes inside that request's output
-/// limit, so the three change together. The same instruction serves the
+/// part in, so the two change together. Its word limit is the only bound on
+/// the notes' length: the request sets no output limit of its own, so the
+/// notes are not cut short of what the model itself can write. The same
+/// instruction serves the
 /// stall path, where the notes are joined to a diagnosis and one message is
 /// kept, so it speaks of "the most recent messages" without a count.
 pub const SUMMARY_INSTRUCTIONS: &str = "\
@@ -453,7 +459,7 @@ fn summary_request(
             ),
         ],
         model: None,
-        max_tokens: Some(1024),
+        max_tokens: None,
         temperature: Some(0.3),
         stop_sequences: None,
         metadata: None,
@@ -464,17 +470,7 @@ fn summary_request(
 /// Messages as labelled prose for a reader outside the conversation, tool
 /// calls and their results rendered as the model context renders them.
 pub fn transcript(messages: &[ChatMessage]) -> String {
-    messages
-        .iter()
-        .map(|message| {
-            format!(
-                "[{}] {}",
-                role_label_for_model_context(message.role()),
-                render_message_for_model_context(message)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    swage_core::transcript_for_model_context(messages)
 }
 
 #[cfg(test)]

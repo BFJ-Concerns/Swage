@@ -67,8 +67,13 @@ fn ungranted(name: &str) -> String {
     )
 }
 
-fn arguments(payload: &str) -> Vec<Value> {
-    serde_json::from_str(payload).unwrap_or_default()
+fn arguments(name: &str, payload: &str) -> Result<Vec<Value>, String> {
+    serde_json::from_str(payload).map_err(|error| {
+        pre_spawn_failure(
+            "HostArgumentsError",
+            format!("could not read arguments for '{name}': {error}"),
+        )
+    })
 }
 
 fn string_argument(arguments: &[Value], index: usize) -> String {
@@ -104,7 +109,10 @@ fn worker_id(arguments: &[Value]) -> Result<uuid::Uuid, String> {
 #[async_trait]
 impl HostCalls for WorkflowHostCalls {
     async fn call(&self, name: &str, payload: String) -> String {
-        let arguments = arguments(&payload);
+        let arguments = match arguments(name, &payload) {
+            Ok(arguments) => arguments,
+            Err(refusal) => return refusal,
+        };
         let cancellation = self.cancellation.clone();
         match name {
             "agent" => {
@@ -287,7 +295,10 @@ impl HostCalls for WorkflowHostCalls {
     }
 
     fn call_sync(&self, name: &str, payload: String) -> String {
-        let arguments = arguments(&payload);
+        let arguments = match arguments(name, &payload) {
+            Ok(arguments) => arguments,
+            Err(refusal) => return refusal,
+        };
         match name {
             "log" | "phase" => {
                 self.host.record(name, string_argument(&arguments, 0));

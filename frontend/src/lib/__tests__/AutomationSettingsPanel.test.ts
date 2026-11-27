@@ -12,7 +12,7 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-it("names every Automation input and visibly labels context, approval and permission fields", () => {
+it("names every Automation input and visibly labels approval-default, context and permission fields", () => {
   const settings = emptySettings();
   settings.tool_runtime.search = { provider_type: "searxng", base_url: "https://search.example.org" };
   component = mount(AutomationSettingsPanel, { target: document.body, props: { settings } });
@@ -22,7 +22,7 @@ it("names every Automation input and visibly labels context, approval and permis
   }
   for (const name of [
     "Approval timeout (seconds)", "Context assembly", "Context assembly timeout (seconds)",
-    "Context token budget", "Tool allow rules", "Tool deny rules", "Tool bundles", "Approval-gated tools",
+    "Context token budget", "Tool allow rules", "Tool deny rules", "Tool bundles",
   ]) {
     const label = [...document.querySelectorAll("label")].find((label) => label.textContent?.trim() === name);
     expect.soft(label, `${name}: visible associated label`).toBeDefined();

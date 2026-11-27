@@ -49,7 +49,9 @@ pub use error::{
     StorageError, SwageError, ToolError,
 };
 pub use message::{ChatMessage, ContentPart, Role, ToolReplayPart};
-pub use message_rendering::{render_message_for_model_context, role_label_for_model_context};
+pub use message_rendering::{
+    render_message_for_model_context, role_label_for_model_context, transcript_for_model_context,
+};
 pub use messaging::{ContextTransferMode, MessageKind, MessageStatus};
 pub use output_limit::{OutputLimitSource, ResolvedOutputLimit, resolve_output_limit};
 pub use request::{

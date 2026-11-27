@@ -10,7 +10,7 @@ const resultsDir = process.env.SWAGE_E2E_RESULTS_DIR
 // Chromium also keeps certificates outside its explicit user-data directory.
 const browserEnvironment = { ...process.env };
 const browserRoot = join(process.env.SWAGE_E2E_INVOCATION_DIR ?? resultsDir, "browser-environment");
-for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"]) {
+for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"]) {
   const directory = join(browserRoot, key);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   browserEnvironment[key] = directory;

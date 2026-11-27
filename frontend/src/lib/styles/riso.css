@@ -103,6 +103,9 @@
   /* Distinct warm red for the error family. ~8:1 on cream paper. */
   --error: #a8321a;
   --success: #166534;
+  --code-keyword: #854017;
+  --code-literal: #166534;
+  --code-comment: #495c6f;
 
   /* ---- Status registers (hue channel) ------------------------------------
      Six semantic registers name "what state is this thing in", and the status
@@ -148,6 +151,9 @@
      deep-navy text on the trouble stamp. Gated by verify-status-hues.mjs. */
   --error: #f85d78;
   --success: #75c47c;
+  --code-keyword: #ffac75;
+  --code-literal: #9ddd9e;
+  --code-comment: #a0b1c7;
 
   /* ---- Status registers (hue channel), re-lit for the deep navy -----------
      The spot hues brighten so their outline text/line holds AA on navy, and

@@ -13,6 +13,10 @@ use swage_core::ApprovalTimeoutPolicy;
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// How requests from beyond loopback are gated: `token` (the shipped
+    /// default) admits paired clients only, `warn` admits and logs, `off`
+    /// admits. Loopback is never gated.
+    pub access: AccessGateMode,
 }
 
 impl Default for ServerConfig {
@@ -20,6 +24,7 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 3000,
+            access: AccessGateMode::Token,
         }
     }
 }
@@ -676,7 +681,9 @@ pub struct ContextTransferTargetConfig {
     /// For `Explicit` mode: which context element types to include.
     #[serde(default)]
     pub allowed_fields: Vec<ContextTransferField>,
-    /// For `Summary` mode: maximum token budget for the compacted summary.
+    /// For `Summary` mode: the length the summary is asked to keep to, in
+    /// tokens. The summariser is told it as a word count; nothing cuts a
+    /// summary that runs over.
     pub summary_budget: Option<u32>,
 }
 
@@ -698,7 +705,8 @@ pub struct ContextTransferConfig {
     /// For `Explicit` mode: default allowed fields.
     #[serde(default)]
     pub allowed_fields: Vec<ContextTransferField>,
-    /// For `Summary` mode: default token budget.
+    /// For `Summary` mode: the default length the summary is asked to keep
+    /// to, in tokens.
     pub summary_budget: Option<u32>,
     /// Per-target overrides keyed by recipient agent_id.
     #[serde(default)]
@@ -784,6 +792,7 @@ impl Default for SchedulingConfig {
 
 // Declared once in swage-protocol: the wire type and the resolved config
 // type are one definition, with the partial, schema and semantics beside it.
+pub use swage_protocol::client::access::AccessGateMode;
 pub use swage_protocol::client::settings::{AttachmentsConfig, MemoryConfig, SessionsConfig};
 
 /// Model routes for voice. Voice speaks only to the default provider's

@@ -841,7 +841,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn issuing_channel_codes_records_scope_without_the_credential() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage.clone(),
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -885,7 +885,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn channel_code_issue_and_list_preserve_each_integration() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),

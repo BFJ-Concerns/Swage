@@ -125,8 +125,9 @@ impl SelectiveEvictionCompactor {
             effort: None,
             messages: vec![ChatMessage::new(Role::System, &prompt)],
             model: None,
-            // A modest budget — we only want a JSON list of indices, not prose.
-            max_tokens: Some(512),
+            // No output limit of the request's own: the list grows with the
+            // conversation, and a reply cut inside its JSON does not parse.
+            max_tokens: None,
             temperature: Some(0.0),
             stop_sequences: None,
             metadata: None,
@@ -180,9 +181,9 @@ impl Default for SelectiveEvictionCompactor {
 /// assistant goes on from, so this decides what that assistant loses. It
 /// names the tags the request wraps the conversation in
 /// (`conversation_to_prune`) and gives the reply shape
-/// `parse_eviction_response` reads, so the three change together. The reply
-/// is capped at 512 tokens, which is why a reason is asked for in a few
-/// words. `apply_evictions` refuses a system message whatever the reply
+/// `parse_eviction_response` reads, so the three change together. A reason
+/// is asked for in a few words because only the list's indices are acted on.
+/// `apply_evictions` refuses a system message whatever the reply
 /// lists; keeping the latest exchange, and a tool call with its result, rests
 /// on this text alone.
 const EVICTION_INSTRUCTIONS: &str = "\
