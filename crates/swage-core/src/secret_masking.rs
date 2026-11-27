@@ -304,9 +304,10 @@ fn mask_document(
 }
 
 /// Holds back the end of a stream of text that could be the start of a
-/// registered value, so a value split across two pieces is masked whole.
-/// Each piece pushed returns the text that is safe to pass on now; `finish`
-/// returns what is left when the stream ends or pauses.
+/// registered value, in its plain form or the escaped form it takes inside
+/// JSON text, so a value split across two pieces is masked whole. Each piece
+/// pushed returns the text that is safe to pass on now; `finish` returns what
+/// is left when the stream ends or pauses.
 #[derive(Debug, Default)]
 pub struct StreamMasking {
     pending: String,
@@ -315,9 +316,10 @@ pub struct StreamMasking {
 impl StreamMasking {
     /// Take the next piece of the stream and return what can be passed on.
     pub fn push(&mut self, piece: &str, values: &[String]) -> String {
+        let forms = stream_forms(values);
         self.pending.push_str(piece);
-        mask_text(&mut self.pending, values);
-        let held = self.held_back_from(values);
+        mask_text(&mut self.pending, &forms);
+        let held = self.held_back_from(&forms);
         let rest = self.pending.split_off(held);
         std::mem::replace(&mut self.pending, rest)
     }
@@ -325,25 +327,41 @@ impl StreamMasking {
     /// Everything still held back, masked.
     pub fn finish(&mut self, values: &[String]) -> String {
         let mut rest = std::mem::take(&mut self.pending);
-        mask_text(&mut rest, values);
+        mask_text(&mut rest, &stream_forms(values));
         rest
     }
 
     /// The byte index from which `pending` could still begin a value: the
     /// start of the longest ending that is a proper prefix of one.
-    fn held_back_from(&self, values: &[String]) -> usize {
+    fn held_back_from(&self, forms: &[String]) -> usize {
         let text = self.pending.as_str();
         for (start, _) in text.char_indices() {
             let ending = &text[start..];
-            if values
+            if forms
                 .iter()
-                .any(|value| value.len() > ending.len() && value.starts_with(ending))
+                .any(|form| form.len() > ending.len() && form.starts_with(ending))
             {
                 return start;
             }
         }
         text.len()
     }
+}
+
+/// Each value in its plain form and, where it differs, the escaped form it
+/// takes inside JSON text, longest first so a form containing another is
+/// masked whole.
+fn stream_forms(values: &[String]) -> Vec<String> {
+    let mut forms: Vec<String> = values
+        .iter()
+        .flat_map(|value| {
+            let encoded = serde_json::to_string(value).expect("secret text serialises");
+            [value.clone(), encoded[1..encoded.len() - 1].to_owned()]
+        })
+        .collect();
+    forms.sort_unstable_by_key(|form| std::cmp::Reverse(form.len()));
+    forms.dedup();
+    forms
 }
 
 #[cfg(test)]
@@ -509,6 +527,18 @@ mod tests {
                 "output": r#"{"slug":"topic-[REDACTED_SECRET]"}"#,
             })
         );
+    }
+
+    /// A value streamed in the escaped form it takes inside JSON text, split
+    /// across pieces, is masked whole.
+    #[test]
+    fn an_escaped_value_split_across_stream_pieces_is_masked_whole() {
+        let values = vec![r#"verifier-"quoted"-credential"#.to_string()];
+        let mut stream = StreamMasking::default();
+        let mut passed = stream.push(r#"{"key":"verifier-\"quoted"#, &values);
+        passed.push_str(&stream.push(r#"\"-credential"}"#, &values));
+        passed.push_str(&stream.finish(&values));
+        assert_eq!(passed, r#"{"key":"[REDACTED_SECRET]"}"#);
     }
 
     #[test]
