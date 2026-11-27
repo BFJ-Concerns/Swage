@@ -90,7 +90,12 @@ pub fn mask_record_text(text: &mut String, values: &[String]) -> bool {
     if (trimmed.starts_with('{') || trimmed.starts_with('['))
         && let Ok(mut document) = serde_json::from_str::<serde_json::Value>(text)
     {
-        if mask_json_strings(&mut document, values) {
+        let documents = registered_documents(values);
+        if documents.contains(&document) {
+            *text = REDACTED_SECRET.to_owned();
+            return true;
+        }
+        if mask_document(&mut document, values, &documents) {
             *text = document.to_string();
             return true;
         }
@@ -109,21 +114,48 @@ pub fn mask_record_text(text: &mut String, values: &[String]) -> bool {
 }
 
 /// Mask every value in the strings of a JSON document, keys included. A
-/// string that is itself a serialised document is masked as one.
+/// string that is itself a serialised document is masked as one, and a part
+/// of the document equal to a registered value that is itself a JSON object
+/// or array becomes the marker.
 pub fn mask_json_strings(value: &mut serde_json::Value, values: &[String]) -> bool {
+    mask_document(value, values, &registered_documents(values))
+}
+
+/// The registered values that are JSON objects or arrays, decoded, so a
+/// record holding one as structure rather than as text is still found.
+fn registered_documents(values: &[String]) -> Vec<serde_json::Value> {
+    values
+        .iter()
+        .filter(|value| {
+            let trimmed = value.trim_start();
+            trimmed.starts_with('{') || trimmed.starts_with('[')
+        })
+        .filter_map(|value| serde_json::from_str(value).ok())
+        .collect()
+}
+
+fn mask_document(
+    value: &mut serde_json::Value,
+    values: &[String],
+    documents: &[serde_json::Value],
+) -> bool {
+    if (value.is_object() || value.is_array()) && documents.contains(value) {
+        *value = serde_json::Value::String(REDACTED_SECRET.to_owned());
+        return true;
+    }
     let mut replaced = false;
     match value {
         serde_json::Value::String(text) => return mask_record_text(text, values),
         serde_json::Value::Array(items) => {
             for item in items {
-                replaced |= mask_json_strings(item, values);
+                replaced |= mask_document(item, values, documents);
             }
         }
         serde_json::Value::Object(map) => {
             let entries = std::mem::take(map);
             for (mut key, mut item) in entries {
                 replaced |= mask_record_text(&mut key, values);
-                replaced |= mask_json_strings(&mut item, values);
+                replaced |= mask_document(&mut item, values, documents);
                 map.insert(key, item);
             }
         }
@@ -213,6 +245,26 @@ mod tests {
         let mut text = r#"{"a":"x","b":"y"}"#.to_string();
         assert!(!set.mask(&mut text));
         assert_eq!(text, r#"{"a":"x","b":"y"}"#);
+    }
+
+    #[test]
+    fn a_value_that_is_itself_a_document_is_masked_whole_or_within_one() {
+        let set = RegisteredSecretValues::default();
+        let value = r#"{"token":"verifier-json-84c2"}"#;
+        set.replace(vec![value.into()]);
+
+        let mut text = value.to_string();
+        assert!(set.mask(&mut text));
+        assert_eq!(text, REDACTED_SECRET);
+
+        let mut text = r#"{"meta": {"token": "verifier-json-84c2"}, "n": 1}"#.to_string();
+        assert!(set.mask(&mut text));
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, serde_json::json!({"meta": REDACTED_SECRET, "n": 1}));
+
+        let mut text = format!("key {value} end");
+        assert!(set.mask(&mut text));
+        assert_eq!(text, "key [REDACTED_SECRET] end");
     }
 
     #[test]
