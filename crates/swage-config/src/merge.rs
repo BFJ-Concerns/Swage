@@ -1,3 +1,4 @@
+use crate::model::AccessGateMode;
 #[cfg(test)]
 use crate::model::Protocol;
 use crate::model::{
@@ -25,6 +26,7 @@ pub use swage_protocol::client::settings::{
 pub struct PartialServerConfig {
     pub host: Option<String>,
     pub port: Option<u16>,
+    pub access: Option<AccessGateMode>,
 }
 
 /// Partial mirror of `ProviderCatalogConfig`.
@@ -315,6 +317,7 @@ impl From<ResolvedConfig> for PartialConfig {
             server: Some(PartialServerConfig {
                 host: Some(server.host),
                 port: Some(server.port),
+                access: Some(server.access),
             }),
             providers: Some(PartialProviderCatalogConfig {
                 default: Some(providers.default),
@@ -521,7 +524,7 @@ macro_rules! impl_merge_overlay {
     };
 }
 
-impl_merge_overlay!(PartialServerConfig { host, port });
+impl_merge_overlay!(PartialServerConfig { host, port, access });
 impl_merge_overlay!(PartialSandboxConfig {
     enabled,
     allow_degraded_execution,
@@ -823,6 +826,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         server: ServerConfig {
             host: s.host.unwrap_or(ds.host),
             port: s.port.unwrap_or(ds.port),
+            access: s.access.unwrap_or(ds.access),
         },
         hitl: {
             let dh = HitlConfig::default();
@@ -1060,6 +1064,7 @@ mod tests {
             server: Some(PartialServerConfig {
                 host: Some(host.to_string()),
                 port: None,
+                access: None,
             }),
             ..Default::default()
         }
@@ -1070,6 +1075,7 @@ mod tests {
             server: Some(PartialServerConfig {
                 host: None,
                 port: Some(port),
+                access: None,
             }),
             ..Default::default()
         }
@@ -1119,6 +1125,7 @@ mod tests {
             server: Some(PartialServerConfig {
                 host: Some("10.0.0.1".to_string()),
                 port: Some(3000),
+                access: None,
             }),
             ..Default::default()
         };
@@ -1144,6 +1151,7 @@ mod tests {
             server: Some(PartialServerConfig {
                 host: Some("10.0.0.1".to_string()),
                 port: Some(3000),
+                access: None,
             }),
             ..Default::default()
         };
@@ -1191,6 +1199,7 @@ mod tests {
             server: Some(PartialServerConfig {
                 host: Some("192.168.1.1".to_string()),
                 port: Some(8080),
+                access: None,
             }),
             ..Default::default()
         };
@@ -1229,6 +1238,7 @@ mod tests {
                         command: None,
                         state_dir: None,
                         worker_staleness_threshold_ms: None,
+                        plaintext_credentials: Default::default(),
                     },
                 )])),
             }),
@@ -1397,6 +1407,7 @@ mod tests {
             server: Some(PartialServerConfig {
                 host: None,
                 port: Some(9000),
+                access: None,
             }),
             ..Default::default()
         };

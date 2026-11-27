@@ -74,6 +74,7 @@ function makeSession(overrides: Partial<RecentSession> = {}): RecentSession {
     message_preview: "Plan the release",
     has_interrupted_turn: false,
     has_running_turn: false,
+    awaiting_approval: false,
     ...overrides,
   };
 }
@@ -119,6 +120,20 @@ describe("RecentSessions", () => {
       component = undefined;
     }
     document.body.replaceChildren();
+  });
+
+  it("reads a session held on the person's approval as waiting on them, not running", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([
+      conversationEntry(makeSession({ id: "held", message_preview: "Held reply", has_running_turn: true, awaiting_approval: true, latest_turn_state: "awaiting_approval" })),
+      conversationEntry(makeSession({ id: "busy", message_preview: "Busy reply", has_running_turn: true, latest_turn_state: "processing" })),
+    ]);
+    component = mount(RecentSessions, { target: document.body });
+    await settle();
+    const [held, busy] = Array.from(document.querySelectorAll<HTMLButtonElement>(".row.source"));
+    expect(held.querySelector(".waiting")?.textContent).toBe("waiting on you");
+    expect(held.querySelector(".running")).toBeNull();
+    expect(busy.querySelector(".running")?.textContent).toBe("running");
+    expect(busy.querySelector(".waiting")).toBeNull();
   });
 
   it("labels the latest failed and interrupted responses and clears markers after recovery", async () => {
@@ -418,6 +433,11 @@ describe("RecentSessions schedule groups", () => {
     heading.click();
     flushSync();
     expect(childRows()).toBe(0);
+  });
+
+  it("summarises a schedule whose latest run waits on the person as waiting on them", async () => {
+    component = await render([scheduleEntry({ has_running_turn: true, awaiting_approval: true })]);
+    expect(summaryText()).toBe("▸ 11 runs · Waiting on you");
   });
 
   it("labels the group by the brief's first line cut at a word boundary, keeping the full brief as its title", async () => {

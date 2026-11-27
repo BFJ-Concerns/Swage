@@ -565,6 +565,15 @@ impl Program {
             outcome
         })
         .await;
+        // The final event-loop poll may settle the script before the
+        // watchdog sees a stop that arrived during that poll.
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            self.watch.terminate(Termination::Cancelled);
+        }
         let value = self.outcome(outcome)?;
         self.string_of(&value)
     }
@@ -1219,6 +1228,44 @@ mod tests {
             matches!(error, IsolateError::Terminated(Termination::Cancelled)),
             "{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_settlement_wins_over_the_script_result() {
+        struct CancelWhileReplying(CancellationToken);
+        #[async_trait]
+        impl HostCalls for CancelWhileReplying {
+            async fn call(&self, _: &str, _: String) -> String {
+                "null".into()
+            }
+            fn call_sync(&self, _: &str, _: String) -> String {
+                self.0.cancel();
+                "null".into()
+            }
+        }
+
+        for ending in [r#"return "done";"#, r#"throw new Error("failed");"#] {
+            let cancellation = CancellationToken::new();
+            let host = Arc::new(CancelWhileReplying(cancellation.clone()));
+            let mut program = Program::new(limits(), Some(host), None).expect("isolate");
+            // Drive cancellation with the event loop so the watchdog cannot
+            // race the host reply and mask a missed cancellation.
+            program.cancellation = Some(cancellation);
+            let pending = program
+                .execute(
+                    "test",
+                    format!(r#"(async () => {{ await __swageHost.call("wait", "null"); __swageHost.callSync("stop", "null"); {ending} }})()"#),
+                )
+                .expect("starts");
+            let outcome = program.settle_to_string(pending).await;
+            assert!(
+                matches!(
+                    outcome,
+                    Err(IsolateError::Terminated(Termination::Cancelled))
+                ),
+                "{ending}: {outcome:?}"
+            );
+        }
     }
 
     #[tokio::test]

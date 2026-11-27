@@ -3302,16 +3302,44 @@ impl SessionStore for MockStorage {
                 let has_interrupted_turn = db.turns.values().any(|turn| {
                     thread_ids.contains(&turn.thread_id) && turn.state == TurnState::Interrupted
                 });
+                let mut turns: Vec<_> = db
+                    .turns
+                    .values()
+                    .filter(|turn| thread_ids.contains(&turn.thread_id))
+                    .collect();
+                turns.sort_by_key(|turn| {
+                    (
+                        std::cmp::Reverse(turn.created_at),
+                        db.threads[&turn.thread_id].created_at,
+                    )
+                });
+                let latest_turn = turns
+                    .first()
+                    .map(|turn| swage_storage::SessionTurnActivity {
+                        id: turn.id,
+                        state: turn.state.clone(),
+                    });
+                let active_turn = turns
+                    .iter()
+                    .find(|turn| {
+                        matches!(
+                            turn.state,
+                            TurnState::Processing
+                                | TurnState::Delegating
+                                | TurnState::AwaitingApproval
+                        )
+                    })
+                    .map(|turn| swage_storage::SessionTurnActivity {
+                        id: turn.id,
+                        state: turn.state.clone(),
+                    });
                 swage_storage::SessionActivity {
+                    has_processing_turn: active_turn.is_some(),
+                    active_turn,
+                    latest_turn,
                     last_activity: latest.map_or(session.created_at, |message| message.created_at),
                     latest_message: latest.map(|message| message.content.clone()),
                     has_interrupted_turn,
-                    latest_turn_state: db
-                        .turns
-                        .values()
-                        .filter(|turn| thread_ids.contains(&turn.thread_id))
-                        .max_by_key(|turn| (turn.created_at, turn.id))
-                        .map(|turn| turn.state.clone()),
                     session: session.clone(),
                 }
             })
@@ -14979,6 +15007,24 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
 
 #[tokio::test(flavor = "multi_thread")]
 async fn detached_delegate_can_be_cancelled_through_active_registry() {
+    exercise_detached_cancellation(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn detached_delegate_can_be_stopped_by_its_session() {
+    exercise_detached_cancellation(true).await;
+}
+
+async fn exercise_detached_cancellation(via_session_stop: bool) {
+    let scratch_parent = std::env::var_os("SWAGE_TEST_SCRATCH_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&scratch_parent).expect("create test scratch parent");
+    let disposable = || {
+        tempfile::Builder::new()
+            .prefix("swage-delegated-stop-")
+            .tempdir_in(&scratch_parent)
+    };
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("default topic");
     let session = storage
@@ -15012,7 +15058,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         child_release,
         "Detached child answer".to_string(),
     );
-    let placement_fixture = tempfile::tempdir().expect("placement fixture");
+    let placement_fixture = disposable().expect("placement fixture");
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
@@ -15026,7 +15072,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     )
     .with_worktree_root(placement_fixture.path().join("worker-worktrees"));
     let handler = GatewayDelegationHandler::new(state.clone());
-    let delegated_cwd = tempfile::tempdir().expect("delegated cwd");
+    let delegated_cwd = disposable().expect("delegated cwd");
     init_test_git_repository(delegated_cwd.path());
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
@@ -15077,7 +15123,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         "placed"
     );
 
-    let denied_cwd = tempfile::tempdir().expect("denied cwd");
+    let denied_cwd = disposable().expect("denied cwd");
     let denied = match handler
         .handle_delegation(
             "agent-b",
@@ -15117,23 +15163,32 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         "detached child should be registered for precise cancellation"
     );
 
-    let cancel = storage
-        .create_agent_message(NewAgentMessage {
-            sender_agent_id: "gateway".to_string(),
-            recipient_agent_id: "agent-b".to_string(),
-            kind: swage_core::MessageKind::Cancel,
-            correlation_id: Some(detached.delegate_message_id),
-            payload: serde_json::json!({}),
-        })
+    if via_session_stop {
+        assert!(
+            super::cancel_turn(&state, detached.child_session_id)
+                .await
+                .is_ok(),
+            "session stop must reach the detached child's cancellation token"
+        );
+    } else {
+        let cancel = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "gateway".to_string(),
+                recipient_agent_id: "agent-b".to_string(),
+                kind: swage_core::MessageKind::Cancel,
+                correlation_id: Some(detached.delegate_message_id),
+                payload: serde_json::json!({}),
+            })
+            .await
+            .expect("create cancel message");
+        swage_agent::cancel::handle_cancel(
+            storage.as_ref(),
+            &cancel,
+            Some(&handler.active_delegations),
+        )
         .await
-        .expect("create cancel message");
-    swage_agent::cancel::handle_cancel(
-        storage.as_ref(),
-        &cancel,
-        Some(&handler.active_delegations),
-    )
-    .await
-    .expect("active-registry cancel should succeed");
+        .expect("active-registry cancel should succeed");
+    }
 
     let mut child_turns = Vec::new();
     for _ in 0..20 {
@@ -19675,10 +19730,6 @@ async fn secret_refs_stay_out_of_snapshots_and_persisted_tool_arguments() {
             })
         }
 
-        fn sensitive_keys(&self) -> &[&str] {
-            &["secret"]
-        }
-
         fn device_secret_keys(&self) -> &[&str] {
             &["secret"]
         }
@@ -20224,6 +20275,7 @@ async fn sandbox_degradation_approval_uses_resolved_hitl_settings() {
     let mut turn_config = state.config.clone();
     turn_config.hitl.timeout = 7;
     turn_config.hitl.timeout_policy = swage_core::ApprovalTimeoutPolicy::Interrupt;
+    let mut signals = state.broadcast.subscribe();
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel_token = CancellationToken::new();
@@ -20235,6 +20287,7 @@ async fn sandbox_degradation_approval_uses_resolved_hitl_settings() {
             SandboxDegradationApprovalRequest {
                 config: &turn_config,
                 ws_tx: &tx,
+                session_id,
                 turn_id: turn.id,
                 agent_id: "gateway",
                 prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
@@ -20285,6 +20338,14 @@ async fn sandbox_degradation_approval_uses_resolved_hitl_settings() {
         .expect("approval task should finish")
         .expect("approval should succeed");
     assert_eq!(outcome, SandboxDegradationApproval::Approved);
+    // Views of running work hear the request arrive and its answer.
+    let session_signals = std::iter::from_fn(|| signals.try_recv().ok())
+        .filter(|event| matches!(event, ServerEvent::SessionUpdated { session_id: id } if *id == session_id))
+        .count();
+    assert_eq!(
+        session_signals, 2,
+        "one signal for the request, one for its answer"
+    );
 }
 
 #[tokio::test]
@@ -20314,6 +20375,7 @@ async fn sandbox_degradation_rejection_refuses_the_attended_fallback() {
             SandboxDegradationApprovalRequest {
                 config: &turn_config,
                 ws_tx: &tx,
+                session_id,
                 turn_id: turn.id,
                 agent_id: "gateway",
                 prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
@@ -20374,6 +20436,7 @@ async fn sandbox_degradation_approval_preserves_cancelled_wait() {
             SandboxDegradationApprovalRequest {
                 config: &turn_config,
                 ws_tx: &tx,
+                session_id,
                 turn_id: turn.id,
                 agent_id: "gateway",
                 prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
@@ -20435,6 +20498,7 @@ async fn sandbox_degradation_timeout_interrupts_and_cleans_channel() {
             SandboxDegradationApprovalRequest {
                 config: &turn_config,
                 ws_tx: &tx,
+                session_id,
                 turn_id: turn.id,
                 agent_id: "gateway",
                 prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
@@ -21823,6 +21887,7 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
                 base_url: Some(base_url.clone()),
                 command: None,
                 state_dir: None,
+                plaintext_credentials: Default::default(),
             },
         );
     }
@@ -21847,7 +21912,8 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
     let secret_manager = crate::secret::SecretManager::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
     );
-    let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
+    let runtime_provider =
+        crate::startup::create_provider(&config, &secret_manager, storage.as_ref()).await;
     let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
@@ -21976,7 +22042,8 @@ async fn assert_topic_provider_route(override_kind: &str) {
     let scope = topic.location();
     let config = swage_config::load_resolved_config_from(root.path(), &scope, "gateway").unwrap();
     let secret_manager = crate::secret::SecretManager::new(storage.clone());
-    let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
+    let runtime_provider =
+        crate::startup::create_provider(&config, &secret_manager, storage.as_ref()).await;
     let state = AppState::new_with_config_root(
         storage.clone(),
         storage.clone(),
@@ -22145,6 +22212,7 @@ async fn turn_against_single_provider(
             base_url: Some(base_url.to_string()),
             command: None,
             state_dir: None,
+            plaintext_credentials: Default::default(),
         },
     );
     config.providers.default = "configured-endpoint".into();
@@ -22160,7 +22228,8 @@ async fn turn_against_single_provider(
     let secret_manager = crate::secret::SecretManager::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
     );
-    let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
+    let runtime_provider =
+        crate::startup::create_provider(&config, &secret_manager, storage.as_ref()).await;
     let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,

@@ -20,7 +20,6 @@ function store(status: ConnectionStore["status"]): ConnectionStore {
     connectTo: () => {},
     disconnect: () => {},
     sendMessage: () => {},
-    cancelTurn: () => {},
     onServerEvent: () => {},
   } as ConnectionStore;
 }

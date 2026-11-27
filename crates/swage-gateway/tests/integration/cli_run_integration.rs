@@ -71,7 +71,6 @@ impl VoiceProvider for MockVoiceProvider {
         VoiceCapabilities {
             transcription: true,
             synthesis: true,
-            synthesis_unverified: false,
             default_voice: Some("nova".to_string()),
             supported_voices: vec!["nova".to_string()],
             unavailable_reason: None,
@@ -292,198 +291,232 @@ async fn run_command_rejects_audio_input_when_voice_support_is_unavailable() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn run_audio_output_checks_fresh_speech_and_returns_provider_failures() {
-    use axum::{http::StatusCode, routing::post};
-    use swage_provider::{OpenAiVoiceProvider, ProviderConfig, voice::VoiceModelRoutes};
-
-    for (status, body, remains_unchecked) in [
-        (StatusCode::OK, "RIFF working audio", false),
-        (StatusCode::NOT_FOUND, "speech model missing upstream", true),
-        (
-            StatusCode::NOT_FOUND,
-            r#"{"error":{"code":"model_not_found"}}"#,
-            false,
-        ),
-    ] {
-        let upstream = start_live_server(
-            Router::new().route("/audio/speech", post(move || async move { (status, body) })),
-        )
-        .await
-        .0;
-        let voice = Arc::new(OpenAiVoiceProvider::new(
-            ProviderConfig::new("key", "chat", format!("http://{upstream}")),
-            VoiceModelRoutes {
-                speech_model: Some("speech".into()),
-                transcription_model: None,
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_pairs_once_and_remembers_headers_for_http_and_websocket() {
+    use axum::{extract::ConnectInfo, middleware};
+    use swage_gateway::access_gate::AccessGate;
+    let root = crate::support::scratch_tempdir();
+    let client_root = root.path().join("client");
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let provider = Arc::new(MockProvider::new(vec![]));
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    let mut state = AppState::new_with_config_root(
+        storage.clone(),
+        storage,
+        provider.clone(),
+        config,
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().join("gateway"),
+    );
+    std::fs::create_dir_all(&state.config_root).unwrap();
+    state.access_gate = Arc::new(AccessGate::for_binding(&state.config_root, "0.0.0.0").unwrap());
+    let code = state.access_gate.issue_pairing_code().pairing_code;
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = observed.clone();
+    // The transport is loopback for isolation; exercise the LAN admission path
+    // by presenting the same remote peer to both HTTP and upgrade middleware.
+    let router = build_router(state).layer(middleware::from_fn(
+        move |mut request: axum::extract::Request, next: middleware::Next| {
+            let capture = capture.clone();
+            async move {
+                capture.lock().unwrap().push((
+                    request.uri().path().to_string(),
+                    request
+                        .headers()
+                        .get("X-Swage-Token")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned),
+                ));
+                request.extensions_mut().insert(ConnectInfo(
+                    "192.0.2.10:4567".parse::<SocketAddr>().unwrap(),
+                ));
+                next.run(request).await
+            }
+        },
+    ));
+    let address = format!("http://{}", start_live_server(router).await.0);
+    for first in [true, false] {
+        *provider.chunks.lock().unwrap() = vec![
+            StreamChunk::Delta {
+                content: "paired".into(),
             },
-        ));
-        assert!(!voice.capabilities().synthesis);
-        let addr = start_test_server(
-            MockProvider::new(vec![
-                StreamChunk::Delta {
-                    content: "hello".into(),
-                },
-                StreamChunk::Done {
-                    finish_reason: None,
-                },
-            ]),
-            Some(voice.clone()),
-        )
-        .await;
-        let unchecked: serde_json::Value =
-            reqwest::get(format!("http://{addr}/api/voice/capabilities"))
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("reply.wav");
-        let output = Command::new(env!("CARGO_BIN_EXE_swage"))
-            .env("SWAGE_HOME", dir.path())
-            .env("XDG_RUNTIME_DIR", dir.path())
-            .args([
-                "run",
-                "--url",
-                &format!("http://{addr}"),
-                "--audio-output",
-                path.to_str().unwrap(),
-                "hello",
-            ])
-            .output()
-            .unwrap();
-        if status.is_success() {
-            assert!(
-                output.status.success(),
-                "fresh speech must write audio: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(unchecked["synthesis_unverified"], true);
-            assert_eq!(unchecked["synthesis"], false);
-            assert_eq!(std::fs::read(&path).unwrap(), body.as_bytes());
-            assert!(voice.capabilities().synthesis);
-        } else {
-            assert!(!output.status.success());
-            assert!(
-                String::from_utf8_lossy(&output.stderr).contains(body),
-                "CLI must return the provider's reason: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(!path.exists());
-            assert!(!voice.capabilities().synthesis);
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ];
+        let mut command = Command::new(env!("CARGO_BIN_EXE_swage"));
+        command
+            .env("SWAGE_HOME", &client_root)
+            .env("XDG_RUNTIME_DIR", root.path().join("run"))
+            .args(["run", "--url", &address]);
+        if first {
+            command.args(["--pairing-code", &code]);
         }
-        let checked: serde_json::Value =
-            reqwest::get(format!("http://{addr}/api/voice/capabilities"))
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-        assert_eq!(checked["synthesis_unverified"], remains_unchecked);
-        assert_eq!(checked["synthesis"], status.is_success());
+        let output = command.arg("hello").stdin(Stdio::null()).output().unwrap();
+        assert!(
+            output.status.success(),
+            "CLI run refused: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "paired\n");
     }
+    let requests = observed.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(path, _)| path == "/api/pair")
+            .count(),
+        1
+    );
+    let conversation_requests: Vec<_> = requests
+        .iter()
+        .filter(|(path, _)| path.starts_with("/api/conversations"))
+        .collect();
+    assert_eq!(
+        conversation_requests.len(),
+        4,
+        "two creates and two upgrades"
+    );
+    assert!(
+        conversation_requests
+            .iter()
+            .all(|(_, token)| token.is_some()),
+        "every conversation request must carry the remembered token"
+    );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn run_audio_output_rechecks_unverified_speech_but_refuses_stored_failures() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use axum::{http::StatusCode, routing::post};
-    use swage_provider::{OpenAiVoiceProvider, ProviderConfig, voice::VoiceModelRoutes};
-
-    for failed in [false, true] {
-        let requests = Arc::new(AtomicUsize::new(0));
-        let count = requests.clone();
-        let upstream = start_live_server(Router::new().route(
-            "/audio/speech",
-            post(move || {
-                let index = count.fetch_add(1, Ordering::SeqCst);
-                async move {
-                    match index {
-                        0 if failed => {
-                            (StatusCode::UNAUTHORIZED, "original authentication failure")
-                        }
-                        1 => (StatusCode::BAD_REQUEST, "Voice example does not exist"),
-                        _ => (StatusCode::OK, "RIFF working audio"),
-                    }
-                }
-            }),
-        ))
-        .await
-        .0;
-        let voice = Arc::new(OpenAiVoiceProvider::new(
-            ProviderConfig::new("key", "chat", format!("http://{upstream}")),
-            VoiceModelRoutes {
-                speech_model: Some("speech".into()),
-                transcription_model: Some("transcription".into()),
+/// Run `swage run` unpaired against a gated LAN binding with no terminal,
+/// with a fresh pairing code on the command line when `with_code`. Returns
+/// the output, the request paths the gateway saw, and whether the client
+/// remembered a pairing.
+async fn run_unpaired_without_terminal(
+    mode: swage_protocol::client::access::AccessGateMode,
+    with_code: bool,
+) -> (std::process::Output, Vec<String>, bool) {
+    use axum::{extract::ConnectInfo, middleware};
+    use swage_gateway::access_gate::AccessGate;
+    let root = crate::support::scratch_tempdir();
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.server.access = mode;
+    let mut state = AppState::new_with_config_root(
+        storage.clone(),
+        storage,
+        Arc::new(MockProvider::new(vec![
+            StreamChunk::Delta {
+                content: "proceeded".into(),
             },
-        ));
-        let request = || SpeechRequest {
-            text: "hello".into(),
-            voice: None,
-            format: None,
-        };
-        assert_eq!(voice.synthesise(request()).await.is_err(), failed);
-        voice.synthesise(request()).await.unwrap_err();
-        let before = voice.capabilities();
-        assert!(!before.synthesis);
-        assert_eq!(before.synthesis_unverified, !failed);
-        let addr = start_test_server(
-            MockProvider::new(vec![
-                StreamChunk::Delta {
-                    content: "hello".into(),
-                },
-                StreamChunk::Done {
-                    finish_reason: None,
-                },
-            ]),
-            Some(voice.clone()),
-        )
-        .await;
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("reply.wav");
-        let output = Command::new(env!("CARGO_BIN_EXE_swage"))
-            .env("SWAGE_HOME", root.path())
-            .env("XDG_RUNTIME_DIR", root.path())
-            .args([
-                "run",
-                "--url",
-                &format!("http://{addr}"),
-                "--audio-output",
-                path.to_str().unwrap(),
-                "hello",
-            ])
-            .output()
-            .unwrap();
-        if failed {
-            assert!(!output.status.success());
-            assert!(
-                String::from_utf8_lossy(&output.stderr)
-                    .contains(before.unavailable_reason.as_deref().unwrap())
-            );
-            assert!(!path.exists());
-            assert_eq!(voice.capabilities(), before);
-            assert_eq!(
-                requests.load(Ordering::SeqCst),
-                2,
-                "known failure must be refused before another speech request"
-            );
-        } else {
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(std::fs::read(&path).unwrap(), b"RIFF working audio");
-            assert!(voice.capabilities().synthesis);
-            assert!(!voice.capabilities().synthesis_unverified);
-            assert_eq!(voice.capabilities().unavailable_reason, None);
-            assert_eq!(
-                requests.load(Ordering::SeqCst),
-                3,
-                "unchecked speech must be requested again"
-            );
-        }
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ])),
+        config,
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().join("gateway"),
+    );
+    std::fs::create_dir_all(&state.config_root).unwrap();
+    state.access_gate = Arc::new(AccessGate::for_binding(&state.config_root, "0.0.0.0").unwrap());
+    let code = with_code.then(|| state.access_gate.issue_pairing_code().pairing_code);
+    let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = paths.clone();
+    let router = build_router(state).layer(middleware::from_fn(
+        move |mut request: axum::extract::Request, next: middleware::Next| {
+            let capture = capture.clone();
+            async move {
+                capture
+                    .lock()
+                    .unwrap()
+                    .push(request.uri().path().to_owned());
+                request.extensions_mut().insert(ConnectInfo(
+                    "192.0.2.10:4567".parse::<SocketAddr>().unwrap(),
+                ));
+                next.run(request).await
+            }
+        },
+    ));
+    let address = format!("http://{}", start_live_server(router).await.0);
+    let access: serde_json::Value = reqwest::get(format!("{address}/api/access"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(access["admitted"], false);
+    let mut command = Command::new("setsid");
+    command
+        .arg(env!("CARGO_BIN_EXE_swage"))
+        .args(["run", "--url", &address]);
+    if let Some(code) = &code {
+        command.args(["--pairing-code", code]);
     }
+    let mut child = command
+        .env("SWAGE_HOME", root.path().join("client"))
+        .env("XDG_RUNTIME_DIR", root.path().join("runtime"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"summarise this\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let paths = paths.lock().unwrap().clone();
+    let remembered = root.path().join("client/client-pairings.json").exists();
+    (output, paths, remembered)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_warn_mode_does_not_require_pairing() {
+    let (output, paths, remembered) =
+        run_unpaired_without_terminal(swage_protocol::client::access::AccessGateMode::Warn, false)
+            .await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "warn mode must proceed without pairing: {stderr}"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "proceeded\n");
+    assert!(!stderr.contains("Pair this client"));
+    assert!(!paths.iter().any(|path| path == "/api/pair"));
+    assert!(!remembered);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_warn_mode_pairs_with_a_given_code_and_remembers_it() {
+    let (output, paths, remembered) =
+        run_unpaired_without_terminal(swage_protocol::client::access::AccessGateMode::Warn, true)
+            .await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "warn mode run failed: {stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "proceeded\n");
+    assert_eq!(
+        paths.iter().filter(|path| *path == "/api/pair").count(),
+        1,
+        "a code given while the gate warns must be redeemed"
+    );
+    assert!(remembered, "the redeemed token must be remembered");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_token_mode_with_piped_prompt_requires_explicit_pairing_without_terminal() {
+    let (output, paths, _) =
+        run_unpaired_without_terminal(swage_protocol::client::access::AccessGateMode::Token, false)
+            .await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("--pairing-code"),
+        "missing named refusal: {stderr}"
+    );
+    assert!(
+        !paths.iter().any(|path| path == "/api/pair"),
+        "prompt must not be submitted as a pairing code"
+    );
 }

@@ -166,6 +166,7 @@ describe("parseRoute", () => {
       settingsMemoryPage: null,
       notFound: false,
     });
+    expect(parseRoute("/settings/topic/research/security").settingsTopicTab).toBe("security");
     expect(parseRoute("/settings/topic/research/surfaces")).toEqual({
       path: "/settings/topic/research/surfaces",
       conversationId: null,

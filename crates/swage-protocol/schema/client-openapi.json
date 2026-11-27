@@ -13,6 +13,48 @@
       }
     },
     "schemas": {
+      "AccessGateMode": {
+        "description": "How the gateway gates requests from beyond loopback.",
+        "oneOf": [
+          {
+            "const": "token",
+            "description": "A request without the token is refused. The shipped default.",
+            "type": "string"
+          },
+          {
+            "const": "warn",
+            "description": "A request without the token is admitted and logged.",
+            "type": "string"
+          },
+          {
+            "const": "off",
+            "description": "Requests are admitted without a token.",
+            "type": "string"
+          }
+        ]
+      },
+      "AccessStatusResponse": {
+        "description": "Whether the connection the request arrived on is admitted, and why: the\nweb UI reads it to decide whether to ask for a pairing code.",
+        "properties": {
+          "admitted": {
+            "description": "Whether this request carried the token, or came from loopback.",
+            "type": "boolean"
+          },
+          "gated": {
+            "description": "Whether the gate applies to this gateway's binding at all.",
+            "type": "boolean"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/AccessGateMode"
+          }
+        },
+        "required": [
+          "gated",
+          "mode",
+          "admitted"
+        ],
+        "type": "object"
+      },
       "AnswerWorkflowRunHoldResponse": {
         "properties": {
           "hold": {
@@ -550,19 +592,6 @@
               "type",
               "approval_id",
               "decision"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Cancel the currently active turn.",
-            "properties": {
-              "type": {
-                "const": "cancel",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type"
             ],
             "type": "object"
           },
@@ -1893,6 +1922,31 @@
         ],
         "type": "object"
       },
+      "EffectiveSecurityChecks": {
+        "description": "The security checks as a session in the scope runs under them.",
+        "properties": {
+          "access_gate": {
+            "$ref": "#/components/schemas/AccessGateMode",
+            "description": "How a binding beyond loopback gates requests; loopback is never gated."
+          },
+          "require_approval": {
+            "description": "The tools an attended session is asked about before they run.",
+            "items": {
+              "$ref": "#/components/schemas/RequireApprovalEntry"
+            },
+            "type": "array"
+          },
+          "sandbox_enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sandbox_enabled",
+          "require_approval",
+          "access_gate"
+        ],
+        "type": "object"
+      },
       "Effort": {
         "description": "Reasoning effort as the user means it: one provider-neutral intent,\nordered lowest to highest, resolved per model against that model's\ndeclared [`EffortCapability`] before anything reaches a provider.",
         "oneOf": [
@@ -2051,6 +2105,11 @@
           {
             "const": "validation_error",
             "description": "The body parsed but failed validation — a missing or unknown field,\na value outside its contract.",
+            "type": "string"
+          },
+          {
+            "const": "unauthorised",
+            "description": "The request reached a gateway bound beyond loopback without its\ntoken; a client pairs once and is admitted thereafter.",
             "type": "string"
           },
           {
@@ -3198,6 +3257,57 @@
         ],
         "type": "object"
       },
+      "PairClientRequest": {
+        "additionalProperties": false,
+        "description": "Redeem a pairing code for the gateway's token.",
+        "properties": {
+          "pairing_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pairing_code"
+        ],
+        "type": "object"
+      },
+      "PairClientResponse": {
+        "description": "The paired client's token. The gateway also sets it as the `swage_token`\ncookie, so a browser's later requests and WebSocket connections carry it\nwithout the page keeping it anywhere.",
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
+      "PairingCodeResponse": {
+        "description": "A one-time pairing code, issued from the gateway's own machine.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "pairing_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pairing_code",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "PlaintextCredentialPolicy": {
+        "description": "What a provider does with a request that would carry its credential over\nplain `http://` to an address that is not loopback: refuse every request,\nsend after one recorded warning, or send silently.",
+        "enum": [
+          "refuse",
+          "warn",
+          "allow"
+        ],
+        "type": "string"
+      },
       "PostWorkflowRunEventRequest": {
         "properties": {
           "kind": {
@@ -3416,6 +3526,18 @@
           "has_credential": {
             "type": "boolean"
           },
+          "plaintext_credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaintextCredentialPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The provider's plaintext-credential policy; `warn` when unset."
+          },
           "protocol": {
             "$ref": "#/components/schemas/ProviderProtocol"
           },
@@ -3602,6 +3724,10 @@
               "null"
             ]
           },
+          "awaiting_approval": {
+            "description": "The running turn is held on a request only the person can answer.",
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -3662,7 +3788,8 @@
           "created_at",
           "last_activity",
           "has_interrupted_turn",
-          "has_running_turn"
+          "has_running_turn",
+          "awaiting_approval"
         ],
         "type": "object"
       },
@@ -3852,6 +3979,28 @@
         ],
         "type": "object"
       },
+      "RelaxedCheck": {
+        "description": "One check standing below the shipped default, and where it was relaxed.",
+        "properties": {
+          "check": {
+            "$ref": "#/components/schemas/SecurityCheck"
+          },
+          "detail": {
+            "description": "What the relaxation is, in the settings page's own words.",
+            "type": "string"
+          },
+          "relaxed_by": {
+            "$ref": "#/components/schemas/SettingsScope",
+            "description": "The scope whose settings relaxed it: a topic's own override, or the\ninstall's configuration the topic inherits."
+          }
+        },
+        "required": [
+          "check",
+          "relaxed_by",
+          "detail"
+        ],
+        "type": "object"
+      },
       "RelinkWorkspaceAttachmentRequest": {
         "properties": {
           "path": {
@@ -3991,6 +4140,18 @@
               "null"
             ]
           },
+          "plaintext_credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaintextCredentialPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The provider's plaintext-credential policy; left out, the running\nvalue stands (`warn` for a new provider)."
+          },
           "protocol": {
             "$ref": "#/components/schemas/ProviderProtocol"
           },
@@ -4014,6 +4175,39 @@
         "required": [
           "protocol"
         ],
+        "type": "object"
+      },
+      "SaveSecuritySettingsRequest": {
+        "additionalProperties": false,
+        "description": "Changes to a scope's security overrides. Absent fields leave stored\noverrides unchanged; explicit null clears an override so the scope\nbeneath decides again. A supplied approval list replaces that list.",
+        "properties": {
+          "access_gate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccessGateMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Install scope only; a topic's request carrying it is refused."
+          },
+          "require_approval": {
+            "items": {
+              "$ref": "#/components/schemas/RequireApprovalEntry"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "sandbox_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "SaveSettingsRequest": {
@@ -4120,17 +4314,6 @@
             },
             "type": "object"
           },
-          "sandbox": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SandboxConfig"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null
-          },
           "sessions": {
             "anyOf": [
               {
@@ -4145,7 +4328,7 @@
           "tool_permissions": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ToolPermissionConfig"
+                "$ref": "#/components/schemas/ToolGrantSettings"
               },
               {
                 "type": "null"
@@ -4712,6 +4895,94 @@
         ],
         "type": "object"
       },
+      "SecurityCheck": {
+        "description": "The shipped security checks a scope can relax.",
+        "oneOf": [
+          {
+            "const": "sandbox",
+            "description": "The per-turn sandbox around shell, Python and file tools.",
+            "type": "string"
+          },
+          {
+            "const": "approval_prompts",
+            "description": "Approval prompts before the high-risk tools run in attended sessions.",
+            "type": "string"
+          },
+          {
+            "const": "access_gate",
+            "description": "The token a client must carry to reach a gateway bound beyond\nloopback. Install-wide: it admits a client before any topic is chosen.",
+            "type": "string"
+          }
+        ]
+      },
+      "SecurityOverrides": {
+        "additionalProperties": false,
+        "description": "What one scope's own configuration says. Each field is absent where the\nscope leaves the setting to the scope beneath it (a topic to the install,\nthe install to the shipped default).",
+        "properties": {
+          "access_gate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccessGateMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Install scope only; a topic's request carrying it is refused."
+          },
+          "require_approval": {
+            "items": {
+              "$ref": "#/components/schemas/RequireApprovalEntry"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "sandbox_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "SecuritySettingsResponse": {
+        "description": "A scope's security settings as the settings surface reads them.",
+        "properties": {
+          "available_tools": {
+            "description": "Tools currently registered with the gateway, available to the approval picker.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "effective": {
+            "$ref": "#/components/schemas/EffectiveSecurityChecks"
+          },
+          "overrides": {
+            "$ref": "#/components/schemas/SecurityOverrides"
+          },
+          "relaxed": {
+            "items": {
+              "$ref": "#/components/schemas/RelaxedCheck"
+            },
+            "type": "array"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/SettingsScope"
+          }
+        },
+        "required": [
+          "available_tools",
+          "scope",
+          "effective",
+          "overrides",
+          "relaxed"
+        ],
+        "type": "object"
+      },
       "SendMessageRequest": {
         "properties": {
           "correlation_id": {
@@ -4938,6 +5209,24 @@
             "type": "object"
           },
           {
+            "description": "A workflow run started, parked on a durable wait, or ended. Views of\nrunning work refetch; the event is the signal, not the content.",
+            "properties": {
+              "run_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "workflow_run_updated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A session row may have changed or entered or left a list. Refetch\nsession lists to read the current rows from the gateway.",
             "properties": {
               "session_id": {
@@ -4952,6 +5241,19 @@
             "required": [
               "type",
               "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Agent pickers refetch their effective definitions after a mutation.",
+            "properties": {
+              "type": {
+                "const": "agent_definitions_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           },
@@ -5939,6 +6241,42 @@
         ],
         "type": "object"
       },
+      "SettingsScope": {
+        "description": "The scope a set of security settings belongs to.",
+        "oneOf": [
+          {
+            "description": "The install: the global configuration every session starts from.",
+            "properties": {
+              "kind": {
+                "const": "install",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One topic: its configuration overlays the install's for its sessions.",
+            "properties": {
+              "kind": {
+                "const": "topic",
+                "type": "string"
+              },
+              "topic_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "topic_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SignInMethod": {
         "enum": [
           "browser",
@@ -6641,6 +6979,38 @@
         ],
         "type": "string"
       },
+      "ToolGrantSettings": {
+        "description": "Tool grants editable through general settings; approval requirements belong\nto the scoped security settings.",
+        "properties": {
+          "allow": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "bundles": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "deny": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "allow",
+          "deny",
+          "bundles"
+        ],
+        "type": "object"
+      },
       "ToolOutcome": {
         "description": "What the dispatcher established about a call, independently of its payload.",
         "enum": [
@@ -7154,16 +7524,11 @@
           "synthesis": {
             "type": "boolean"
           },
-          "synthesis_unverified": {
-            "default": false,
-            "description": "Whether the configured speech model's availability is still unverified.",
-            "type": "boolean"
-          },
           "transcription": {
             "type": "boolean"
           },
           "unavailable_reason": {
-            "description": "Why transcription or synthesis is unavailable, naming what to\nconfigure; absent when both are available.",
+            "description": "Why transcription or synthesis is unavailable. Absent when both are available.",
             "type": [
               "string",
               "null"
@@ -10259,6 +10624,28 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/access": {
+      "get": {
+        "operationId": "access_status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessStatusResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Whether the gateway gates this connection and whether it is admitted."
+      }
+    },
     "/api/channels": {
       "get": {
         "operationId": "list_channel_statuses",
@@ -10458,6 +10845,31 @@
           }
         },
         "summary": "Branch a conversation at an earlier message into a sibling thread."
+      }
+    },
+    "/api/conversations/{id}/cancel": {
+      "post": {
+        "operationId": "cancel_conversation_turn",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Success, no body."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Stop the conversation's running turn, whichever client holds its connection."
       }
     },
     "/api/docs": {
@@ -10689,6 +11101,60 @@
           }
         },
         "summary": "Issue a single-use channel link code."
+      }
+    },
+    "/api/pair": {
+      "post": {
+        "operationId": "pair_client",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairClientRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairClientResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Redeem a pairing code for the gateway's token, set as the browser's cookie."
+      }
+    },
+    "/api/pair/codes": {
+      "post": {
+        "operationId": "issue_pairing_code",
+        "parameters": [],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingCodeResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Issue a one-time pairing code; loopback only."
       }
     },
     "/api/secrets": {
@@ -11104,6 +11570,58 @@
           }
         },
         "summary": "Read restart status."
+      }
+    },
+    "/api/settings/security": {
+      "get": {
+        "operationId": "get_install_security_settings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecuritySettingsResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read the install's security checks: effective, overrides and relaxations."
+      },
+      "put": {
+        "operationId": "save_install_security_settings",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSecuritySettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecuritySettingsResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Replace the install's security overrides."
       }
     },
     "/api/surface-annotations/{annotation_id}": {
@@ -11804,6 +12322,78 @@
           }
         },
         "summary": "Update a topic's name or description."
+      }
+    },
+    "/api/topics/{id}/settings/security": {
+      "get": {
+        "operationId": "get_topic_security_settings",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecuritySettingsResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read a topic's security checks: effective, overrides and relaxations."
+      },
+      "put": {
+        "operationId": "save_topic_security_settings",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSecuritySettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecuritySettingsResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Replace a topic's security overrides."
       }
     },
     "/api/topics/{topic_id}/default-surfaces": {

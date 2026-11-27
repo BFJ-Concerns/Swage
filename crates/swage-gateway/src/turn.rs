@@ -65,6 +65,7 @@ mod succession;
 mod turn_input;
 pub(crate) mod turn_release;
 mod workspace;
+pub(crate) use workspace::expand_require_approval_entries;
 
 pub(crate) use configuration::*;
 pub(crate) use context::*;
@@ -334,7 +335,6 @@ pub(super) async fn process_turn_with_composition_and_focus(
         let mut turns = state.active_turns.lock().await;
         turns.insert(session_id, cancel_token.clone());
     }
-
     // A turn is active execution: an archived session it lands on returns
     // to the recent list now, before anything else the turn does. Always
     // asked, not gated on the row read above — a sweep between that read

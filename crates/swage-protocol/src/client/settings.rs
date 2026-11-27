@@ -126,6 +126,17 @@ impl EffortCapability {
     }
 }
 
+/// What a provider does with a request that would carry its credential over
+/// plain `http://` to an address that is not loopback: refuse every request,
+/// send after one recorded warning, or send silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaintextCredentialPolicy {
+    Refuse,
+    Warn,
+    Allow,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderProtocol {
@@ -156,6 +167,10 @@ pub struct ProviderSettings {
     pub has_credential: bool,
     pub command: Option<String>,
     pub state_dir: Option<PathBuf>,
+    /// The provider's plaintext-credential policy; `warn` when unset.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub plaintext_credentials: Option<PlaintextCredentialPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -180,6 +195,11 @@ pub struct SaveProviderSettings {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub state_dir: Option<PathBuf>,
+    /// The provider's plaintext-credential policy; left out, the running
+    /// value stands (`warn` for a new provider).
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub plaintext_credentials: Option<PlaintextCredentialPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -618,6 +638,16 @@ pub struct SettingsResponse {
     pub can_restart: bool,
 }
 
+/// Tool grants editable through general settings; approval requirements belong
+/// to the scoped security settings.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
+pub struct ToolGrantSettings {
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub bundles: BTreeMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct SaveSettingsRequest {
@@ -633,13 +663,10 @@ pub struct SaveSettingsRequest {
     pub tool_runtime: Option<ToolRuntimeSettings>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
-    pub tool_permissions: Option<ToolPermissionConfig>,
+    pub tool_permissions: Option<ToolGrantSettings>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub hitl: Option<HitlConfig>,
-    #[serde(default)]
-    #[ts(optional, as = "Option<_>")]
-    pub sandbox: Option<SandboxConfig>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub context: Option<ContextConfig>,

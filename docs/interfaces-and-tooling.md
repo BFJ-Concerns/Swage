@@ -48,13 +48,55 @@ is already in use, the gateway exits with a diagnostic. The runtime-metadata
 file written for CLI discovery records the actual bound address, which may
 differ from the configured one when port `0` (OS-assigned) is used.
 
-### Security boundary
+### Pairing beyond loopback
 
-The gateway has no authentication layer. Binding to any address other than
-loopback exposes the full API — including every configured provider key — to
-every host that can reach the port. The intended use is trusted
-private-network addresses (a LAN segment, a tailnet, or similar).
-Public-internet binding is not supported until authentication exists.
+Bound to loopback, the gateway asks nothing of a request. Bound to any other
+address, it serves a request from another machine only when the request
+carries the gateway's token; requests from the gateway's own machine —
+over loopback, or from the one address it is bound to — never need it.
+Liveness (`/api/health`), the access status (`/api/access`) and pairing
+itself (`/api/pair`) answer anyone, and the web UI's own files load
+unpaired so the page can ask to pair. A device's link
+(`/api/devices/connect`) needs no gateway token either: the device proves
+itself with its registered shared token, and the gateway refuses the link
+without it.
+
+The gateway generates the token on its first start, in `gateway-token` in
+the data root, readable only by its owner. A client gets it by pairing
+once:
+
+1. On the gateway's machine, run `swage gateway pair`. It prints a one-time
+   code that expires after ten minutes; codes are issued only to requests
+   from that machine.
+2. Enter the code on the other device:
+   - **Web UI** — the page shows a pairing prompt when the gateway refuses
+     it. Pairing sets a cookie the browser keeps for 400 days.
+   - **Command line** — `swage run --url http://<gateway>:<port>` asks for
+     the code on its terminal, or takes it as `--pairing-code <code>`.
+   - **Desktop app** — it shows the web UI's pairing prompt when it opens a
+     network gateway unpaired.
+
+Each client remembers the token for that gateway and sends it with every
+request, HTTP and WebSocket alike: the command line in `client-pairings.json`
+in its own data root (`SWAGE_HOME`, by default `~/.swage`), the desktop app
+in `gateway-pairings.json` in its profile directory, and the browser as its
+cookie. Nothing is asked again.
+
+The gate is one setting for the whole install, `[server] access`, set under
+**Settings → Security**:
+
+| Value | A request from another machine without the token |
+|---|---|
+| `token` (default) | is refused with `401` |
+| `warn` | is admitted and logged as a warning |
+| `off` | is admitted |
+
+A change applies at once, without a restart, and is recorded in the audit
+trail when it is saved. A client given a pairing code while the gate warns
+still pairs, so it stays admitted when the gate goes back to `token`.
+
+The gate is not authentication for the public internet: bind only to a
+trusted private network, such as a LAN segment or a tailnet.
 
 The host machine's own firewall must also permit inbound connections on the
 chosen port — a correctly bound gateway is unreachable from the LAN if the
@@ -271,6 +313,24 @@ A provider entry has two credential fields, checked in order:
    of tool results still applies.
 
 When both are set, `api_key_secret_ref` wins.
+
+A credential travels in plaintext when the provider's `base_url` is
+`http://` and names an address other than this machine's loopback: anyone
+on the path can read it. A local model server on `localhost` or `127.0.0.1`
+is never plaintext in this sense, and needs no setting. For a remote
+`http://` endpoint the provider entry's `plaintext_credentials` decides what
+happens, judged when the provider is built:
+
+- `warn` (the default) — requests are sent, after one warning for the
+  provider in the audit record (event kind `provider_credential_exposure`).
+  A rebuild of the same provider finds the warning and adds none; if the
+  warning cannot be recorded, nothing is sent.
+- `refuse` — nothing is sent: every request fails with the reason, and the
+  refusal is recorded once.
+- `allow` — requests are sent and nothing is recorded.
+
+A provider with no credential is never judged. The voice provider shares
+the default provider's route and follows the same setting.
 
 The built-in Codex app server (`protocol = "codex"`) is temporarily
 disabled: a configuration naming it does not load, until Swage can ask you
@@ -831,9 +891,7 @@ links and verifies it against the version and checksum pinned in
 `v8` crate's build script. The pin must match the `v8` package Cargo.lock
 resolves, so a dependency upgrade that moves V8 fails the fetch until the
 pin is updated on purpose. The prebuilt archive is pinned for x86-64 Linux
-with glibc. To compile the locked engine from source, install the [rusty_v8
-build prerequisites](https://github.com/denoland/rusty_v8#building-from-source)
-and run `V8_FROM_SOURCE=1 cargo build --locked --bin swage`.
+with glibc.
 
 Other useful recipes:
 
@@ -844,6 +902,15 @@ Other useful recipes:
   behaviour as the verify gate.
 - `just build-dev-embedded` — a debug build with the current frontend baked
   into the gateway binary.
+
+### Building V8 from source
+
+The experimental source build uses Cargo directly. After installing the
+[rusty_v8 build prerequisites](https://github.com/denoland/rusty_v8#building-from-source),
+run `V8_FROM_SOURCE=1 cargo build --locked --bin swage`. On x86-64 Linux
+with glibc, the locked V8 crate's source build stops because Ninja cannot
+find its ICU data file (`icudtl.dat`). Support for other targets remains
+unverified.
 
 ## Client-side route handling
 
@@ -892,11 +959,11 @@ audio. `GET /api/voice/capabilities` returns:
 
 - **`transcription`** and **`synthesis`** — booleans for whether speech-to-text
   and text-to-speech are available.
-- **`unavailable_reason`** — when either capability is off, the reason and
-  what to address: the default provider may be absent, its credentials
-  unavailable, its protocol incompatible (only OpenAI-protocol providers
-  serve audio), or a `[voice]` model id may be unset. Absent when both
-  capabilities are available.
+- **`unavailable_reason`** — why either capability is unavailable. It can
+  identify a missing default provider, unavailable credentials, an
+  incompatible provider protocol, an unset `[voice]` model id or a speech
+  model that has yet to be checked. After a speech request fails, it reports
+  the provider error. The field is absent when both capabilities are available.
 - **`default_voice`** and **`supported_voices`** — the default synthesis
   voice and the available voice list. The OpenAI provider reports both
   regardless of whether synthesis is configured.
@@ -904,8 +971,11 @@ audio. `GET /api/voice/capabilities` returns:
 The two audio routes — `POST /api/voice/transcriptions` and
 `POST /api/voice/speech` — send requests to the default provider's
 OpenAI-protocol audio endpoints using the model ids configured in `[voice]`.
-A request to an unavailable capability returns a 422 validation error. See
-[Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
+The transcription route returns a 422 validation error when transcription
+is unavailable. The speech route accepts requests before synthesis is
+advertised, so a caller can check the model or retry after a failure.
+A successful speech request makes synthesis available.
+See [Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
 for the configuration keys.
 
 ## Gateway tools

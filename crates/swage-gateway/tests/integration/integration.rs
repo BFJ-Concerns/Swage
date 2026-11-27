@@ -580,8 +580,14 @@ async fn stream_cancellation_preserves_partial_response() {
     assert_eq!(event["type"], "token");
     assert_eq!(event["content"], "Once");
 
-    // Cancel mid-stream.
-    ws_send(&mut ws_write, json!({"type": "cancel"})).await;
+    // Stop mid-stream through the gateway's stop route.
+    let (status, _) = http(
+        &router,
+        "POST",
+        &format!("/api/conversations/{conv_id}/cancel"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Wait for the cancelled acknowledgement.
     let event = ws_recv_until(&mut ws_read, |e| e["type"] == "cancelled").await;

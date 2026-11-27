@@ -25,15 +25,16 @@ pub const RESERVED_WORKFLOW_AGENT_ID: &str = "__workflow_ephemeral__";
 // Resolved config types
 pub use masked_string::MaskedString;
 pub use model::{
-    AttachmentsConfig, BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig,
+    AccessGateMode, AttachmentsConfig, BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig,
     CommunicationConfig, ContextConfig, ContextTransferConfig, ContextTransferField,
     ContextTransferMode, ContextTransferTargetConfig, GenerationConfig, GenerationPresetConfig,
     HierarchyLevel, HitlConfig, LogLevel, LoggingConfig, MemoryConfig, ModelCapabilitiesConfig,
     ModelCatalogConfig, ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig,
-    PricingConfig, Protocol, ProviderCatalogConfig, ProviderEndpointConfig, ProviderRoute,
-    PythonExecuteToolConfig, PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig,
-    SandboxConfig, SearchProviderConfig, ServerConfig, SessionsConfig, TelegramChannelConfig,
-    ToolConfig, ToolPermissionConfig, VoiceConfig, resolve_provider_route,
+    PlaintextCredentialPolicy, PricingConfig, Protocol, ProviderCatalogConfig,
+    ProviderEndpointConfig, ProviderRoute, PythonExecuteToolConfig, PythonRuntimePolicy,
+    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
+    SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig, VoiceConfig,
+    resolve_provider_route,
 };
 
 // Error types

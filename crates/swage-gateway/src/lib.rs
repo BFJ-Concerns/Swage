@@ -40,6 +40,7 @@
 //! [`shutdown::recover_orphaned_turns`] runs at startup to mark turns left
 //! in `Processing` state by a previous unclean exit as `Interrupted`.
 
+pub mod access_gate;
 pub mod approval_scope;
 pub mod assets;
 pub mod attachment;
@@ -69,10 +70,12 @@ pub mod memory_curation;
 pub mod onboarding;
 pub mod operator;
 pub mod presence;
+pub mod provider_credential_exposure;
 pub mod recent_sessions;
 pub mod record_durability;
 pub mod schedule;
 pub mod secret;
+pub mod security_settings;
 pub mod server;
 pub mod service;
 pub mod session_archive;
