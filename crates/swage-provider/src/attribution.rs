@@ -27,3 +27,15 @@ pub fn current_attribution() -> Option<CompletionAttribution> {
         .try_with(|attribution| *attribution)
         .ok()
 }
+
+/// Run `future` under `attribution` where there is one: what a provider
+/// spawns to serve a turn's request still names that turn.
+pub(crate) async fn carried<F: std::future::Future>(
+    attribution: Option<CompletionAttribution>,
+    future: F,
+) -> F::Output {
+    match attribution {
+        Some(attribution) => COMPLETION_ATTRIBUTION.scope(attribution, future).await,
+        None => future.await,
+    }
+}

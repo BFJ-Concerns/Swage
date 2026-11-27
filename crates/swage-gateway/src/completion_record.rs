@@ -740,4 +740,50 @@ mod tests {
             })
         );
     }
+
+    /// The production chain puts retry and failover above each recorder, and
+    /// both stream through spawned forwarders; a turn's streamed completion
+    /// still names its session and turn.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_streamed_completion_beneath_retry_and_failover_keeps_its_turn() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let topic = TopicStore::create(
+            storage.as_ref(),
+            NewTopic {
+                name: "t".into(),
+                slug: "t".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let recorded =
+            |storage: &Arc<SqliteStorage>| -> Box<dyn LlmProvider> { Box::new(recording(storage)) };
+        let chain: Arc<dyn LlmProvider> = Arc::from(
+            swage_provider::builder::ProviderChainBuilder::new()
+                .provider_boxed(recorded(&storage))
+                .with_retry(swage_provider::retry::RetryConfig::default())
+                .provider_boxed(recorded(&storage))
+                .with_retry(swage_provider::retry::RetryConfig::default())
+                .with_failover(swage_provider::failover::FailoverConfig::default())
+                .build(),
+        );
+        let turn_id = Uuid::new_v4();
+        let _: Vec<StreamChunk> = COMPLETION_ATTRIBUTION
+            .scope(
+                CompletionAttribution {
+                    session_id: session.id,
+                    turn_id: Some(turn_id),
+                },
+                async { chain.stream(request(None)).collect().await },
+            )
+            .await;
+
+        let events = completions(&storage, 1).await;
+        assert_eq!(events[0].session_id, Some(session.id));
+        assert_eq!(events[0].metadata["turn_id"], turn_id.to_string());
+    }
 }
