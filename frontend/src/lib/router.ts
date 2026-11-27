@@ -69,7 +69,7 @@ function rootRoute(pathname = "/", notFound = false): Route {
 
 export interface Router {
   readonly currentRoute: Route;
-  navigate(path: string, options?: { keepPreviousOnMissing?: boolean }): Promise<void>;
+  navigate(path: string, options?: { keepPreviousOnMissing?: boolean; replace?: boolean }): Promise<void>;
   // Parse the initial URL, attach popstate listener, and select any
   // conversation referenced by the URL. Returns a Promise so callers
   // (App.svelte) can await initial selection before rendering.
@@ -263,10 +263,11 @@ export function createRouter(options?: RouterOptions): Router {
       return currentRoute;
     },
 
-    async navigate(path, { keepPreviousOnMissing = false } = {}): Promise<void> {
+    async navigate(path, { keepPreviousOnMissing = false, replace = false } = {}): Promise<void> {
       navigationGeneration += 1;
       if (currentLocation() !== path) {
-        window.history.pushState(null, "", path);
+        if (replace) window.history.replaceState(null, "", path);
+        else window.history.pushState(null, "", path);
       }
       const route = parseRoute(path);
       if (

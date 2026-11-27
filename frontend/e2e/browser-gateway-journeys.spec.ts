@@ -245,6 +245,36 @@ test("hides the old conversation while opening a destination and ignores an over
   }
 });
 
+test("opens the remaining session and then the front door when deleting active conversations", async ({ page }) => {
+  const response = await page.request.post("/api/topics", { data: { name: "Delete active conversation" } });
+  expect(response.ok()).toBe(true);
+  const topic = await response.json();
+  await page.goto("/");
+  await page.getByRole("combobox", { name: "Topic", exact: true }).selectOption(topic.id);
+  await openComposer(page);
+  const first = "First session in the deletion topic";
+  await sendNewConversation(page, first);
+  const firstPath = new URL(page.url()).pathname;
+  await page.getByRole("button", { name: "+ New conversation", exact: true }).click();
+  const second = "Second session in the deletion topic";
+  await sendNewConversation(page, second);
+
+  async function deleteFromSidebar(label: string) {
+    await page.getByRole("button", { name: `Delete conversation: ${label}`, exact: true }).click();
+    await page.getByRole("button", { name: "Delete", exact: true }).click();
+  }
+
+  await deleteFromSidebar(second);
+  await expect(page).toHaveURL(firstPath);
+  await expect(page.getByLabel("Your message").getByText(first, { exact: true })).toBeVisible();
+  await sendNewConversation(page, "Still able to reply after deleting the other session");
+
+  await deleteFromSidebar(first);
+  await expect(page).toHaveURL("/");
+  await expect(page.getByRole("region", { name: "Start a session" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeHidden();
+});
+
 test("keeps the first question as the label and follows a send from earlier in the transcript", async ({ page }) => {
   const opening = "Where should we start?";
   await page.setViewportSize({ width: 900, height: 660 });

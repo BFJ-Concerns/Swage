@@ -252,6 +252,12 @@ export function createConversationStore(): ConversationStore {
     });
   }
 
+  function clearActiveConversation(): void {
+    activeConversationStore.set(null);
+    activeThreadIdStore.set(null);
+    branchesStore.set([]);
+  }
+
   let listGeneration = 0;
   let currentScope: { topicId: string | null; initial: Promise<void> } | undefined;
 
@@ -367,28 +373,11 @@ export function createConversationStore(): ConversationStore {
     async deleteConversation(id) {
       await api.deleteConversation(id);
 
-      const remaining = get(conversationsStore).filter((c) => c.id !== id);
-      conversationsStore.set(remaining);
-
-      // If the deleted conversation was active, select the next most recent.
-      // The list is already sorted by last_activity desc, so index 0 is best.
-      const activeConversation = get(activeConversationStore);
-      if (activeConversation?.id === id) {
-        if (remaining.length > 0) {
-          await loadConversationDetail(remaining[0].id);
-        } else {
-          activeConversationStore.set(null);
-          activeThreadIdStore.set(null);
-          branchesStore.set([]);
-        }
-      }
+      conversationsStore.update((conversations) => conversations.filter((conversation) => conversation.id !== id));
+      if (get(activeConversationStore)?.id === id) clearActiveConversation();
     },
 
-    clearActiveConversation() {
-      activeConversationStore.set(null);
-      activeThreadIdStore.set(null);
-      branchesStore.set([]);
-    },
+    clearActiveConversation,
 
     appendOptimisticUserMessage(message, conversationId) {
       appendMessage({

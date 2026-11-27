@@ -273,8 +273,22 @@
     void startSession({ topicId: topicStore.currentTopic?.id ?? null, agentId: null }, activeSurface);
   }
 
-  // Proxy that implements ConversationStore but overrides the two navigation-
-  // bearing actions. All other methods delegate straight to the base store.
+  async function deleteAndNavigate(id: string): Promise<void> {
+    actionError = null;
+    try {
+      await conversationStore.deleteConversation(id);
+    } catch (error) {
+      actionError = describeActionError("Could not delete conversation", error);
+      return;
+    }
+    if (currentRoute.conversationId !== id) return;
+
+    connectionStore.deselect?.();
+    const next = conversationStore.conversations[0];
+    await router.navigate(next ? conversationPath(next.id) : "/", { replace: true });
+  }
+
+  // Child components use the same navigation path as conversation links.
   const routerAwareStore: ConversationStore = {
     get conversations() {
       return conversationStore.conversations;
@@ -300,7 +314,7 @@
     createConversation: async (_topicId, selectedModelId, agentId, effort) => {
       await createAndNavigate(selectedModelId, agentId, effort);
     },
-    deleteConversation: (id) => conversationStore.deleteConversation(id),
+    deleteConversation: deleteAndNavigate,
     clearActiveConversation: () => conversationStore.clearActiveConversation(),
     appendOptimisticUserMessage: (msg) =>
       conversationStore.appendOptimisticUserMessage(msg),
