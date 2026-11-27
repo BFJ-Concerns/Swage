@@ -83,6 +83,11 @@ struct CompletionAccount {
     cost: Option<f64>,
     error: Option<String>,
     interrupted: bool,
+    /// The provider's own account of the response: its raw stop reason,
+    /// usage and the size of each kind of content block. It names a
+    /// response that ran out of tokens while reasoning even where the
+    /// adapter reports it as empty rather than as cut off.
+    provider_witness: Option<swage_core::ProviderResponseWitness>,
 }
 
 impl CompletionAccount {
@@ -107,6 +112,7 @@ impl CompletionAccount {
             cost: None,
             error: None,
             interrupted: false,
+            provider_witness: None,
         }
     }
 
@@ -151,8 +157,10 @@ impl CompletionAccount {
                 "name": name,
                 "arguments": arguments,
             })),
-            StreamChunk::ProviderResponseWitness(_)
-            | StreamChunk::ProviderAttempt(_)
+            StreamChunk::ProviderResponseWitness(witness) => {
+                self.provider_witness = Some(witness.clone());
+            }
+            StreamChunk::ProviderAttempt(_)
             | StreamChunk::ProviderRetryStarted { .. }
             | StreamChunk::ProviderRetrySettled { .. } => {}
         }
@@ -206,6 +214,7 @@ impl CompletionAccount {
         };
         let mut metadata = json!({
             "model": self.model,
+            "provider_witness": self.provider_witness,
             "turn_id": self.attribution.and_then(|attribution| attribution.turn_id),
             "streamed": self.streamed,
             "max_tokens": self.max_tokens,
@@ -446,6 +455,10 @@ mod tests {
                     input_tokens: 12,
                     output_tokens: 4,
                 }),
+                StreamChunk::ProviderResponseWitness(swage_core::ProviderResponseWitness {
+                    stop_reason: Some("max_tokens".into()),
+                    ..Default::default()
+                }),
                 StreamChunk::Done {
                     finish_reason: Some(FinishReason::Length),
                 },
@@ -543,7 +556,7 @@ mod tests {
                 async { provider.stream(request(None)).collect().await },
             )
             .await;
-        assert_eq!(chunks.len(), 5, "the stream reaches its reader unchanged");
+        assert_eq!(chunks.len(), 6, "the stream reaches its reader unchanged");
 
         let events = completions(&storage, 1).await;
         let event = &events[0];
@@ -554,6 +567,10 @@ mod tests {
         assert_eq!(event.metadata["outcome"], "cut off at its length limit");
         assert_eq!(event.metadata["input_tokens"], 12);
         assert_eq!(event.metadata["streamed"], true);
+        assert_eq!(
+            event.metadata["provider_witness"]["stop_reason"],
+            "max_tokens"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
