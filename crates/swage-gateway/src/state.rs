@@ -452,8 +452,7 @@ impl AppState {
             ServerEvent::TurnComplete { .. }
             | ServerEvent::OutputSchemaFailed { .. }
             | ServerEvent::Error { .. }
-            | ServerEvent::Cancelled {}
-            | ServerEvent::ApprovalExpired { .. } => session.queue_started = None,
+            | ServerEvent::Cancelled {} => session.queue_started = None,
             _ => {}
         }
         session

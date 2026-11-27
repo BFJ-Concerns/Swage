@@ -988,6 +988,41 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_listener_joining_after_a_rejected_approval_receives_the_active_queue_start() {
+        let (state, session_id) = make_state_with_session(vec![]).await;
+        let turn_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        state
+            .send_to_session(
+                session_id,
+                &ServerEvent::QueueDrained {
+                    session_id,
+                    turn_id,
+                    thread_id,
+                    queued_ids: vec![Uuid::new_v4()],
+                },
+            )
+            .await;
+        state
+            .send_to_session(
+                session_id,
+                &ServerEvent::ApprovalExpired {
+                    approval_id: Uuid::new_v4(),
+                    timeout_policy: "reject".into(),
+                },
+            )
+            .await;
+
+        let (listener, mut events) = mpsc::unbounded_channel();
+        state.listen_to_session(session_id, listener).await;
+        assert!(matches!(
+            events.try_recv(),
+            Ok(ServerEvent::QueueDrained { turn_id: turn, thread_id: thread, .. })
+                if turn == turn_id && thread == thread_id
+        ));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_setup_failure_waits_for_delivery_before_the_next_drain() {
         let root = tempfile::tempdir().unwrap();

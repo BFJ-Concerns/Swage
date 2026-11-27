@@ -197,6 +197,7 @@ export function createStreamingStore(
     providerRetryState: { current: ProviderRetryState | null };
     pendingApprovalState: { current: PendingApproval | null };
     activeTurnGeneration: number;
+    queuedTurnId: string | null;
     /** The thread the running turn was sent on; null is the root thread. */
     threadId: string | null;
   }
@@ -240,6 +241,7 @@ export function createStreamingStore(
       providerRetryState: fromStore(providerRetryStore),
       pendingApprovalState: fromStore(pendingApprovalStore),
       activeTurnGeneration: 0,
+      queuedTurnId: null,
       get threadId() { return threadIdState.current; },
       set threadId(value: string | null) { threadIdStore.set(value); },
     };
@@ -284,6 +286,7 @@ export function createStreamingStore(
   }
 
   function setStreamActive(conversationId: string | null, stream: InternalStreamState, active: boolean): void {
+    if (!active) stream.queuedTurnId = null;
     stream.isStreamingStore.set(active);
     if (conversationId) options?.connectionStore?.setStreamActive?.(conversationId, active);
   }
@@ -623,6 +626,8 @@ export function createStreamingStore(
           // starting, as far as this view is concerned — no client called
           // startTurn for it.
           options?.conversationStore?.clearQueuedMessages?.(event.session_id, event.queued_ids);
+          if (stream.queuedTurnId === event.turn_id) break;
+          stream.queuedTurnId = event.turn_id;
           stream.threadId = event.thread_id;
           stream.streamedContentStore.set("");
           stream.turnErrorStore.set(null);

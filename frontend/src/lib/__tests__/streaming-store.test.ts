@@ -235,6 +235,31 @@ describe("startTurn", () => {
     expect(store.streamedContent).toBe("");
   });
 
+  it("keeps the queued reply and its tool calls when a reconnect replays the turn start", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+    const start: ServerEvent = {
+      type: "queue_drained", session_id: "test-conversation",
+      thread_id: "branch", turn_id: "queued-turn", queued_ids: ["input"],
+    };
+    store.handleServerEvent(start);
+    store.handleServerEvent({ type: "token", content: "Before " });
+    store.handleServerEvent({ type: "tool_start", call_id: "read", tool: "file_read", arguments: {} });
+
+    store.handleServerEvent(start);
+    store.handleServerEvent({ type: "token", content: "and after." });
+    store.handleServerEvent({ type: "turn_complete", turn_id: "queued-turn" });
+
+    expect(conv.appendAssistantMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "Before and after.",
+        thread_id: "branch",
+        tool_calls: [expect.objectContaining({ call_id: "read" })],
+      }),
+      "test-conversation",
+    );
+  });
+
   it("routes a recorded message the gateway announces to the conversation store", () => {
     const conv = { ...createMockConversationStore(), appendRecordedMessage: vi.fn() };
     const store = createStreamingStore({ conversationStore: conv });
