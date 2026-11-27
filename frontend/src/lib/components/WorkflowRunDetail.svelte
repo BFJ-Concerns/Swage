@@ -200,9 +200,9 @@
             </details>
             <dl>
               {#if call.dispatch.attempts.length > 0}
-                <dt>Attempts</dt>
+                <dt class="attempts-label">Attempts</dt>
                 <dd class="attempts">
-                  <ol class="plain">
+                  <ol role="list">
                     {#each call.dispatch.attempts as attempt, index (index)}
                       <li>
                         <p>{attemptLine(attempt, index)} — {resolvedLabel(attempt)}</p>
@@ -357,6 +357,18 @@
 
   dd {
     margin: 0;
+  }
+
+  .attempts-label,
+  .attempts {
+    grid-column: 1 / -1;
+  }
+
+  .attempts ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
   }
 
   table.rounds {
