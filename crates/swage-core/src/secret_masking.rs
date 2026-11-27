@@ -94,17 +94,12 @@ pub fn mask_record_text(text: &mut String, values: &[String]) -> bool {
     {
         let documents = registered_documents(values);
         let changed = mask_document(&mut document, values, &documents);
-        let rendered = if changed {
-            document.to_string()
-        } else {
-            text.clone()
-        };
-        if holds_any_form(&rendered, values) {
+        if holds_any_form(&without_keys(&document).to_string(), values) {
             *text = serde_json::Value::String(REDACTED_SECRET.to_owned()).to_string();
             return true;
         }
         if changed {
-            *text = rendered;
+            *text = document.to_string();
         }
         return changed;
     }
@@ -141,6 +136,31 @@ fn registered_documents(values: &[String]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Whether a field holds a value the product reads back as a key: an
+/// identifier (`id`, `*_id`) or a slug (`slug`, `*_slug`). Masking leaves such
+/// a value as it is, in the store and in every JSON answer, because a key
+/// rewritten to the marker no longer finds what it names, and a key is
+/// generated or derived, never text anyone wrote.
+pub fn is_key_field(name: &str) -> bool {
+    name == "id" || name.ends_with("_id") || name == "slug" || name.ends_with("_slug")
+}
+
+/// The document without the values of its key fields, which masking leaves.
+fn without_keys(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .filter(|(key, _)| !is_key_field(key))
+                .map(|(key, item)| (key.clone(), without_keys(item)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(without_keys).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 /// Whether `text` holds any value, plain or escaped, outside the markers
 /// already in it.
 fn holds_any_form(text: &str, values: &[String]) -> bool {
@@ -171,8 +191,10 @@ fn mask_document(
         serde_json::Value::Object(map) => {
             let entries = std::mem::take(map);
             for (mut key, mut item) in entries {
-                replaced |= mask_record_text(&mut key, values);
-                replaced |= mask_document(&mut item, values, documents);
+                if !is_key_field(&key) {
+                    replaced |= mask_record_text(&mut key, values);
+                    replaced |= mask_document(&mut item, values, documents);
+                }
                 map.insert(key, item);
             }
         }

@@ -573,16 +573,17 @@ mod tests {
         }
     }
 
-    /// A handler that answers with what it was sent still answers masked:
-    /// creating a topic named by a registered value never echoes the value.
+    /// A topic named with a registered value is created with its name
+    /// masked and its slug, a key the product reads back, left as derived,
+    /// in the store and in the answers; the topic list still answers.
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_api_answer_never_carries_a_registered_value() {
+    async fn a_topic_named_with_a_registered_value_keeps_its_slug() {
         let root = tempfile::tempdir().unwrap();
         let storage =
             Arc::new(swage_storage::SqliteStorage::open(&root.path().join("mask.db")).unwrap());
         storage
             .registered_secret_values()
-            .replace(vec!["echo-canary-value".to_string()]);
+            .replace(vec!["73918264".to_string()]);
         let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -591,22 +592,35 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        let response = build_router(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/topics")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"name":"echo-canary-value","description":""}"#,
-                    ))
-                    .unwrap(),
-            )
+        let router = build_router(state);
+        let request = |method: &str, body: &'static str| {
+            Request::builder()
+                .method(method)
+                .uri("/api/topics")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+
+        let created = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                r#"{"name":"Topic 73918264","description":"safe"}"#,
+            ))
             .await
             .unwrap();
-        assert!(response.status().is_success());
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(created.status().is_success(), "{}", created.status());
+        let bytes = to_bytes(created.into_body(), usize::MAX).await.unwrap();
         let topic: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(topic["name"], "[REDACTED_SECRET]");
+        assert_eq!(topic["name"], "Topic [REDACTED_SECRET]");
+        assert_eq!(topic["slug"], "topic-73918264");
+
+        let listed = router.oneshot(request("GET", "")).await.unwrap();
+        assert!(listed.status().is_success(), "{}", listed.status());
+        let bytes = to_bytes(listed.into_body(), usize::MAX).await.unwrap();
+        let topics: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(topics["topics"][0]["name"], "Topic [REDACTED_SECRET]");
+        assert_eq!(topics["topics"][0]["slug"], "topic-73918264");
     }
 }

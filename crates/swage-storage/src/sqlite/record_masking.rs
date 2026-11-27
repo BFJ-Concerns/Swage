@@ -60,10 +60,8 @@ pub(super) fn install(conn: &Connection, values: &RegisteredSecretValues) -> rus
 }
 
 /// Each ordinary table's text columns, leaving out the secret store itself,
-/// full-text indexes, whose shadow tables only the index may write, and
-/// identifier columns (`id`, `*_id`): an identifier is generated, never text
-/// anyone wrote, and a short registered value matching inside one would
-/// break the row's key and every reference to it.
+/// full-text indexes, whose shadow tables only the index may write, and key
+/// columns (`is_key_field`), which the product reads back to find a row.
 fn masked_columns(conn: &Connection) -> rusqlite::Result<Vec<(String, Vec<String>)>> {
     let mut statement = conn.prepare(
         "SELECT name, sql FROM main.sqlite_schema
@@ -88,10 +86,15 @@ fn masked_columns(conn: &Connection) -> rusqlite::Result<Vec<(String, Vec<String
         }
         let mut columns = conn.prepare(&format!(
             "SELECT name FROM pragma_table_info('{table}')
-             WHERE upper(type) LIKE '%TEXT%' AND name <> 'id' AND name NOT LIKE '%\\_id' ESCAPE '\\'"
+             WHERE upper(type) LIKE '%TEXT%'"
         ))?;
         let columns: Vec<String> = columns
-            .query_map([], |row| row.get(0))?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter(|column| {
+                column
+                    .as_ref()
+                    .map_or(true, |name| !swage_core::secret_masking::is_key_field(name))
+            })
             .collect::<Result<_, _>>()?;
         if !columns.is_empty() {
             masked.push((table.clone(), columns));
