@@ -223,6 +223,7 @@ async fn handle_inbound(
                 thread.id,
                 crate::turn::TurnInput::text(&text),
                 None,
+                None,
                 Vec::new(),
                 crate::turn::TurnAttendance::Unattended,
                 targets,
@@ -551,6 +552,7 @@ async fn queue_channel_rows(
     let inputs = rows
         .iter()
         .map(|row| swage_storage::NewQueuedTurnInput {
+            requested_model: None,
             delivery_targets: Vec::new(),
             attended: false,
             client_id: None,

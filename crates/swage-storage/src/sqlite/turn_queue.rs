@@ -16,7 +16,7 @@ use crate::sqlite::message::encode_attachments;
 use crate::store::TurnQueueStore;
 use swage_core::Role;
 
-const COLUMNS: &str = "id, session_id, thread_id, seq, origin, content, attachments, created_at, schedule_run_id, attended, client_id, delivery_targets";
+const COLUMNS: &str = "id, session_id, thread_id, seq, origin, content, attachments, created_at, schedule_run_id, attended, client_id, delivery_targets, requested_model";
 
 fn parse_uuid(value: &str) -> rusqlite::Result<Uuid> {
     value.parse::<Uuid>().map_err(|error| {
@@ -79,6 +79,7 @@ fn row_to_queued(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedTurnInput> {
             .map(parse_uuid)
             .transpose()?,
         channel_message_ids: Vec::new(),
+        requested_model: row.get(12)?,
     })
 }
 
@@ -125,7 +126,7 @@ fn enqueue_inputs(
         )?;
         tx.execute(
                 &format!(
-                    "INSERT INTO turn_queue ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                    "INSERT INTO turn_queue ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
                 ),
                 params![
                     id.to_string(),
@@ -140,6 +141,7 @@ fn enqueue_inputs(
                     input.attended,
                     input.client_id.map(|id| id.to_string()),
                     serde_json::to_string(&input.delivery_targets).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+                    &input.requested_model,
                 ],
             )?;
         for message_id in &input.channel_message_ids {
@@ -153,6 +155,7 @@ fn enqueue_inputs(
             }
         }
         queued.push(QueuedTurnInput {
+            requested_model: input.requested_model,
             delivery_targets: input.delivery_targets,
             attended: input.attended,
             client_id: input.client_id,
@@ -282,7 +285,9 @@ impl TurnQueueStore for SqliteStorage {
             // A session has one active turn, including on a sibling thread.
             let live: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM turns JOIN threads ON threads.id = turns.thread_id WHERE threads.session_id = ?1 AND turns.state IN ('pending', 'processing', 'awaiting_approval', 'delegating'))", params![session_id.to_string()], |row| row.get(0))?;
             if live { return Ok(None); }
-            let group_len = queued.iter().take_while(|item| item.thread_id == thread_id).count();
+            let group_len = queued.iter()
+                .take_while(|item| item.thread_id == thread_id && item.requested_model == first.requested_model)
+                .count();
             queued.truncate(group_len);
             let now = Utc::now();
             let now_str = now.to_rfc3339();
@@ -396,7 +401,6 @@ impl TurnQueueStore for SqliteStorage {
                 tx.execute("DELETE FROM turn_queue WHERE id = ?1", params![item.id.to_string()])?;
             }
             tx.commit()?;
-            let queued_ids = queued.iter().map(|item| item.id).collect();
             Ok(Some(DrainedTurnQueue {
                 delivery_targets: attribution.delivery_targets.clone(),
                 attended: attribution.attended,
@@ -422,7 +426,7 @@ impl TurnQueueStore for SqliteStorage {
                                     attribution: Some(attribution),
 },
                 messages,
-                queued_ids,
+                inputs: queued,
                 schedule_run_ids,
                 channel_origins,
             }))
@@ -480,6 +484,7 @@ mod tests {
 
     fn queued(session_id: Uuid, thread_id: Uuid, content: &str) -> NewQueuedTurnInput {
         NewQueuedTurnInput {
+            requested_model: None,
             delivery_targets: Vec::new(),
             attended: true,
             client_id: None,
@@ -799,6 +804,57 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consecutive_inputs_share_a_turn_only_when_their_model_choices_match() {
+        use crate::store::TurnStore;
+
+        let (storage, session, thread) = session_and_thread().await;
+        for (text, model) in [
+            ("first", Some("alternate")),
+            ("second", Some("alternate")),
+            ("third", None),
+            ("fourth", Some("alternate")),
+        ] {
+            storage
+                .enqueue_turn_input(NewQueuedTurnInput {
+                    requested_model: model.map(str::to_owned),
+                    ..queued(session, thread, text)
+                })
+                .await
+                .unwrap();
+        }
+
+        for (expected, model) in [
+            (vec!["first", "second"], Some("alternate")),
+            (vec!["third"], None),
+            (vec!["fourth"], Some("alternate")),
+        ] {
+            let drained = storage
+                .drain_queued_turn_inputs(session, "gateway")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                drained
+                    .inputs
+                    .iter()
+                    .map(|input| input.content.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(
+                drained
+                    .inputs
+                    .iter()
+                    .all(|input| input.requested_model.as_deref() == model)
+            );
+            storage
+                .update_turn_state(drained.turn.id, TurnState::Completed)
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

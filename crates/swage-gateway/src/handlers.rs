@@ -1640,11 +1640,12 @@ pub async fn submit_turn(
         .contains_key(&req.conversation_id);
     let queue_standing = crate::turn_queue::has_queued_input(&state, req.conversation_id).await?;
     if running_turn.is_some() || guard_held || queue_standing {
-        let queued = crate::turn_queue::queue_input(
+        let queued = crate::turn_queue::queue_input_with_model(
             &state,
             req.conversation_id,
             thread.id,
             crate::turn::TurnInput::with_attachments(req.message, req.attachments),
+            req.model,
         )
         .await?;
         return Ok((
@@ -1674,11 +1675,12 @@ pub async fn submit_turn(
     let turn = match turn {
         Ok(turn) => turn,
         Err(swage_core::StorageError::ConstraintViolation(_)) => {
-            let queued = crate::turn_queue::queue_input(
+            let queued = crate::turn_queue::queue_input_with_model(
                 &state,
                 req.conversation_id,
                 thread.id,
                 crate::turn::TurnInput::with_attachments(req.message, req.attachments),
+                req.model,
             )
             .await?;
             // The claim lost to a turn the table holds: name that turn.

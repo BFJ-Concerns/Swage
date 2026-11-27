@@ -1009,6 +1009,7 @@ const COMPLETE_SCHEMA: &str = "
         schedule_run_id TEXT REFERENCES schedule_runs(id) ON DELETE CASCADE,
         attended    INTEGER NOT NULL CHECK (attended IN (0, 1)),
         client_id   TEXT,
+        requested_model TEXT,
         UNIQUE (session_id, seq)
     );
     CREATE TABLE turn_queue_channel_messages (
