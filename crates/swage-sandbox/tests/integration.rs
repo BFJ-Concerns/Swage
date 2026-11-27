@@ -139,6 +139,9 @@ async fn llm_proxy_completion_through_ipc() {
 /// and acknowledges `Shutdown`. Connecting is the behaviour under test.
 const FAKE_AGENT: &str = r#"#!/usr/bin/env python3
 import json, os, socket, sys
+assert not os.path.exists(os.environ["HOST_TMP_PRIVATE"])
+with open(os.environ["HOST_TMP_GRANTED"]) as granted:
+    assert granted.read() == "granted"
 s = socket.socket(socket.AF_UNIX)
 s.connect(os.environ["SWAGE_IPC_SOCKET"])
 s.sendall(b'{"kind":"ready"}\n')
@@ -159,10 +162,18 @@ async fn bubblewrap_agent_connects_when_socket_lies_under_tmp() {
         return;
     }
 
-    let work = tempfile::tempdir().unwrap();
+    // Pin the executable and grant under host /tmp even when TMPDIR is
+    // elsewhere. Neither should require exposing the containing directory.
+    let work = tempfile::tempdir_in("/tmp").unwrap();
+    let private = work.path().join("private");
+    let granted = work.path().join("granted");
+    std::fs::write(&private, "host private").unwrap();
+    std::fs::write(&granted, "granted").unwrap();
     let agent = work.path().join("fake-agent");
-    std::fs::write(&agent, FAKE_AGENT).unwrap();
-    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let script = work.path().join("agent-script");
+    std::fs::write(&script, FAKE_AGENT).unwrap();
+    std::os::unix::fs::symlink(&script, &agent).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let tmp_root = tempfile::tempdir_in("/tmp").unwrap();
     let long_root = work.path().join("r".repeat(120));
@@ -177,12 +188,19 @@ async fn bubblewrap_agent_connects_when_socket_lies_under_tmp() {
         std::fs::create_dir_all(&runtime_dir).unwrap();
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir) };
 
-        let config = SandboxConfig::builder()
+        let mut config = SandboxConfig::builder()
             .working_directory(work.path())
+            .read_only_path(&granted)
             .tool_call_timeout(Duration::from_secs(10))
             .shutdown_grace_period(Duration::from_secs(2))
             .build()
             .unwrap();
+        config
+            .environment
+            .insert("HOST_TMP_PRIVATE".into(), private.display().to_string());
+        config
+            .environment
+            .insert("HOST_TMP_GRANTED".into(), granted.display().to_string());
         let mut sandbox = BubblewrapSandbox::new(
             config,
             HostLlmHandler::new(|_req: CompletionRequest| async {

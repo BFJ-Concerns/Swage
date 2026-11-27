@@ -150,6 +150,7 @@ fn settings_from_config(
         sessions: config.sessions,
         memory: config.memory,
         attachments: config.attachments,
+        judge: config.judge,
         voice: try_wire_from_config(config.voice)?,
         restart_required,
         can_restart,
@@ -242,6 +243,7 @@ where
         sessions,
         memory,
         attachments,
+        judge,
         voice,
     } = request;
 
@@ -327,6 +329,7 @@ where
             sessions: sessions.clone(),
             memory: memory.clone(),
             attachments: attachments.clone(),
+            judge: judge.clone(),
             voice: voice.clone(),
         },
     )?;
@@ -418,6 +421,7 @@ where
     runtime_config.sessions = sessions.unwrap_or_else(|| runtime_config.sessions.clone());
     runtime_config.memory = memory.unwrap_or_else(|| runtime_config.memory.clone());
     runtime_config.attachments = attachments.unwrap_or_else(|| runtime_config.attachments.clone());
+    runtime_config.judge = judge.unwrap_or_else(|| runtime_config.judge.clone());
     runtime_config.voice = voice.unwrap_or_else(|| runtime_config.voice.clone());
 
     let response = settings_from_config(runtime_config.clone(), false, state.managed_gateway)?;
@@ -828,6 +832,7 @@ fn settings_response_from_saved_config(
         sessions: active_config.sessions,
         memory: active_config.memory,
         attachments: active_config.attachments,
+        judge: active_config.judge,
         voice: wire_from_config(active_config.voice),
         restart_required: true,
         can_restart: state.managed_gateway,
@@ -1007,6 +1012,7 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
     refuse_declared_section_problems(request.sessions.as_ref())?;
     refuse_declared_section_problems(request.memory.as_ref())?;
     refuse_declared_section_problems(request.attachments.as_ref())?;
+    refuse_declared_section_problems(request.judge.as_ref())?;
     if let Some(voice) = &request.voice
         && [&voice.transcription_model, &voice.speech_model]
             .into_iter()
@@ -1057,6 +1063,7 @@ struct RuntimeSectionUpdates {
     sessions: Option<swage_config::SessionsConfig>,
     memory: Option<swage_config::MemoryConfig>,
     attachments: Option<swage_config::AttachmentsConfig>,
+    judge: Option<swage_config::JudgeConfig>,
     voice: Option<swage_config::VoiceConfig>,
 }
 
@@ -1075,6 +1082,7 @@ fn apply_runtime_settings_to_partial(
         sessions,
         memory,
         attachments,
+        judge,
         voice,
     } = updates;
     // A declared section's partial is its own `From`: no field is restated.
@@ -1086,6 +1094,9 @@ fn apply_runtime_settings_to_partial(
     }
     if let Some(memory) = memory {
         partial.memory = Some(memory.into());
+    }
+    if let Some(judge) = judge {
+        partial.judge = Some(judge.into());
     }
     if let Some(voice) = voice {
         partial.voice = Some(swage_config::merge::PartialVoiceConfig {
@@ -3034,6 +3045,7 @@ mod tests {
             sessions: None,
             memory: None,
             attachments: None,
+            judge: None,
             voice: None,
         };
 
@@ -3248,6 +3260,7 @@ mod tests {
             sessions: None,
             memory: None,
             attachments: None,
+            judge: None,
             voice,
         }
     }
@@ -3526,6 +3539,7 @@ mod tests {
             sessions: None,
             memory: None,
             attachments: None,
+            judge: None,
             voice: None,
         };
         save_settings(&state, request)
@@ -3686,6 +3700,7 @@ mod tests {
             sessions: None,
             memory: None,
             attachments: None,
+            judge: None,
             voice: None,
         };
 
@@ -3860,6 +3875,7 @@ mod tests {
             sessions: None,
             memory: None,
             attachments: None,
+            judge: None,
             voice: None,
         };
 
@@ -3906,6 +3922,7 @@ mod tests {
             sessions: None,
             memory: None,
             attachments: None,
+            judge: None,
             voice: None,
         };
 

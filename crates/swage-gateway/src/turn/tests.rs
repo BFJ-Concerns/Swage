@@ -18007,11 +18007,14 @@ async fn delegation_rejects_missing_sender_turn_lineage() {
 fn sandbox_config_carries_the_session_shell_timeout_and_waits_for_its_reply() {
     let agent = AgentConfig::new("agent").with_workspace(std::env::current_dir().unwrap(), vec![]);
     for seconds in [1, 75] {
-        let tools = swage_config::ToolConfig {
-            shell_timeout_secs: seconds,
-            ..Default::default()
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.shell_timeout_secs = seconds;
+        let roots = PolicyRoots {
+            home: std::env::temp_dir().join("swage-no-home"),
+            data_root: std::env::temp_dir().join("swage-no-data-root"),
+            cargo_home: None,
         };
-        let config = build_sandbox_config(&agent, None, &tools).unwrap();
+        let config = build_sandbox_config(&agent, None, &roots, &config).unwrap();
         assert_eq!(
             config
                 .tool_runtime
@@ -18065,33 +18068,729 @@ fn sandbox_config_skips_missing_trusted_workspace_paths() {
         ],
     };
 
+    let roots = PolicyRoots {
+        home: temp_dir.path().join("home"),
+        data_root: temp_dir.path().join("data-root"),
+        cargo_home: None,
+    };
     let sandbox_config = build_sandbox_config(
         &agent_config,
         Some(&policy),
-        &swage_config::ToolConfig::default(),
+        &roots,
+        &swage_config::ResolvedConfig::default(),
     )
     .unwrap();
     let existing_workspace = sandbox_path(&existing_workspace);
 
+    assert!(sandbox_config.read_only_paths.contains(&existing_workspace));
+    assert!(!sandbox_config.write_paths.contains(&existing_workspace));
+    assert!(!sandbox_config.write_paths.contains(&missing_workspace));
+    assert!(!sandbox_config.read_only_paths.contains(&missing_workspace));
+}
+
+#[test]
+fn a_linked_worktree_writes_its_gitdir_and_the_repository_it_belongs_to() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let repo = temp_dir.path().join("repo");
+    let worktree = temp_dir.path().join("repo-worktree");
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", temp_dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    std::fs::create_dir(&repo).unwrap();
+    git(&["init", "-q", "-b", "main"], &repo);
+    git(
+        &[
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "root",
+        ],
+        &repo,
+    );
+    git(
+        &["worktree", "add", "-q", worktree.to_str().unwrap()],
+        &repo,
+    );
+
+    // A plain checkout keeps its metadata under itself: nothing to add.
+    assert!(git_metadata_outside(&sandbox_path(&repo)).is_empty());
+
+    // The worktree's .git is a pointer: its gitdir and the repository's own
+    // .git are both outside the worktree and both needed to commit.
+    let outside = git_metadata_outside(&sandbox_path(&worktree));
+    let repo_git = sandbox_path(&repo.join(".git"));
+    assert!(
+        outside
+            .iter()
+            .any(|path| path.starts_with(repo_git.join("worktrees"))),
+        "the gitdir must be listed: {outside:?}"
+    );
+    assert!(
+        outside.contains(&repo_git),
+        "the common dir must be listed: {outside:?}"
+    );
+
+    let agent_config = AgentConfig::new("worker").with_workspace(&worktree, vec![worktree.clone()]);
+    let roots = PolicyRoots {
+        home: temp_dir.path().join("home"),
+        data_root: temp_dir.path().join("data-root"),
+        cargo_home: None,
+    };
+    let sandbox_config = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+    assert!(sandbox_config.working_directory_is_writable());
+    assert!(sandbox_config.write_paths.contains(&repo_git));
+}
+
+/// A workspace's `.git` pointer is content the sandbox can write, so the git
+/// metadata it names is never the operator's grant: a pointer into a masked
+/// private path — `~/.ssh`, the data root — leaves that path masked and
+/// ungranted, while the workspace itself stays writable.
+#[test]
+fn git_metadata_under_a_masked_path_is_left_masked() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    let data_root = home.join(".swage");
+    std::fs::create_dir_all(data_root.join("store")).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: data_root.clone(),
+        cargo_home: None,
+    };
+
+    for pointed_at in [ssh.clone(), data_root.join("store")] {
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join(".git"),
+            format!("gitdir: {}\n", pointed_at.display()),
+        )
+        .unwrap();
+        let agent_config =
+            AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+        let policy = build_sandbox_config(
+            &agent_config,
+            None,
+            &roots,
+            &swage_config::ResolvedConfig::default(),
+        )
+        .unwrap();
+        assert!(policy.working_directory_is_writable());
+        assert!(
+            !policy.write_paths.contains(&sandbox_path(&pointed_at)),
+            "{} is not granted by a pointer: {:?}",
+            pointed_at.display(),
+            policy.write_paths
+        );
+        assert!(
+            policy
+                .masked_paths
+                .iter()
+                .any(|mask| pointed_at.starts_with(mask)),
+            "{} stays masked: {:?}",
+            pointed_at.display(),
+            policy.masked_paths
+        );
+    }
+}
+
+/// A grant that names a masked private path reopens exactly what it names:
+/// the policy carries both the mask and the grant for that path, and the
+/// mount layer binds the grant after the mask (the sandbox crate's own
+/// test), so a workspace at `~/.ssh` is readable and writable inside while
+/// a grant above the mask — the home directory — leaves it masked.
+#[test]
+fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    let data_root = home.join(".swage");
+    std::fs::create_dir_all(&data_root).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: data_root.clone(),
+        cargo_home: None,
+    };
+
+    let at_ssh = AgentConfig::new("worker").with_workspace(&ssh, vec![ssh.clone()]);
+    let policy = build_sandbox_config(
+        &at_ssh,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+    assert!(
+        policy.masked_paths.contains(&sandbox_path(&ssh)),
+        "{:?}",
+        policy.masked_paths
+    );
+    assert!(
+        policy.write_paths.contains(&sandbox_path(&ssh)),
+        "{:?}",
+        policy.write_paths
+    );
+
+    let at_root = AgentConfig::new("worker").with_workspace(&data_root, vec![data_root.clone()]);
+    let policy = build_sandbox_config(
+        &at_root,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+    assert!(policy.masked_paths.contains(&sandbox_path(&data_root)));
+    assert!(policy.write_paths.contains(&sandbox_path(&data_root)));
+
+    let above = AgentConfig::new("worker").with_workspace(&home, vec![home.clone()]);
+    let policy = build_sandbox_config(
+        &above,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+    assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
+    assert!(
+        !policy.write_paths.contains(&sandbox_path(&ssh)),
+        "a grant above the mask names the home, not the private path"
+    );
+
+    // The grant's own route: a trusted workspace at `~/.ssh` held read-only
+    // reopens it read-only beside its mask, and writes nothing.
+    let read_only_policy = TrustedWorkspacePolicy {
+        permissions: WorkspacePermissionSummary {
+            has_read: true,
+            has_write: false,
+        },
+        active_workspace: Some(TrustedWorkspacePath {
+            path: ssh.clone(),
+            is_trusted: true,
+            can_read: true,
+            can_write: false,
+        }),
+        attachments: Vec::new(),
+    };
+    let policy = build_sandbox_config(
+        &at_ssh,
+        Some(&read_only_policy),
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+    assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
+    assert!(
+        policy.read_only_paths.contains(&sandbox_path(&ssh)),
+        "{:?}",
+        policy.read_only_paths
+    );
+    assert!(!policy.write_paths.contains(&sandbox_path(&ssh)));
+    assert!(!policy.working_directory_is_writable());
+}
+
+/// A `.git` pointer the sandbox wrote at another repository's metadata
+/// grants nothing, and neither does a worktree's `commondir` rewritten to
+/// name another repository: the metadata must point back at the workspace.
+#[test]
+fn a_pointer_at_another_repositorys_metadata_grants_nothing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", temp_dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "{args:?}");
+    };
+    let mut repos = Vec::new();
+    for name in ["ours", "theirs"] {
+        let repo = temp_dir.path().join(name);
+        std::fs::create_dir(&repo).unwrap();
+        git(&["init", "-q", "-b", "main"], &repo);
+        git(
+            &[
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "root",
+            ],
+            &repo,
+        );
+        let worktree = temp_dir.path().join(format!("{name}-worktree"));
+        git(
+            &["worktree", "add", "-q", worktree.to_str().unwrap()],
+            &repo,
+        );
+        repos.push((repo, worktree));
+    }
+    let (_, our_worktree) = &repos[0];
+    let (their_repo, _) = &repos[1];
+    let their_git = sandbox_path(&their_repo.join(".git"));
+    let their_gitdir = their_git.join("worktrees").join("theirs-worktree");
+    assert!(their_gitdir.join("gitdir").is_file());
+
+    // Our worktree's pointer rewritten at their worktree's gitdir.
+    let pointer = our_worktree.join(".git");
+    let original = std::fs::read_to_string(&pointer).unwrap();
+    std::fs::write(&pointer, format!("gitdir: {}\n", their_gitdir.display())).unwrap();
+    assert!(
+        git_metadata_outside(&sandbox_path(our_worktree)).is_empty(),
+        "another repository's worktree metadata does not name this workspace"
+    );
+
+    // Our own gitdir, with its commondir rewritten at their repository.
+    std::fs::write(&pointer, original).unwrap();
+    let our_gitdir = sandbox_path(&repos[0].0.join(".git/worktrees/ours-worktree"));
+    std::fs::write(
+        our_gitdir.join("commondir"),
+        format!("{}\n", their_git.display()),
+    )
+    .unwrap();
+    let outside = git_metadata_outside(&sandbox_path(our_worktree));
+    assert_eq!(outside, vec![our_gitdir], "their repository is not granted");
+}
+
+/// A `.git` pointer names git metadata or nothing: a directory with no
+/// `HEAD` — the home, say — is not granted, and neither is a directory
+/// above a masked path, however it is dressed.
+#[test]
+fn a_git_pointer_at_a_directory_that_is_not_git_metadata_grants_nothing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    let data_root = home.join(".swage");
+    std::fs::create_dir_all(&data_root).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: data_root.clone(),
+        cargo_home: None,
+    };
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    // The home: no HEAD, and above the masks.
+    std::fs::write(
+        workspace.join(".git"),
+        format!("gitdir: {}\n", home.display()),
+    )
+    .unwrap();
+    assert!(git_metadata_outside(&sandbox_path(&workspace)).is_empty());
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+    assert!(
+        !policy.write_paths.contains(&sandbox_path(&home)),
+        "{:?}",
+        policy.write_paths
+    );
+
+    // A HEAD file dressing the home as metadata still leaves it above the
+    // masks, so the policy grants nothing over them.
+    std::fs::write(home.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+    assert!(
+        !policy.write_paths.contains(&sandbox_path(&home)),
+        "{:?}",
+        policy.write_paths
+    );
+    assert!(
+        policy
+            .masked_paths
+            .contains(&sandbox_path(&home.join(".ssh")))
+    );
+}
+
+/// A worker placement never lands in a masked private path: the model
+/// chose the directory within a person's grant, and the person's grant of
+/// the home is not a grant of the keys under it.
+#[test]
+fn a_placement_within_a_masked_private_path_is_named_for_refusal() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(ssh.join("deeper")).unwrap();
+    let data_root = home.join(".swage");
+    std::fs::create_dir_all(&data_root).unwrap();
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: data_root.clone(),
+        cargo_home: None,
+    };
+    assert_eq!(
+        private_path_covering(&ssh, &roots).as_deref(),
+        Some(sandbox_path(&ssh).as_path())
+    );
+    assert_eq!(
+        private_path_covering(&ssh.join("deeper"), &roots).as_deref(),
+        Some(sandbox_path(&ssh).as_path())
+    );
+    assert_eq!(
+        private_path_covering(&data_root, &roots).as_deref(),
+        Some(sandbox_path(&data_root).as_path())
+    );
+    let scratch = data_root.join("scratch").join("general");
+    std::fs::create_dir_all(&scratch).unwrap();
+    assert_eq!(
+        private_path_covering(&scratch, &roots),
+        None,
+        "a managed workspace beneath the data root reopens only itself"
+    );
+    assert_eq!(private_path_covering(&project, &roots), None);
+    assert_eq!(
+        private_path_covering(&home, &roots),
+        None,
+        "the home is above the masks, not within one"
+    );
+}
+
+#[test]
+fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_caches() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    for dir in [".ssh", ".cache", ".cargo"] {
+        std::fs::create_dir_all(home.join(dir)).unwrap();
+    }
+    std::fs::write(home.join(".netrc"), "x").unwrap();
+    let data_root = home.join(".swage");
+    std::fs::create_dir_all(&data_root).unwrap();
+    let workspace = home.join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: data_root.clone(),
+        cargo_home: None,
+    };
+    let sandbox_config = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+
+    let masked = &sandbox_config.masked_paths;
+    assert!(
+        masked.contains(&sandbox_path(&home.join(".ssh"))),
+        "{masked:?}"
+    );
+    assert!(
+        masked.contains(&sandbox_path(&home.join(".netrc"))),
+        "{masked:?}"
+    );
+    assert!(masked.contains(&sandbox_path(&data_root)), "{masked:?}");
+    assert!(
+        !masked.iter().any(|path| path.ends_with(".gnupg")),
+        "a private path absent from this home needs no mask: {masked:?}"
+    );
+    let writes = &sandbox_config.write_paths;
+    assert!(
+        writes.contains(&sandbox_path(&home.join(".cache"))),
+        "{writes:?}"
+    );
+    assert!(
+        writes.contains(&sandbox_path(&home.join(".cargo/registry"))),
+        "{writes:?}"
+    );
+
+    // A grant beneath the data root keeps the root masked: the grant is a
+    // write path the mount layer reopens on its own, deeper, so the store,
+    // secrets and other sessions beside it stay hidden.
+    let inside = data_root.join("scratch").join("session-1");
+    std::fs::create_dir_all(&inside).unwrap();
+    let granted = AgentConfig::new("worker").with_workspace(&inside, vec![inside.clone()]);
+    let sandbox_config = build_sandbox_config(
+        &granted,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
     assert!(
         sandbox_config
-            .read_only_mounts
-            .contains(&existing_workspace)
+            .masked_paths
+            .contains(&sandbox_path(&data_root))
+    );
+    assert!(sandbox_config.write_paths.contains(&sandbox_path(&inside)));
+}
+
+/// A cache that does not exist yet is created where its tool is installed,
+/// so a first fetch can fill it; one whose tool is absent is not created.
+#[test]
+fn absent_shared_caches_are_created_for_installed_tools_only() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: home.join(".swage"),
+        cargo_home: None,
+    };
+    let caches = crate::turn::dispatcher::shared_caches(&roots, |tool| tool == "npm");
+
+    assert!(home.join(".npm").is_dir());
+    assert!(
+        home.join(".cache").is_dir(),
+        "every tool's cache is created"
+    );
+    assert!(!home.join(".cargo").exists(), "no cargo, no ~/.cargo");
+    assert!(!home.join("go").exists());
+    assert_eq!(
+        caches,
+        vec![
+            sandbox_path(&home.join(".cache")),
+            sandbox_path(&home.join(".npm"))
+        ]
+    );
+}
+
+/// Where the operator keeps Cargo's home elsewhere (`CARGO_HOME`), that is
+/// the cache the sandbox writes and the place its tokens are masked.
+#[test]
+fn cargo_home_elsewhere_is_the_cache_granted_and_its_tokens_are_masked() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let cargo_home = temp_dir.path().join("tools").join("cargo");
+    std::fs::create_dir_all(&cargo_home).unwrap();
+    std::fs::write(cargo_home.join("credentials.toml"), "token").unwrap();
+    let workspace = home.join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: home.join(".swage"),
+        cargo_home: Some(cargo_home.clone()),
+    };
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+
+    for cache in ["registry", "git"] {
+        assert!(
+            policy
+                .write_paths
+                .contains(&sandbox_path(&cargo_home.join(cache))),
+            "{cache}: {:?}",
+            policy.write_paths
+        );
+    }
+    assert!(
+        !policy.write_paths.contains(&sandbox_path(&cargo_home)),
+        "Cargo's home beyond its caches stays read-only: {:?}",
+        policy.write_paths
     );
     assert!(
-        sandbox_config
-            .landlock_read_paths
-            .contains(&existing_workspace)
+        policy
+            .masked_paths
+            .contains(&sandbox_path(&cargo_home.join("credentials.toml"))),
+        "{:?}",
+        policy.masked_paths
     );
     assert!(
-        !sandbox_config
-            .read_write_mounts
-            .contains(&missing_workspace)
+        !home.join(".cargo").exists(),
+        "~/.cargo is not Cargo's home here"
     );
+}
+
+/// Registry tokens are masked, the one inside the writable cargo cache
+/// included.
+#[test]
+fn registry_credentials_are_masked_even_inside_a_writable_cache() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    std::fs::create_dir_all(home.join(".cargo")).unwrap();
+    std::fs::write(home.join(".cargo/credentials.toml"), "token").unwrap();
+    std::fs::write(home.join(".npmrc"), "//registry/:_authToken=x").unwrap();
+    let workspace = home.join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: home.join(".swage"),
+        cargo_home: None,
+    };
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+
+    for private in [".cargo/credentials.toml", ".npmrc"] {
+        assert!(
+            policy
+                .masked_paths
+                .contains(&sandbox_path(&home.join(private))),
+            "{private}: {:?}",
+            policy.masked_paths
+        );
+    }
+}
+
+/// Of `~/.ssh`, what ssh needs to reach a forge through the operator's
+/// agent reopens read-only through the mask; the private keys stay hidden.
+#[test]
+fn the_ssh_files_that_hold_no_key_reopen_read_only_and_the_keys_stay_masked() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    for file in ["config", "known_hosts", "id_ed25519", "id_ed25519.pub"] {
+        std::fs::write(ssh.join(file), "x").unwrap();
+    }
+    let workspace = home.join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: home.join(".swage"),
+        cargo_home: None,
+    };
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+
+    assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
+    let ssh = sandbox_path(&ssh);
+    let reopened: Vec<_> = policy
+        .read_only_paths
+        .iter()
+        .filter(|path| path.starts_with(&ssh))
+        .collect();
+    assert_eq!(
+        reopened,
+        vec![
+            &ssh.join("config"),
+            &ssh.join("id_ed25519.pub"),
+            &ssh.join("known_hosts"),
+        ]
+    );
+    assert!(!policy.write_paths.iter().any(|path| path.starts_with(&ssh)));
+}
+
+/// A shipped skill's files live beneath the masked data root; the policy
+/// reopens all of them to read and run, and none to write.
+#[test]
+fn the_shipped_skills_are_readable_beneath_the_masked_data_root() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let data_root = home.join(".swage");
+    let skill = crate::shipped_skill_projection::skill_dir(&data_root, "project-docs");
+    std::fs::create_dir_all(&skill).unwrap();
+    let workspace = home.join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let roots = PolicyRoots {
+        home,
+        data_root: sandbox_path(&data_root),
+        cargo_home: None,
+    };
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+
+    let shipped = sandbox_path(&crate::shipped_skill_projection::root(&data_root));
+    assert!(policy.masked_paths.contains(&sandbox_path(&data_root)));
+    assert!(policy.read_only_paths.contains(&shipped));
     assert!(
-        !sandbox_config
-            .landlock_write_paths
-            .contains(&missing_workspace)
+        !policy
+            .write_paths
+            .iter()
+            .any(|path| shipped.starts_with(path) || path.starts_with(&shipped))
+    );
+}
+
+/// The network a sandboxed command reaches follows the setting: the host's
+/// by default, its own namespace when the person confines it or puts it
+/// behind the recording proxy.
+#[test]
+fn the_sandbox_shares_the_host_network_unless_the_setting_confines_it() {
+    let workspace = tempfile::tempdir().unwrap();
+    let roots = PolicyRoots {
+        home: workspace.path().join("home"),
+        data_root: workspace.path().join("data-root"),
+        cargo_home: None,
+    };
+    let agent_config = AgentConfig::new("worker")
+        .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+    for (network, shared) in [
+        (swage_config::SandboxNetwork::Open, true),
+        (swage_config::SandboxNetwork::None, false),
+        (swage_config::SandboxNetwork::Proxy, false),
+    ] {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.network = network;
+        let policy = build_sandbox_config(&agent_config, None, &roots, &config).unwrap();
+        assert_eq!(policy.host_network, shared, "{network:?}");
+    }
+    assert_eq!(
+        swage_config::ResolvedConfig::default().sandbox.network,
+        swage_config::SandboxNetwork::Open
     );
 }
 
@@ -18128,22 +18827,24 @@ fn worker_placement_replaces_other_filesystem_authority() {
     apply_worker_placement_permission(&mut policy, &agent_config, Some(&metadata));
 
     assert!(policy.attachments.is_empty());
+    let roots = PolicyRoots {
+        home: temp_dir.path().join("home"),
+        data_root: temp_dir.path().join("data-root"),
+        cargo_home: None,
+    };
     let sandbox_config = build_sandbox_config(
         &agent_config,
         Some(&policy),
-        &swage_config::ToolConfig::default(),
+        &roots,
+        &swage_config::ResolvedConfig::default(),
     )
     .unwrap();
     let placement = sandbox_path(&placement);
     let sibling_workspace = sandbox_path(&sibling_workspace);
-    assert!(sandbox_config.read_only_mounts.contains(&placement));
-    assert!(!sandbox_config.read_write_mounts.contains(&placement));
-    assert!(!sandbox_config.read_only_mounts.contains(&sibling_workspace));
-    assert!(
-        !sandbox_config
-            .read_write_mounts
-            .contains(&sibling_workspace)
-    );
+    assert!(sandbox_config.read_only_paths.contains(&placement));
+    assert!(!sandbox_config.working_directory_is_writable());
+    assert!(!sandbox_config.read_only_paths.contains(&sibling_workspace));
+    assert!(!sandbox_config.write_paths.contains(&sibling_workspace));
 
     let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey::location(
         None,
@@ -26011,12 +26712,12 @@ async fn assert_later_replay_accounts_for_reads(offered: bool) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn later_replay_accounts_for_reads_with_retrieval() {
-    assert_later_replay_accounts_for_reads(true).await;
+    Box::pin(assert_later_replay_accounts_for_reads(true)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn later_replay_accounts_for_reads_without_retrieval() {
-    assert_later_replay_accounts_for_reads(false).await;
+    Box::pin(assert_later_replay_accounts_for_reads(false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

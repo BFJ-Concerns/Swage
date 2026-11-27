@@ -150,33 +150,285 @@ pub(super) fn sandbox_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The operator's home and the gateway's data root, as the policy needs them:
+/// the private paths to mask and the shared caches to open hang off both.
+pub(crate) struct PolicyRoots {
+    pub(crate) home: PathBuf,
+    pub(crate) data_root: PathBuf,
+    /// The operator's `CARGO_HOME`, where they set one; `~/.cargo`
+    /// otherwise.
+    pub(crate) cargo_home: Option<PathBuf>,
+}
+
+impl PolicyRoots {
+    /// The roots from the gateway's environment. A gateway with no `HOME`
+    /// cannot say where the private paths and caches are, so it builds no
+    /// sandbox rather than one with the masks silently missing.
+    pub(crate) fn from_environment(data_root: &Path) -> Result<Self, swage_core::SandboxError> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| !home.as_os_str().is_empty())
+            .ok_or_else(|| swage_core::SandboxError::Unavailable {
+                message: "HOME is not set, so the sandbox cannot place its private-path masks \
+                          and shared caches; start the gateway with HOME set"
+                    .into(),
+            })?;
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute());
+        Ok(Self {
+            home,
+            data_root: sandbox_path(data_root),
+            cargo_home,
+        })
+    }
+
+    /// Cargo's home: its registry cache, and its registry tokens.
+    pub(crate) fn cargo_home(&self) -> PathBuf {
+        self.cargo_home
+            .clone()
+            .unwrap_or_else(|| self.home.join(".cargo"))
+    }
+}
+
+/// Under the home, what a sandboxed command never sees: key material, cloud
+/// and cluster credentials, plaintext token files. Forge and registry
+/// authentication goes through the operator's SSH agent and their git
+/// credential helpers run on the host, so none of these is needed to build,
+/// commit, push or fetch; of `~/.ssh`, the files that hold no key reopen
+/// (`ssh_files_without_keys`).
+const MASKED_HOME_PATHS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".config/gcloud",
+    ".kube",
+    ".netrc",
+    ".git-credentials",
+    ".config/git/credentials",
+    ".config/gh/hosts.yml",
+    ".config/forgejo",
+    // Registry tokens. Cargo's live in its home, wherever that is
+    // (`CARGO_TOKEN_FILES`).
+    ".npmrc",
+    ".pypirc",
+    ".gem/credentials",
+    ".docker/config.json",
+    ".local/share/keyrings",
+    ".password-store",
+];
+
+/// Cargo's registry tokens in its home, which the sandbox reads broadly.
+const CARGO_TOKEN_FILES: &[&str] = &["credentials", "credentials.toml"];
+
+/// The caches inside Cargo's home that a sandboxed build fills: the
+/// registry's index and crates, and git dependencies. The rest of the home
+/// is not a cache — `bin/` holds the binaries on the operator's PATH and
+/// `config.toml` steers every host cargo — so it stays read-only.
+const CARGO_CACHE_DIRS: &[&str] = &["registry", "git"];
+
+/// Under the home, the shared build and package caches a sandboxed command
+/// may write, so a dependency fetched once is fetched once, each with the
+/// tool that fills it; `.cache` is every tool's. Cargo's are inside its
+/// home (`CARGO_CACHE_DIRS`).
+const SHARED_CACHE_PATHS: &[(&str, Option<&str>)] = &[
+    (".cache", None),
+    (".npm", Some("npm")),
+    // pnpm's store only: its home beside it holds the global binaries on
+    // the operator's PATH.
+    (".local/share/pnpm/store", Some("pnpm")),
+    ("go/pkg", Some("go")),
+];
+
+/// The shared caches a turn's sandbox may write. A cache that does not
+/// exist yet is created first where its tool is installed, since the
+/// sandbox can write inside a cache but cannot create one in the home; a
+/// cache with no tool to fill it is left uncreated.
+pub(crate) fn shared_caches(roots: &PolicyRoots, installed: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+    SHARED_CACHE_PATHS
+        .iter()
+        .map(|(cache, tool)| (roots.home.join(cache), *tool))
+        .chain(
+            CARGO_CACHE_DIRS
+                .iter()
+                .map(|cache| (roots.cargo_home().join(cache), Some("cargo"))),
+        )
+        .filter_map(|(path, tool)| {
+            if !path.is_dir()
+                && tool.is_none_or(&installed)
+                && let Err(error) = std::fs::create_dir_all(&path)
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "the shared cache could not be created; sandboxed commands cannot write it"
+                );
+            }
+            path.is_dir().then(|| sandbox_path(&path))
+        })
+        .collect()
+}
+
+/// Whether a command is installed: an executable of that name on `PATH`.
+fn on_path(command: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|directory| directory.join(command).is_file())
+    })
+}
+
+/// Where a workspace's git metadata lives when it is not under the
+/// workspace: a linked worktree's `.git` is a file naming its gitdir, whose
+/// `commondir` names the repository the worktree belongs to, and a
+/// submodule's names its directory under the superproject's `.git/modules`.
+/// The gitdir, and a worktree's common directory, must be writable for the
+/// workspace to commit.
+///
+/// The pointer is content of the workspace, which the sandbox writes, so
+/// it is trusted only as far as the metadata it names points back: a
+/// gitdir is listed only when it names this workspace — a worktree's
+/// `gitdir` file, or a submodule's `core.worktree` — and a common directory
+/// only when the gitdir is one of its `worktrees`. A pointer at another
+/// repository's metadata names nothing.
+pub(crate) fn git_metadata_outside(workspace: &Path) -> Vec<PathBuf> {
+    let dot_git = workspace.join(".git");
+    let Ok(pointer) = std::fs::read_to_string(&dot_git) else {
+        return Vec::new();
+    };
+    let Some(gitdir) = pointer.trim().strip_prefix("gitdir:") else {
+        return Vec::new();
+    };
+    let gitdir = sandbox_path(&workspace.join(gitdir.trim()));
+    let workspace = sandbox_path(workspace);
+    let is_git_metadata = |path: &Path, common: bool| {
+        path.join("HEAD").is_file()
+            && (!common || path.join("objects").is_dir())
+            && !workspace.starts_with(path)
+    };
+    let mut paths = Vec::new();
+    if !gitdir.starts_with(&workspace) {
+        if !is_git_metadata(&gitdir, false) || !names_workspace(&gitdir, &workspace) {
+            tracing::warn!(
+                path = %gitdir.display(),
+                "ignoring a workspace .git pointer at git metadata that does not name this workspace"
+            );
+            return paths;
+        }
+        paths.push(gitdir.clone());
+    }
+    if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
+        let common = sandbox_path(&gitdir.join(common.trim()));
+        if !common.starts_with(&workspace) && !paths.contains(&common) {
+            if !is_git_metadata(&common, true)
+                || gitdir.parent() != Some(common.join("worktrees").as_path())
+            {
+                tracing::warn!(
+                    path = %common.display(),
+                    "ignoring a worktree's commondir at a directory that is not its repository"
+                );
+                return paths;
+            }
+            paths.push(common);
+        }
+    }
+    paths
+}
+
+/// Whether git metadata outside a workspace points back at it: a linked
+/// worktree's gitdir holds a `gitdir` file naming the workspace's `.git`,
+/// and a submodule's sets `core.worktree` to the workspace.
+fn names_workspace(gitdir: &Path, workspace: &Path) -> bool {
+    if let Ok(back) = std::fs::read_to_string(gitdir.join("gitdir")) {
+        return sandbox_path(&gitdir.join(back.trim())) == workspace.join(".git");
+    }
+    std::process::Command::new("git")
+        .arg("config")
+        .arg("--file")
+        .arg(gitdir.join("config"))
+        .args(["--get", "core.worktree"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            let worktree = String::from_utf8_lossy(&output.stdout);
+            sandbox_path(&gitdir.join(worktree.trim())) == workspace
+        })
+}
+
+/// The masked private path a placement would reopen, when it would: a
+/// worker placed by the model inside a person's grant is the model's
+/// reach, not the person's. A placement within the operator's private
+/// home paths reopens their keys and credentials and is refused anywhere
+/// beneath them; one at the gateway's data root itself reopens the whole
+/// instance and is refused, while a subtree beneath the root is the
+/// managed workspaces' own home and reopens only itself (C64, C67).
+pub(crate) fn private_path_covering(path: &Path, roots: &PolicyRoots) -> Option<PathBuf> {
+    let path = sandbox_path(path);
+    let data_root = sandbox_path(&roots.data_root);
+    masked_paths(roots).into_iter().find(|private| {
+        if sandbox_path(private) == data_root {
+            path == data_root
+        } else {
+            path.starts_with(private)
+        }
+    })
+}
+
+/// The policy a turn's sandbox runs under: reads everywhere but the masked
+/// private paths and the gateway's data root (unless a grant names it),
+/// writes the workspace as its grant allows, the workspace's git metadata,
+/// the shared caches, temporary space and any attachment granted write.
 pub(crate) fn build_sandbox_config(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
-    tools: &swage_config::ToolConfig,
+    roots: &PolicyRoots,
+    config: &swage_config::ResolvedConfig,
 ) -> Result<swage_sandbox::SandboxConfig, swage_core::SandboxError> {
     let working_directory = sandbox_path(&agent_config.working_directory);
-    let runtime = crate::settings::tool_runtime_from_config(tools).map_err(|error| {
+    let runtime = crate::settings::tool_runtime_from_config(&config.tools).map_err(|error| {
         swage_core::SandboxError::SpawnFailed {
             message: format!("failed to configure sandbox tools: {error}"),
         }
     })?;
+    let host_network = config.sandbox.network == swage_config::SandboxNetwork::Open;
     let mut builder = swage_sandbox::SandboxConfig::builder()
         .working_directory(&working_directory)
-        .tool_runtime(runtime);
+        .tool_runtime(runtime)
+        .host_network(host_network);
+    let mut granted: Vec<PathBuf> = Vec::new();
+    let masked = masked_paths(roots);
 
     let active_grant = workspace_policy
         .and_then(|policy| policy.active_workspace.as_ref())
         .filter(|grant| sandbox_path(&grant.path) == working_directory);
     let active_can_write = active_grant.is_none_or(|grant| grant.can_write);
+    granted.push(working_directory.clone());
     if active_can_write {
-        builder = builder
-            .read_write_mount(&working_directory)
-            .landlock_write_path(&working_directory);
+        builder = builder.write_path(&working_directory);
+        for path in git_metadata_outside(&working_directory) {
+            if !path.exists() {
+                continue;
+            }
+            // The pointer is read from the workspace, which the sandbox
+            // writes, so it is never the operator's deliberate reach into a
+            // private path (C64): metadata under a mask stays masked, and
+            // a directory above one is not granted over it.
+            if let Some(private) = masked
+                .iter()
+                .find(|private| path.starts_with(private) || private.starts_with(&path))
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    private = %private.display(),
+                    "ignoring workspace git metadata under a masked private path"
+                );
+                continue;
+            }
+            builder = builder.write_path(&path);
+            granted.push(path);
+        }
     } else {
-        builder = builder
-            .read_only_mount(&working_directory)
-            .landlock_read_path(&working_directory);
+        builder = builder.read_only_path(&working_directory);
     }
 
     if let Some(policy) = workspace_policy {
@@ -201,25 +453,164 @@ pub(crate) fn build_sandbox_config(
                 }
             }
             if grant.can_write {
-                builder = builder.read_write_mount(&path).landlock_write_path(&path);
+                builder = builder.write_path(&path);
+                granted.push(path);
             } else if grant.can_read {
-                builder = builder.read_only_mount(&path).landlock_read_path(&path);
+                builder = builder.read_only_path(&path);
+                granted.push(path);
             }
         }
     }
 
+    for cache in shared_caches(roots, on_path) {
+        builder = builder.write_path(cache);
+    }
+    for private in &masked {
+        builder = builder.masked_path(private);
+    }
+    for path in ssh_files_without_keys(&roots.home) {
+        builder = builder.read_only_path(path);
+    }
+    let ssh_agent = operator_ssh_agent();
+    if let Some(socket) = &ssh_agent {
+        builder = builder.read_only_path(socket);
+    }
+    // The shipped skills' files, which their instructions tell the agent to
+    // read and run, are compiled into the gateway and written beneath its
+    // masked data root: every one is readable, none writable.
+    let shipped_skills = crate::shipped_skill_projection::root(&roots.data_root);
+    if shipped_skills.is_dir() {
+        builder = builder.read_only_path(sandbox_path(&shipped_skills));
+    }
+    tracing::debug!(?granted, "sandbox policy grants");
+
     if let Some(directory) = &agent_config.tool_output_directory {
         let directory = sandbox_path(directory);
         builder = builder
-            .read_write_mount(&directory)
-            .landlock_write_path(&directory)
-            .tool_output_location(swage_tool::context::ToolOutputLocation { directory });
+            .write_path(&directory)
+            .tool_output_directory(directory);
     }
-    builder
+    let mut policy = builder
         .build()
         .map_err(|error| swage_core::SandboxError::SpawnFailed {
             message: format!("failed to build sandbox config: {error}"),
+        })?;
+    if let Some(socket) = ssh_agent {
+        policy
+            .environment
+            .insert("SSH_AUTH_SOCK".into(), socket.display().to_string());
+    }
+    if let Some(command) = sandboxed_git_ssh_command(&working_directory, &roots.home) {
+        policy.environment.insert("GIT_SSH_COMMAND".into(), command);
+    }
+    // On the host's network a command uses the operator's own proxy, as it
+    // would unsandboxed.
+    if host_network {
+        for key in PROXY_ENVIRONMENT {
+            if let Ok(value) = std::env::var(key) {
+                policy.environment.insert((*key).into(), value);
+            }
+        }
+    }
+    Ok(policy)
+}
+
+/// The operator's network proxy settings, which a command on the host's
+/// network inherits.
+const PROXY_ENVIRONMENT: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
+/// The ssh command sandboxed git runs, unless the operator names their own
+/// (`core.sshCommand`, as the workspace's git configuration reads it).
+///
+/// Inside the sandbox's user namespace the host's root-owned files show as
+/// owned by nobody, and OpenSSH refuses a configuration file, the system's
+/// included ones among them, owned by anyone but root or the user. So git's
+/// ssh reads the operator's own configuration alone (`-F`), which is theirs
+/// and passes, or none where they have none.
+fn sandboxed_git_ssh_command(working_directory: &Path, home: &Path) -> Option<String> {
+    let configured = std::process::Command::new("git")
+        .args(["config", "--get", "core.sshCommand"])
+        .current_dir(working_directory)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.trim_ascii().is_empty());
+    if configured {
+        return None;
+    }
+    let user_config = home.join(".ssh").join("config");
+    let file = if user_config.is_file() {
+        user_config.display().to_string()
+    } else {
+        "/dev/null".to_owned()
+    };
+    Some(format!("ssh -F '{}'", file.replace('\'', "'\\''")))
+}
+
+/// The operator's SSH agent socket, when one is running: a sandboxed ssh
+/// authenticates through it and never reads a key.
+fn operator_ssh_agent() -> Option<PathBuf> {
+    let socket = PathBuf::from(std::env::var_os("SSH_AUTH_SOCK")?);
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(&socket)
+        .is_ok_and(|metadata| metadata.file_type().is_socket())
+        .then_some(socket)
+}
+
+/// The files under the masked `~/.ssh` that hold no key and that ssh needs
+/// to reach a forge: its configuration, the known hosts and the public
+/// halves of the operator's keys. Each reopens read-only through the mask.
+pub(crate) fn ssh_files_without_keys(home: &Path) -> Vec<PathBuf> {
+    let directory = home.join(".ssh");
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            // Exactly ssh's own names: a public half is `<key>.pub`.
+            path.extension().is_some_and(|extension| extension == "pub")
+                || path.file_name().is_some_and(|name| {
+                    name == "config" || name == "known_hosts" || name == "known_hosts2"
+                })
         })
+        .map(|path| sandbox_path(&path))
+        .collect();
+    files.sort();
+    files
+}
+
+/// The private paths a turn's sandbox masks, each only where it exists: the
+/// operator's secrets under the home, and the gateway's own data root — its
+/// store, secrets and token — masked unless a grant names it (C64). A grant
+/// beneath a mask (the managed scratch workspace lives under the data root)
+/// reopens only its own subtree: the mount layer applies the deeper path
+/// last, so the grant shows through the mask without the rest; a grant equal
+/// to the root, or to any masked private path, binds after the mask and
+/// reopens what it names.
+fn masked_paths(roots: &PolicyRoots) -> Vec<PathBuf> {
+    let cargo_home = roots.cargo_home();
+    let mut masked: Vec<PathBuf> = MASKED_HOME_PATHS
+        .iter()
+        .map(|private| roots.home.join(private))
+        .chain(CARGO_TOKEN_FILES.iter().map(|file| cargo_home.join(file)))
+        .filter(|path| path.exists())
+        .map(|path| sandbox_path(&path))
+        .collect();
+    if roots.data_root.exists() {
+        masked.push(roots.data_root.clone());
+    }
+    masked
 }
 
 pub(crate) fn apply_worker_placement_permission(
@@ -248,6 +639,9 @@ pub(super) async fn build_turn_sandbox(
     config: &swage_config::ResolvedConfig,
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
+    egress: Option<swage_sandbox::EgressSetup>,
+    credentials: Option<&crate::git_credential::CredentialServer>,
+    signer: Option<&crate::git_signer::SignerServer>,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     if let Some(directory) = &agent_config.tool_output_directory {
         tokio::fs::create_dir_all(directory)
@@ -269,7 +663,8 @@ pub(super) async fn build_turn_sandbox(
     }
     #[cfg(test)]
     if state.test_sandbox_enabled() {
-        let config = build_sandbox_config(agent_config, workspace_policy, &config.tools)?;
+        let roots = PolicyRoots::from_environment(&state.config_root)?;
+        let config = build_sandbox_config(agent_config, workspace_policy, &roots, config)?;
         return Ok(TurnSandboxBuild {
             sandbox: Some(Arc::new(PolicyEnforcingTestSandbox { config })),
             isolation: ExecutionIsolation::Isolated,
@@ -302,6 +697,9 @@ pub(super) async fn build_turn_sandbox(
         config,
         agent_config,
         workspace_policy,
+        egress,
+        credentials,
+        signer,
         swage_sandbox::find_bwrap().is_ok(),
         true,
     )
@@ -334,11 +732,7 @@ impl Sandbox for PolicyEnforcingTestSandbox {
                 .map(|content| serde_json::json!({"output": content}))
                 .map_err(|error| error.to_string()),
             ("file_write", Some(path)) => {
-                if !self
-                    .config
-                    .read_write_mounts
-                    .contains(&self.config.working_directory)
-                {
+                if !self.config.working_directory_is_writable() {
                     Err("write refused by read-only sandbox mount".into())
                 } else {
                     let content = params
@@ -376,10 +770,21 @@ async fn build_turn_sandbox_for_backend_selection(
     config: &swage_config::ResolvedConfig,
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
+    egress: Option<swage_sandbox::EgressSetup>,
+    credentials: Option<&crate::git_credential::CredentialServer>,
+    signer: Option<&crate::git_signer::SignerServer>,
     bubblewrap_available: bool,
     spawn_fallback: bool,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
-    let sandbox_config = build_sandbox_config(agent_config, workspace_policy, &config.tools)?;
+    let roots = PolicyRoots::from_environment(&state.config_root)?;
+    let mut sandbox_config = build_sandbox_config(agent_config, workspace_policy, &roots, config)?;
+
+    if let Some(credentials) = credentials {
+        credentials.configure(&mut sandbox_config)?;
+    }
+    if let Some(signer) = signer {
+        signer.configure(&mut sandbox_config)?;
+    }
 
     let provider = state.active_provider();
     let make_llm_handler = || {
@@ -401,6 +806,9 @@ async fn build_turn_sandbox_for_backend_selection(
     if bubblewrap_available {
         let mut sandbox =
             swage_sandbox::BubblewrapSandbox::new(sandbox_config.clone(), make_llm_handler());
+        if let Some(egress) = egress.clone() {
+            sandbox = sandbox.with_egress(egress);
+        }
         match sandbox.spawn_agent().await {
             Ok(()) => {
                 return Ok(TurnSandboxBuild {
@@ -433,7 +841,14 @@ async fn build_turn_sandbox_for_backend_selection(
         degradation_reason = "bubblewrap_unavailable".into();
     }
 
+    // The fallback has no mount layer, so it hides nothing: the private
+    // paths the policy masks are readable to this turn, and the record
+    // of its degraded isolation says which.
+    let degradation_reason = degraded_reason(degradation_reason, &sandbox_config.masked_paths);
     let mut fallback = swage_sandbox::FallbackSandbox::new(sandbox_config, make_llm_handler());
+    if let Some(egress) = egress {
+        fallback = fallback.with_egress(egress);
+    }
     if spawn_fallback {
         fallback.spawn_agent().await?;
     }
@@ -444,6 +859,24 @@ async fn build_turn_sandbox_for_backend_selection(
         },
         backend: SandboxBackend::Fallback,
     })
+}
+
+/// The degraded isolation's reason with the private paths left unmasked
+/// named, so a reader of the turn's record learns what was open.
+fn degraded_reason(reason: String, masked_paths: &[PathBuf]) -> String {
+    if masked_paths.is_empty() {
+        return reason;
+    }
+    tracing::warn!(
+        unmasked = ?masked_paths,
+        "degraded sandbox cannot mask private paths; they are readable to this turn"
+    );
+    let unmasked = masked_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{reason}; unmasked: {unmasked}")
 }
 
 pub(crate) async fn build_gateway_dispatcher(
@@ -458,7 +891,7 @@ pub(crate) async fn build_gateway_dispatcher(
         active_workspace_attachment_id,
         ws_tx,
         session_id,
-        turn_id: _,
+        turn_id,
     } = request;
     #[cfg(test)]
     if state.take_dispatcher_build_failure() {
@@ -495,16 +928,95 @@ pub(crate) async fn build_gateway_dispatcher(
     let base_dispatcher = state.active_tool_dispatcher();
     let dispatcher = ToolDispatcher::new(
         Arc::new(base_dispatcher.registry().for_agent(&agent_config.agent_id)),
-        permissions,
+        permissions.clone(),
         Arc::new(RateLimiter::new()),
         RateLimitConfig::default(),
         Arc::new(LeakDetector::default()),
         false,
     );
 
-    let sandbox_build =
-        build_turn_sandbox(state, config, agent_config, workspace_policy.as_ref()).await?;
+    // Where the person has put sandboxed commands behind the recording
+    // proxy, what they may reach and the record of it: the listed hosts,
+    // then the judge, every attempt an audit event of this session and
+    // turn. Otherwise no proxy runs: the network is the host's, or none.
+    let egress = (config.sandbox.network == swage_config::SandboxNetwork::Proxy).then(|| {
+        crate::egress::turn_egress_setup(
+            &config.sandbox.egress_hosts,
+            Some(Arc::new(crate::request_judge::GatewayRequestJudge::new(
+                state.clone(),
+            ))),
+            state.storage.clone(),
+            session_id,
+            turn_id,
+            &agent_config.agent_id,
+        )
+    });
+    let credentials = crate::git_credential::CredentialServer::start(
+        state.storage.clone(),
+        session_id,
+        turn_id,
+        Some(agent_config.working_directory.clone()),
+    )?;
+    // The operator's commit signing, forwarded to the host: present when
+    // the operator signs, as the workspace's git configuration says; a
+    // configuration that signs nothing leaves sandboxed git signing nothing.
+    let signer = match crate::git_signer::SigningConfig::from_host_git(
+        &agent_config.working_directory,
+    )
+    .await
+    {
+        Some(signing) => {
+            // What this turn's sandbox may write, so that the host never
+            // runs a signing program the sandbox could have replaced.
+            let writable = PolicyRoots::from_environment(&state.config_root)
+                .ok()
+                .and_then(|roots| {
+                    build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots, config)
+                        .ok()
+                })
+                .map(|policy| policy.write_paths)
+                .unwrap_or_default();
+            Some(crate::git_signer::SignerServer::start(
+                state.storage.clone(),
+                session_id,
+                turn_id,
+                signing.refusing_programs_under(&writable),
+            )?)
+        }
+        None => None,
+    };
+    let sandbox_build = build_turn_sandbox(
+        state,
+        config,
+        agent_config,
+        workspace_policy.as_ref(),
+        egress.clone(),
+        Some(&credentials),
+        signer.as_deref(),
+    )
+    .await?;
     tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
+    // Python runs under the turn's own policy wherever the turn is
+    // sandboxed, and wherever Python must be although the turn's sandbox
+    // degraded. A turn whose sandbox the person switched off runs Python on
+    // the host as it runs the shell; so does a degraded turn where Python
+    // need not be sandboxed.
+    let python_config = if config.tools.python_execute.enabled
+        && sandbox_build.isolation != ExecutionIsolation::SandboxDisabled
+        && (config.tools.python_execute.require_sandbox
+            || sandbox_build.backend == SandboxBackend::Bubblewrap)
+    {
+        let roots = PolicyRoots::from_environment(&state.config_root)?;
+        let mut policy =
+            build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots, config)?;
+        credentials.configure(&mut policy)?;
+        if let Some(signer) = &signer {
+            signer.configure(&mut policy)?;
+        }
+        Some(policy)
+    } else {
+        None
+    };
     let sandbox = sandbox_build.sandbox;
     let sandbox_guard = sandbox
         .as_ref()
@@ -522,15 +1034,67 @@ pub(crate) async fn build_gateway_dispatcher(
         None => dispatcher,
     };
 
+    let mut nested_registry = swage_tool::registry::ToolRegistry::new();
+    for name in dispatcher
+        .registry()
+        .list()
+        .into_iter()
+        .filter(|name| *name != "python_execute")
+    {
+        nested_registry
+            .register_builtin(dispatcher.registry().get(name).expect("registered tool"))
+            .map_err(|error| swage_core::SandboxError::SpawnFailed {
+                message: error.to_string(),
+            })?;
+    }
+    // A Python program's calls run under the answer already given for the
+    // `python_execute` call that runs it — the person's approval, or the
+    // turn's pass that asked nothing — so they keep the turn's grants and
+    // denials and ask nothing again.
+    let nested_permissions = swage_tool::permission::PermissionConfig {
+        require_approval: Vec::new(),
+        ..permissions
+    };
+    let nested_dispatcher = ToolDispatcher::new(
+        Arc::new(nested_registry),
+        nested_permissions,
+        Arc::new(RateLimiter::new()),
+        RateLimitConfig::default(),
+        Arc::new(LeakDetector::default()),
+        false,
+    )
+    .with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
+        inner_strategy.clone(),
+        ws_tx.clone(),
+        device.clone(),
+        state.secret_manager.clone(),
+        state.storage.clone(),
+        Some(state.clone()),
+    )));
+    // A turn the person runs without the sandbox confines nothing, its
+    // Python's network included.
+    let python_egress =
+        egress.filter(|_| sandbox_build.isolation != ExecutionIsolation::SandboxDisabled);
+    let python_execution = crate::tool_executor::PythonExecution {
+        sandbox: python_config,
+        egress: python_egress,
+        dispatcher: Arc::new(nested_dispatcher),
+        credentials,
+        signer,
+    };
+
     Ok(GatewayDispatcherBuild {
-        dispatcher: dispatcher.with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
-            inner_strategy,
-            ws_tx,
-            device,
-            state.secret_manager.clone(),
-            state.storage.clone(),
-            Some(state.clone()),
-        ))),
+        dispatcher: dispatcher.with_execution_strategy(Arc::new(
+            GatewayExecutionStrategy::new(
+                inner_strategy,
+                ws_tx,
+                device,
+                state.secret_manager.clone(),
+                state.storage.clone(),
+                Some(state.clone()),
+            )
+            .with_python_execution(python_execution),
+        )),
         sandbox_guard,
         isolation: sandbox_build.isolation,
     })
@@ -676,6 +1240,390 @@ mod tests {
     use super::*;
     use crate::turn::tests::{MockStorage, make_state_with_session, make_state_with_storage};
 
+    // Environment changes are confined to a subprocess, away from other tests.
+    fn run_dispatcher_environment_case(name: &str, no_home: bool) -> bool {
+        if std::env::var_os("SWAGE_DISPATCHER_REGRESSION_CHILD").is_some() {
+            return true;
+        }
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", name, "--nocapture"])
+            .env("SWAGE_DISPATCHER_REGRESSION_CHILD", "1");
+        if no_home {
+            command.env_remove("HOME");
+        } else {
+            let runtime = swage_python::runtime_resolver::ResolvedPythonRuntime::resolve(
+                &swage_config::model::PythonExecuteToolConfig::default(),
+            )
+            .unwrap();
+            command
+                .env("SWAGE_TEST_PYTHON", runtime.executable_path)
+                .env("PATH", "");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "environment case failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    async fn environment_case_dispatcher(config: swage_config::ResolvedConfig, python: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id) = crate::turn::tests::make_state_with_storage_and_root(
+            Vec::new(),
+            Arc::new(MockStorage::new()),
+            Some(root.path().to_owned()),
+        )
+        .await;
+        let tool: Arc<dyn Tool> = if python {
+            let runtime = Arc::new(
+                swage_python::PythonWorkerRuntime::new(config.tools.python_execute.clone())
+                    .unwrap(),
+            );
+            let pool = swage_python::WorkerPool::new(runtime.clone()).unwrap();
+            Arc::new(crate::tool::python_execute::PythonExecuteTool::new(
+                runtime,
+                pool,
+                state.storage.clone(),
+            ))
+        } else {
+            Arc::new(crate::tool::shell::ShellTool {
+                timeout: std::time::Duration::from_secs(5),
+                max_output_bytes: 1024,
+            })
+        };
+        *state.runtime_tool_dispatcher.write().unwrap() =
+            Arc::new(ToolDispatcher::allow_all(vec![tool]));
+        let agent_config =
+            AgentConfig::new("gateway").with_workspace(root.path(), vec![root.path().to_owned()]);
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let build = build_gateway_dispatcher(
+            &state,
+            GatewayDispatcherRequest {
+                config: &config,
+                agent_config: &agent_config,
+                session_metadata: None,
+                topic_id: None,
+                active_workspace_attachment_id: None,
+                ws_tx,
+                session_id: Some(session_id),
+                turn_id: Some(Uuid::new_v4()),
+            },
+        )
+        .await
+        .expect("unsandboxed dispatcher must build without HOME");
+        assert!(build.sandbox_guard.is_none());
+        let mut ctx = swage_tool::context::MockToolContext::new("gateway", session_id.to_string());
+        ctx.working_directory = root.path().to_owned();
+        ctx.allowed_paths = vec![root.path().to_owned()];
+        ctx.turn_id = Some(Uuid::new_v4());
+        ctx.call_id = Some("environment-check".into());
+        let (name, params) = if python {
+            assert!(swage_sandbox::find_bwrap().is_err());
+            (
+                "python_execute",
+                serde_json::json!({"code": "print(6 * 7)"}),
+            )
+        } else {
+            ("shell", serde_json::json!({"command": "printf 42"}))
+        };
+        let result = build
+            .dispatcher
+            .dispatch(name, params, &ctx, "gateway")
+            .await;
+        assert!(result.is_ok(), "unsandboxed tool must run: {result:?}");
+        assert_eq!(
+            result.unwrap().result["output"].as_str().unwrap().trim(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn no_home_unsandboxed_dispatcher_runs_tools() {
+        if !run_dispatcher_environment_case(
+            "turn::dispatcher::tests::no_home_unsandboxed_dispatcher_runs_tools",
+            true,
+        ) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for python_enabled in [true, false] {
+                let mut config = swage_config::ResolvedConfig::default();
+                config.sandbox.enabled = false;
+                config.tools.python_execute.require_sandbox = false;
+                config.tools.python_execute.enabled = python_enabled;
+                config.dangerously_skip_permissions = true;
+                environment_case_dispatcher(config, false).await;
+            }
+        });
+    }
+
+    #[test]
+    fn sandbox_disabled_python_runs_without_bubblewrap() {
+        if !run_dispatcher_environment_case(
+            "turn::dispatcher::tests::sandbox_disabled_python_runs_without_bubblewrap",
+            false,
+        ) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            // The person switched the sandbox off: Python runs as the shell
+            // does, with the shipped `require_sandbox` left as it is.
+            let mut config = swage_config::ResolvedConfig::default();
+            config.sandbox.enabled = false;
+            assert!(config.tools.python_execute.require_sandbox);
+            config.tools.python_execute.enabled = true;
+            config.tools.python_execute.warm_target = 0;
+            config.tools.python_execute.runtime_path =
+                Some(std::env::var("SWAGE_TEST_PYTHON").unwrap());
+            config.dangerously_skip_permissions = true;
+            environment_case_dispatcher(config, true).await;
+        });
+    }
+
+    #[test]
+    fn degraded_python_records_http_without_bubblewrap() {
+        degraded_python_case(
+            "turn::dispatcher::tests::degraded_python_records_http_without_bubblewrap",
+            false,
+        );
+    }
+
+    #[test]
+    fn degraded_python_required_sandbox_refuses_without_bubblewrap() {
+        degraded_python_case(
+            "turn::dispatcher::tests::degraded_python_required_sandbox_refuses_without_bubblewrap",
+            true,
+        );
+    }
+
+    fn degraded_python_case(name: &str, require_sandbox: bool) {
+        if std::env::var_os("SWAGE_IPC_SOCKET").is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                swage_sandbox::run_agent_loop(Vec::new()).await.unwrap();
+            });
+            return;
+        }
+        if std::env::var_os("SWAGE_DEGRADED_PYTHON_CHILD").is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tempfile::tempdir().unwrap();
+            // Move out of Cargo's deps directory so the real backend selection
+            // runs, including starting the fallback agent over IPC.
+            let binary = root.path().join("dispatcher-test");
+            std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+            let agent = root.path().join("agent");
+            std::fs::write(
+                &agent,
+                format!(
+                    "#!/bin/sh\nexec \"$SWAGE_TEST_DISPATCHER_BINARY\" --exact {name} --nocapture\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let runtime = swage_python::runtime_resolver::ResolvedPythonRuntime::resolve(
+                &swage_config::model::PythonExecuteToolConfig::default(),
+            )
+            .unwrap();
+            let output = std::process::Command::new(&binary)
+                .args(["--exact", name, "--nocapture"])
+                .env("SWAGE_DEGRADED_PYTHON_CHILD", "1")
+                .env("SWAGE_TEST_DISPATCHER_BINARY", &binary)
+                .env("SWAGE_SANDBOX_AGENT_BINARY", agent)
+                .env("SWAGE_ENABLE_TEST_SANDBOX", "1")
+                .env("SWAGE_TEST_PYTHON", runtime.executable_path)
+                .env("PATH", "")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "degraded Python case failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            assert!(swage_sandbox::find_bwrap().is_err());
+            let root = tempfile::tempdir().unwrap();
+            let workspace = root.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let (state, session_id) = crate::turn::tests::make_state_with_storage_and_root(
+                Vec::new(),
+                Arc::new(MockStorage::new()),
+                Some(root.path().join("config")),
+            )
+            .await;
+            let mut config = swage_config::ResolvedConfig::default();
+            config.sandbox.enabled = true;
+            config.sandbox.allow_degraded_execution = true;
+            config.sandbox.network = swage_config::SandboxNetwork::Proxy;
+            config.sandbox.egress_hosts = vec!["127.0.0.1".into()];
+            config.tools.python_execute.enabled = true;
+            config.tools.python_execute.require_sandbox = require_sandbox;
+            config.tools.python_execute.warm_target = 0;
+            config.tools.python_execute.runtime_path =
+                Some(std::env::var("SWAGE_TEST_PYTHON").unwrap());
+            config.dangerously_skip_permissions = true;
+            let runtime = Arc::new(
+                swage_python::PythonWorkerRuntime::new(config.tools.python_execute.clone()).unwrap(),
+            );
+            let pool = swage_python::WorkerPool::new(runtime.clone()).unwrap();
+            let tool: Arc<dyn Tool> = Arc::new(crate::tool::python_execute::PythonExecuteTool::new(
+                runtime,
+                pool,
+                state.storage.clone(),
+            ));
+            *state.runtime_tool_dispatcher.write().unwrap() =
+                Arc::new(ToolDispatcher::allow_all(vec![tool]));
+            let agent_config = AgentConfig::new("gateway")
+                .with_workspace(&workspace, vec![workspace.clone()]);
+            let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+            let turn_id = Uuid::new_v4();
+            let build = build_gateway_dispatcher(
+                &state,
+                GatewayDispatcherRequest {
+                    config: &config,
+                    agent_config: &agent_config,
+                    session_metadata: None,
+                    topic_id: None,
+                    active_workspace_attachment_id: None,
+                    ws_tx,
+                    session_id: Some(session_id),
+                    turn_id: Some(turn_id),
+                },
+            )
+            .await
+            .expect("opted-in fallback dispatcher must build");
+            let ExecutionIsolation::Degraded { reason } = &build.isolation else {
+                panic!("{:?}", build.isolation);
+            };
+            assert!(
+                reason.starts_with("bubblewrap_unavailable"),
+                "{reason}"
+            );
+            assert!(build.sandbox_guard.is_some());
+            let server = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let address = server.local_addr().unwrap();
+            let fixture = tokio::spawn(async move {
+                let (stream, _) = server.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert_eq!(line, "GET /recorded HTTP/1.1\r\n");
+                reader.get_mut().write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nfixture",
+                ).await.unwrap();
+            });
+            let outside = root.path().join("outside-workspace");
+            let code = format!(
+                "import os, pathlib, urllib.request\nos.environ['no_proxy'] = ''\nos.environ['NO_PROXY'] = ''\npathlib.Path({:?}).write_text('unsandboxed')\nprint(urllib.request.urlopen('http://{address}/recorded', timeout=3).read().decode())",
+                outside.to_str().unwrap(),
+            );
+            let mut ctx = swage_tool::context::MockToolContext::new("gateway", session_id.to_string());
+            ctx.working_directory = workspace.clone();
+            ctx.allowed_paths = vec![workspace];
+            ctx.turn_id = Some(turn_id);
+            ctx.call_id = Some("degraded-python".into());
+            let result = build.dispatcher.dispatch(
+                "python_execute", serde_json::json!({"code": code}), &ctx, "gateway",
+            ).await;
+            if require_sandbox {
+                let error = result.expect_err("required Python sandbox must refuse fallback");
+                assert!(error.to_string().contains("bubblewrap is required"), "{error}");
+                assert!(!outside.exists());
+                fixture.abort();
+            } else {
+                assert!(result.is_ok(), "degraded Python must run: {result:?}");
+                assert_eq!(result.unwrap().result["output"].as_str().unwrap().trim(), "fixture");
+                assert_eq!(std::fs::read_to_string(outside).unwrap(), "unsandboxed");
+                tokio::time::timeout(std::time::Duration::from_secs(5), fixture)
+                    .await.unwrap().unwrap();
+            }
+            let events = state.storage.list_audit_events().await.unwrap();
+            let records: Vec<_> = events.iter()
+                .filter(|event| event.event_kind == "egress_connection").collect();
+            if require_sandbox {
+                assert!(records.is_empty());
+            } else {
+                assert_eq!(records.len(), 1, "the turn must record Python HTTP egress");
+                assert_eq!(records[0].session_id, Some(session_id));
+                assert_eq!(records[0].entity_id, turn_id.to_string());
+                assert_eq!(records[0].metadata["host"], "127.0.0.1");
+                assert_eq!(records[0].metadata["port"], address.port());
+                assert_eq!(records[0].metadata["method"], "GET");
+                assert_eq!(records[0].metadata["verdict"], "allowed");
+            }
+            build.sandbox_guard.as_ref().unwrap().shutdown().await.unwrap();
+        });
+    }
+
+    /// An egress setup for tests of backend selection: nothing is reachable
+    /// and nothing is recorded, since no command runs.
+    /// Git's ssh in the sandbox reads the operator's own configuration
+    /// alone, unless the operator names their own ssh command.
+    #[test]
+    fn sandboxed_git_ssh_reads_the_operators_configuration_unless_they_name_a_command() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        let workspace = root.path().join("o'brien");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&workspace)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+
+        assert_eq!(
+            sandboxed_git_ssh_command(&workspace, &home).as_deref(),
+            Some("ssh -F '/dev/null'"),
+            "an operator with no ssh configuration has none read"
+        );
+        std::fs::write(home.join(".ssh/config"), "Host forge\n").unwrap();
+        assert_eq!(
+            sandboxed_git_ssh_command(&workspace, &home),
+            Some(format!("ssh -F '{}'", home.join(".ssh/config").display()))
+        );
+        git(&["config", "core.sshCommand", "ssh -i key"]);
+        assert_eq!(sandboxed_git_ssh_command(&workspace, &home), None);
+    }
+
+    fn test_egress() -> Option<swage_sandbox::EgressSetup> {
+        struct Closed;
+        #[async_trait::async_trait]
+        impl swage_sandbox::EgressPolicy for Closed {
+            async fn decide(
+                &self,
+                _: &swage_sandbox::EgressRequest,
+            ) -> swage_sandbox::EgressVerdict {
+                swage_sandbox::EgressVerdict::Refused {
+                    reason: "test".into(),
+                }
+            }
+        }
+        struct Dropped;
+        #[async_trait::async_trait]
+        impl swage_sandbox::EgressRecorder for Dropped {
+            async fn record(&self, _: swage_sandbox::EgressConnection) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        Some(swage_sandbox::EgressSetup {
+            policy: Arc::new(Closed),
+            recorder: Arc::new(Dropped),
+        })
+    }
+
     fn codex_config() -> swage_config::ResolvedConfig {
         let mut config = swage_config::ResolvedConfig::default();
         config.providers.entries.insert(
@@ -754,9 +1702,17 @@ mod tests {
                 .await
                 .unwrap();
 
-        let build = build_turn_sandbox(&state, &config, &agent_config, None)
-            .await
-            .unwrap();
+        let build = build_turn_sandbox(
+            &state,
+            &config,
+            &agent_config,
+            None,
+            test_egress(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         record_turn_isolation(&state, &build.isolation, turn_id)
             .await
             .unwrap();
@@ -780,9 +1736,17 @@ mod tests {
         config.sandbox.enabled = false;
         assert!(!config.sandbox.allow_degraded_execution);
 
-        let build = build_turn_sandbox(&state, &config, &agent_config, None)
-            .await
-            .expect("switching the sandbox off is the choice itself; no opt-in is needed");
+        let build = build_turn_sandbox(
+            &state,
+            &config,
+            &agent_config,
+            None,
+            test_egress(),
+            None,
+            None,
+        )
+        .await
+        .expect("switching the sandbox off is the choice itself; no opt-in is needed");
 
         assert_eq!(build.isolation, ExecutionIsolation::SandboxDisabled);
     }
@@ -805,6 +1769,9 @@ mod tests {
             &config,
             &agent_config,
             None,
+            test_egress(),
+            None,
+            None,
             false,
             false,
         )
@@ -812,12 +1779,13 @@ mod tests {
         .expect("the explicit opt-in should select the fallback sandbox");
         assert_eq!(build.backend, SandboxBackend::Fallback);
         assert!(build.sandbox.is_some());
-        assert_eq!(
-            build.isolation,
-            ExecutionIsolation::Degraded {
-                reason: "bubblewrap_unavailable".into(),
-            }
-        );
+        // The reason names the private paths the fallback leaves readable,
+        // so the record says what was open.
+        let ExecutionIsolation::Degraded { reason } = &build.isolation else {
+            panic!("{:?}", build.isolation);
+        };
+        assert!(reason.starts_with("bubblewrap_unavailable"), "{reason}");
+        assert!(reason.contains("; unmasked: "), "{reason}");
 
         let turn_id = Uuid::new_v4();
         record_unsandboxed_execution(
@@ -832,7 +1800,9 @@ mod tests {
         let events = state.storage.list_audit_events().await.unwrap();
         assert!(events.iter().any(|event| {
             event.entity_id == turn_id.to_string()
-                && event.metadata["reason"] == "bubblewrap_unavailable"
+                && event.metadata["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.starts_with("bubblewrap_unavailable"))
         }));
     }
 

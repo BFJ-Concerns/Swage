@@ -12,7 +12,9 @@ use swage_core::SandboxError;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::CREDENTIAL_ENV_VARS;
 use crate::config::SandboxConfig;
+use crate::egress::{EgressProxy, EgressSetup};
 use crate::ipc::in_flight::InFlightToolCall;
 use crate::ipc::message::{ErrorCategory, IpcMessage, LlmRequest as IpcLlmRequest};
 use crate::ipc::transport::IpcTransport;
@@ -21,20 +23,6 @@ use crate::process::{ChildProcessManager, cleanup_failed_startup_process};
 use crate::resolve_agent_binary;
 use crate::sandbox::{Sandbox, ToolCallResult};
 use crate::socket::SocketManager;
-
-// ---------------------------------------------------------------------------
-// Credential isolation
-// ---------------------------------------------------------------------------
-
-/// API key env var names to strip from the child process environment.
-///
-/// The sandboxed agent must never hold provider credentials. All LLM
-/// completions are proxied through the host process via IPC — the agent sends
-/// an `LlmRequest`, the host dispatches it to the provider, and the response
-/// comes back as `LlmResponse`. Stripping these vars is a defence-in-depth
-/// measure: even if the isolation layer is bypassed, the agent cannot call
-/// providers directly without keys.
-const CREDENTIAL_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
 
 // ---------------------------------------------------------------------------
 // FallbackSandbox
@@ -51,7 +39,12 @@ const CREDENTIAL_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "G
 pub struct FallbackSandbox {
     config: SandboxConfig,
     llm_handler: HostLlmHandler,
+    /// The egress proxy's policy and recorder. Without a network namespace
+    /// nothing forces traffic through the proxy, but HTTP-aware tools still
+    /// honour the proxy variables, so their destinations are still recorded.
+    egress: Option<EgressSetup>,
     // Populated after spawn_agent.
+    egress_proxy: Mutex<Option<EgressProxy>>,
     socket_manager: Mutex<Option<SocketManager>>,
     process: Mutex<Option<ChildProcessManager>>,
     // Mutex for interior mutability: execute_tool receives &self but must
@@ -68,10 +61,18 @@ impl FallbackSandbox {
         Self {
             config,
             llm_handler,
+            egress: None,
+            egress_proxy: Mutex::new(None),
             socket_manager: Mutex::new(None),
             process: Mutex::new(None),
             transport: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Run the recording proxy beside the child and point its tools at it.
+    pub fn with_egress(mut self, setup: EgressSetup) -> Self {
+        self.egress = Some(setup);
+        self
     }
 
     /// Test-only constructor that injects a pre-built transport.
@@ -87,6 +88,8 @@ impl FallbackSandbox {
         Self {
             config,
             llm_handler,
+            egress: None,
+            egress_proxy: Mutex::new(None),
             socket_manager: Mutex::new(None),
             process: Mutex::new(None),
             transport: Arc::new(Mutex::new(Some(transport))),
@@ -123,6 +126,15 @@ impl Sandbox for FallbackSandbox {
                 ),
             })?;
         cmd.env("SWAGE_SANDBOX_CONFIG_JSON", config_json);
+        let egress_proxy = match &self.egress {
+            Some(setup) => Some(EgressProxy::start(setup.clone())?),
+            None => None,
+        };
+        if let Some(proxy) = &egress_proxy {
+            cmd.env(crate::egress::EGRESS_SOCKET_ENV, proxy.socket_path());
+        }
+
+        cmd.envs(&self.config.environment);
 
         // Strip provider API keys — the agent gets completions via IPC proxy,
         // never directly from providers.
@@ -207,6 +219,7 @@ impl Sandbox for FallbackSandbox {
         }
 
         *self.socket_manager.get_mut() = Some(socket_manager);
+        *self.egress_proxy.get_mut() = egress_proxy;
         *self.process.get_mut() = Some(process);
         *self.transport.lock().await = Some(transport);
 
@@ -375,8 +388,10 @@ impl Sandbox for FallbackSandbox {
                 .await?;
         }
 
-        // Drop the socket manager — its Drop impl removes the socket file.
+        // Drop the socket manager — its Drop impl removes the socket file —
+        // and the egress proxy with it.
         *self.socket_manager.lock().await = None;
+        *self.egress_proxy.lock().await = None;
 
         Ok(())
     }

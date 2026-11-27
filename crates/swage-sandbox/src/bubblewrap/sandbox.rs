@@ -12,8 +12,11 @@ use swage_core::SandboxError;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::CREDENTIAL_ENV_VARS;
 use crate::bubblewrap::command::build_bwrap_command;
 use crate::config::SandboxConfig;
+use crate::egress::{EgressProxy, EgressSetup};
 use crate::ipc::in_flight::InFlightToolCall;
 use crate::ipc::message::{ErrorCategory, IpcMessage, LlmRequest as IpcLlmRequest};
 use crate::ipc::transport::IpcTransport;
@@ -22,18 +25,6 @@ use crate::process::{ChildProcessManager, cleanup_failed_startup_process};
 use crate::resolve_agent_binary;
 use crate::sandbox::{Sandbox, ToolCallResult};
 use crate::socket::SocketManager;
-
-// ---------------------------------------------------------------------------
-// Credential isolation
-// ---------------------------------------------------------------------------
-
-/// API key env var names to strip from the bwrap process environment.
-///
-/// Bubblewrap inherits the host's environment by default — without explicit
-/// stripping, provider keys would propagate into the sandbox. Removing them
-/// here means bwrap never sees them and cannot forward them to the agent.
-/// All LLM completions are proxied through the host via IPC instead.
-const CREDENTIAL_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
 
 // ---------------------------------------------------------------------------
 // Sandbox stderr
@@ -131,7 +122,11 @@ fn spawn_stderr_relay(stderr: tokio::process::ChildStderr) -> StderrRelay {
 pub struct BubblewrapSandbox {
     config: SandboxConfig,
     llm_handler: HostLlmHandler,
+    /// The policy and recorder the egress proxy runs with; `None` leaves the
+    /// sandbox with no route to the network.
+    egress: Option<EgressSetup>,
     // Populated after spawn_agent.
+    egress_proxy: Mutex<Option<EgressProxy>>,
     socket_manager: Mutex<Option<SocketManager>>,
     process: Mutex<Option<ChildProcessManager>>,
     // Mutex for interior mutability: execute_tool receives &self but must
@@ -150,10 +145,19 @@ impl BubblewrapSandbox {
         Self {
             config,
             llm_handler,
+            egress: None,
+            egress_proxy: Mutex::new(None),
             socket_manager: Mutex::new(None),
             process: Mutex::new(None),
             transport: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Give the sandbox a route to the network: a recording proxy deciding
+    /// each destination by `setup`'s policy.
+    pub fn with_egress(mut self, setup: EgressSetup) -> Self {
+        self.egress = Some(setup);
+        self
     }
 
     /// Test-only constructor that injects a pre-built transport.
@@ -169,6 +173,8 @@ impl BubblewrapSandbox {
         Self {
             config,
             llm_handler,
+            egress: None,
+            egress_proxy: Mutex::new(None),
             socket_manager: Mutex::new(None),
             process: Mutex::new(None),
             transport: Arc::new(Mutex::new(Some(transport))),
@@ -192,15 +198,21 @@ impl Sandbox for BubblewrapSandbox {
         // Determine the agent binary — the host re-execs itself in sandbox mode.
         let agent_binary = resolve_agent_binary()?;
 
-        // Build the bwrap command with namespace isolation and mount config.
-        // The socket path is injected via --setenv in the command builder.
-        let mut cmd = build_bwrap_command(&self.config, &socket_path, &agent_binary)?;
+        // The egress proxy starts before the child so its socket can be bound
+        // in; it lives as long as the sandbox.
+        let egress_proxy = match &self.egress {
+            Some(setup) => Some(EgressProxy::start(setup.clone())?),
+            None => None,
+        };
 
-        // Strip provider API keys — bwrap inherits the parent's environment,
-        // so we must remove credentials before it passes them through.
-        for var in CREDENTIAL_ENV_VARS {
-            cmd.env_remove(var);
-        }
+        // Build the bwrap command with namespace isolation and mount config.
+        // The socket paths are injected via --setenv in the command builder.
+        let mut cmd = build_bwrap_command(
+            &self.config,
+            &socket_path,
+            egress_proxy.as_ref().map(EgressProxy::socket_path),
+            &agent_binary,
+        )?;
 
         // Capture stderr so a sandbox that dies before connecting reports why.
         cmd.stderr(std::process::Stdio::piped());
@@ -298,6 +310,7 @@ impl Sandbox for BubblewrapSandbox {
         }
 
         *self.socket_manager.get_mut() = Some(socket_manager);
+        *self.egress_proxy.get_mut() = egress_proxy;
         *self.process.get_mut() = Some(process);
         *self.transport.lock().await = Some(transport);
 
@@ -462,8 +475,10 @@ impl Sandbox for BubblewrapSandbox {
                 .await?;
         }
 
-        // Drop the socket manager — its Drop impl removes the socket file.
+        // Drop the socket manager — its Drop impl removes the socket file —
+        // and the egress proxy, whose Drop stops serving and removes its own.
         *self.socket_manager.lock().await = None;
+        *self.egress_proxy.lock().await = None;
 
         Ok(())
     }

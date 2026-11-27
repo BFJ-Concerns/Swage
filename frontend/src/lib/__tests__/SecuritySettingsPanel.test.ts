@@ -19,7 +19,7 @@ it.each([false, true])("sandbox-only stale form preserves a permanent approval (
   const reading: SecuritySettingsResponse = {
     available_tools: ["shell", "file_write"],
     scope: topic ? { kind: "topic", topic_id: "topic-1" } : { kind: "install" },
-    effective: { sandbox_enabled: true, access_gate: "warn", require_approval: ["shell", "file_write"] },
+    effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "warn", require_approval: ["shell", "file_write"] },
     overrides: { sandbox_enabled: true, access_gate: topic ? undefined : "warn", require_approval: ["shell", "file_write"] },
     relaxed: [],
   };
@@ -60,7 +60,7 @@ it.each([false, true])("sandbox-only stale form preserves a permanent approval (
 it("sends explicit null only for controls changed to inherit", async () => {
   vi.mocked(api.fetchInstallSecuritySettings).mockResolvedValue({
     available_tools: [], scope: { kind: "install" },
-    effective: { sandbox_enabled: false, access_gate: "off", require_approval: [] },
+    effective: { sandbox_enabled: false, sandbox_network: "open" as const, access_gate: "off", require_approval: [] },
     overrides: { sandbox_enabled: false, access_gate: "off", require_approval: [] }, relaxed: [],
   });
   component = mount(SecuritySettingsPanel, { target: document.body });
@@ -72,6 +72,22 @@ it("sends explicit null only for controls changed to inherit", async () => {
   document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   await settle();
   expect(api.saveInstallSecuritySettings).toHaveBeenCalledWith({
-    sandbox_enabled: null, require_approval: null, access_gate: null,
+    sandbox_enabled: null, sandbox_network: null, require_approval: null, access_gate: null,
   });
+});
+
+it("confines the sandbox network for the install", async () => {
+  vi.mocked(api.fetchInstallSecuritySettings).mockResolvedValue({
+    available_tools: [], scope: { kind: "install" },
+    effective: { sandbox_enabled: true, sandbox_network: "open", access_gate: "token", require_approval: [] },
+    overrides: {}, relaxed: [],
+  });
+  component = mount(SecuritySettingsPanel, { target: document.body });
+  await settle();
+  const network = document.querySelector<HTMLSelectElement>('[aria-label="Sandbox network for the install"]')!;
+  expect([...network.options].map((option) => option.value)).toEqual(["inherit", "open", "none"]);
+  network.value = "none"; network.dispatchEvent(new Event("change", { bubbles: true }));
+  document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await settle();
+  expect(api.saveInstallSecuritySettings).toHaveBeenLastCalledWith({ sandbox_network: "none" });
 });

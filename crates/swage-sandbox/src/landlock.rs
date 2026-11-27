@@ -1,12 +1,15 @@
 //! Landlock LSM filesystem access control.
 //!
-//! Kernel-enforced per-path read/write restrictions as a complement to
-//! bubblewrap's namespace isolation. Gracefully degrades on older kernels.
+//! Kernel-enforced write restrictions as a complement to bubblewrap's
+//! namespace isolation: the sandboxed process reads and executes everywhere
+//! it can see, and writes only the policy's declared write set, `/tmp`, and
+//! the standard device nodes. Landlock rules only ever allow, so what the
+//! policy masks is hidden by the mount layer, not here. Gracefully degrades
+//! on older kernels.
 //!
-//! This module runs inside the child process (via `pre_exec` or early in agent
-//! startup) — not in the host. Applying restrictions here prevents the agent
-//! from accessing any filesystem path not explicitly whitelisted, even if the
-//! bubblewrap bind-mounts make those paths visible.
+//! This module runs inside the child process, early in agent startup — not
+//! in the host. Applying restrictions here holds the write set even where
+//! a bind mount makes a path writable.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -111,18 +114,10 @@ const SYSTEM_DEVICE_RULES: &[(&str, u64)] = &[
     ("/dev/zero", ACCESS_FS_READ_FILE),
 ];
 
-/// Read/execute paths required for sandboxed process tools to start ordinary
-/// system commands such as `/bin/sh`. Writes remain limited to the configured
-/// workspace paths and `/tmp`.
-const SYSTEM_EXECUTION_READ_PATHS: &[&str] = &[
-    "/bin",
-    "/lib",
-    "/lib64",
-    "/usr/bin",
-    "/usr/lib",
-    "/usr/lib64",
-    "/etc/ld.so.cache",
-];
+/// Where the broad read rule is rooted: the sandboxed process reads and
+/// executes everything it can see. Private paths are hidden by the mount
+/// layer before this rule applies.
+const READ_EVERYWHERE: &str = "/";
 
 // ---------------------------------------------------------------------------
 // Kernel ABI structs
@@ -175,12 +170,11 @@ pub enum LandlockStatus {
 /// (and any threads it creates) to only the paths listed in the ruleset. This
 /// is a one-way operation — once applied, restrictions cannot be loosened.
 pub struct LandlockRuleset {
-    /// Paths the agent is allowed to read (and execute from).
+    /// Paths the agent is allowed to read (and execute from): the root.
     read_paths: Vec<PathBuf>,
-    /// Paths the agent is allowed to read and write.
-    ///
-    /// Always includes the working directory and `/tmp` in addition to
-    /// whatever was specified in [`SandboxConfig::landlock_write_paths`].
+    /// Paths the agent is allowed to read and write: the policy's write set
+    /// and `/tmp`. The working directory is among them only when the policy
+    /// says so.
     write_paths: Vec<PathBuf>,
     /// Explicit rules for bubblewrap's standard device nodes. No rule grants
     /// access to the `/dev` directory itself.
@@ -188,22 +182,15 @@ pub struct LandlockRuleset {
 }
 
 impl LandlockRuleset {
-    /// Builds a ruleset from a [`SandboxConfig`].
-    ///
-    /// Automatically adds the system binary/library paths needed to execute
-    /// commands, plus `working_directory` and `/tmp` to the write-allowed set
-    /// so the agent can function normally in its workspace.
+    /// Builds a ruleset from a [`SandboxConfig`]: read everywhere, write the
+    /// policy's write set and `/tmp`.
     pub fn new(config: &SandboxConfig) -> Self {
-        let mut read_paths: Vec<PathBuf> = SYSTEM_EXECUTION_READ_PATHS
-            .iter()
-            .map(PathBuf::from)
-            .collect();
-        read_paths.extend(config.landlock_read_paths.iter().cloned());
-
-        // Always allow writes to the working directory and /tmp; append any
-        // explicit write paths from the config on top.
-        let mut write_paths = vec![config.working_directory.clone(), PathBuf::from("/tmp")];
-        write_paths.extend(config.landlock_write_paths.iter().cloned());
+        let read_paths = vec![PathBuf::from(READ_EVERYWHERE)];
+        let mut write_paths = config.write_paths.clone();
+        let tmp = PathBuf::from("/tmp");
+        if !write_paths.contains(&tmp) {
+            write_paths.push(tmp);
+        }
         let device_rules = SYSTEM_DEVICE_RULES
             .iter()
             .map(|(path, access)| (PathBuf::from(path), *access))
@@ -274,11 +261,11 @@ impl LandlockRuleset {
         }
 
         // Add rules for each write path, capping to available ABI flags.
-        let write_flags = if abi >= 3 {
-            (WRITE_ALLOWED_BASE | ACCESS_FS_TRUNCATE) & handled_flags
-        } else {
-            WRITE_ALLOWED_BASE & handled_flags
-        };
+        // REFER is denied by default once handled (ABI 2), and a rename or
+        // link across directories needs it on both; a writable tree where
+        // `mv a/x b/x` fails is not a writable tree, so it is granted with the
+        // write set wherever the kernel knows it.
+        let write_flags = write_flags_for_abi(abi) & handled_flags;
 
         for path in &self.write_paths {
             add_path_rule(ruleset_fd, path, write_flags);
@@ -335,6 +322,19 @@ fn detect_abi() -> i64 {
             LANDLOCK_CREATE_RULESET_VERSION,
         )
     }
+}
+
+/// The rights a write path receives at `abi`: the baseline, cross-directory
+/// rename and link from ABI 2, truncation from ABI 3.
+fn write_flags_for_abi(abi: i64) -> u64 {
+    let mut flags = WRITE_ALLOWED_BASE;
+    if abi >= 2 {
+        flags |= ACCESS_FS_REFER;
+    }
+    if abi >= 3 {
+        flags |= ACCESS_FS_TRUNCATE;
+    }
+    flags
 }
 
 /// Returns (flags_to_use, missing_feature_names) for the given ABI version.
@@ -427,44 +427,53 @@ mod tests {
     use crate::config::SandboxConfig;
 
     // -----------------------------------------------------------------------
-    // LandlockRuleset::new — path collection
+    // LandlockRuleset::new — the policy's shape
     // -----------------------------------------------------------------------
 
     #[test]
-    fn new_collects_read_paths_from_config() {
+    fn new_reads_everywhere_and_nowhere_in_particular() {
         let config = SandboxConfig::builder()
             .working_directory("/tmp/agent")
-            .landlock_read_path("/home/user/topic")
-            .landlock_read_path("/usr/lib")
+            .masked_path("/home/u/.ssh")
             .build()
             .unwrap();
 
         let ruleset = LandlockRuleset::new(&config);
 
-        assert!(
-            ruleset
-                .read_paths
-                .contains(&PathBuf::from("/home/user/topic"))
-        );
-        assert!(ruleset.read_paths.contains(&PathBuf::from("/usr/lib")));
+        assert_eq!(ruleset.read_paths, vec![PathBuf::from("/")]);
     }
 
     #[test]
-    fn new_auto_includes_system_execution_read_paths() {
+    fn new_writes_only_the_declared_set_and_tmp() {
         let config = SandboxConfig::builder()
             .working_directory("/tmp/agent")
+            .write_path("/tmp/agent")
+            .write_path("/home/u/.cache")
             .build()
             .unwrap();
 
         let ruleset = LandlockRuleset::new(&config);
 
-        for path in SYSTEM_EXECUTION_READ_PATHS {
-            assert!(
-                ruleset.read_paths.contains(&PathBuf::from(path)),
-                "system execution path {path} must be readable; got: {:?}",
-                ruleset.read_paths
-            );
-        }
+        assert_eq!(
+            ruleset.write_paths,
+            vec![
+                PathBuf::from("/tmp/agent"),
+                PathBuf::from("/home/u/.cache"),
+                PathBuf::from("/tmp"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_working_directory_outside_the_write_set_is_not_writable() {
+        let config = SandboxConfig::builder()
+            .working_directory("/srv/read-only-checkout")
+            .build()
+            .unwrap();
+
+        let ruleset = LandlockRuleset::new(&config);
+
+        assert_eq!(ruleset.write_paths, vec![PathBuf::from("/tmp")]);
     }
 
     #[test]
@@ -502,75 +511,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn new_auto_includes_working_directory_in_write_paths() {
-        let config = SandboxConfig::builder()
-            .working_directory("/tmp/agent-workspace")
-            .build()
-            .unwrap();
-
-        let ruleset = LandlockRuleset::new(&config);
-
-        assert!(
-            ruleset
-                .write_paths
-                .contains(&PathBuf::from("/tmp/agent-workspace")),
-            "working_directory must be in write_paths; got: {:?}",
-            ruleset.write_paths
-        );
-    }
-
-    #[test]
-    fn new_auto_includes_tmp_in_write_paths() {
-        let config = SandboxConfig::builder()
-            .working_directory("/tmp/agent")
-            .build()
-            .unwrap();
-
-        let ruleset = LandlockRuleset::new(&config);
-
-        assert!(
-            ruleset.write_paths.contains(&PathBuf::from("/tmp")),
-            "/tmp must be automatically included in write_paths; got: {:?}",
-            ruleset.write_paths
-        );
-    }
-
-    #[test]
-    fn new_appends_explicit_write_paths_after_defaults() {
-        let config = SandboxConfig::builder()
-            .working_directory("/tmp/agent")
-            .landlock_write_path("/mnt/output")
-            .build()
-            .unwrap();
-
-        let ruleset = LandlockRuleset::new(&config);
-
-        // Both auto-included defaults and explicit write paths must be present.
-        assert!(ruleset.write_paths.contains(&PathBuf::from("/tmp/agent")));
-        assert!(ruleset.write_paths.contains(&PathBuf::from("/tmp")));
-        assert!(ruleset.write_paths.contains(&PathBuf::from("/mnt/output")));
-    }
-
-    #[test]
-    fn new_with_no_config_paths_has_default_read_paths_and_two_write_paths() {
-        // The default read paths support command execution; writes remain
-        // limited to the workspace and /tmp.
-        let config = SandboxConfig::builder()
-            .working_directory("/tmp/agent")
-            .build()
-            .unwrap();
-
-        let ruleset = LandlockRuleset::new(&config);
-
-        assert_eq!(ruleset.read_paths.len(), SYSTEM_EXECUTION_READ_PATHS.len());
-        assert_eq!(ruleset.write_paths.len(), 2);
-        assert_eq!(ruleset.device_rules.len(), SYSTEM_DEVICE_RULES.len());
-    }
-
     // -----------------------------------------------------------------------
     // flags_for_abi
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_write_path_may_rename_across_directories_from_abi_2_and_truncate_from_abi_3() {
+        assert_eq!(write_flags_for_abi(1) & ACCESS_FS_REFER, 0);
+        assert_ne!(write_flags_for_abi(2) & ACCESS_FS_REFER, 0);
+        assert_eq!(write_flags_for_abi(2) & ACCESS_FS_TRUNCATE, 0);
+        assert_ne!(write_flags_for_abi(3) & ACCESS_FS_TRUNCATE, 0);
+        assert_ne!(write_flags_for_abi(5) & ACCESS_FS_REFER, 0);
+    }
 
     #[test]
     fn abi_1_flags_exclude_refer_and_truncate() {

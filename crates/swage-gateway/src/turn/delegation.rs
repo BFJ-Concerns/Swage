@@ -1449,6 +1449,9 @@ impl DelegationHandler for GatewayDelegationHandler {
             hook_registry: self.state.hook_registry.clone(),
             leak_detector: None,
             approval_registrar: Some(signalling_approval_registrar(self.state.clone())),
+            request_judge: Some(Arc::new(crate::request_judge::GatewayRequestJudge::new(
+                self.state.clone(),
+            ))),
             delegation_handler: Some(Arc::new(child_handler)),
             router: router.clone(),
             active_delegations: self.active_delegations.clone(),

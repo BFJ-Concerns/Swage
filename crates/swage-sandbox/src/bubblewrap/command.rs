@@ -50,15 +50,29 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 ///
 /// ## Argument ordering
 ///
-/// `--ro-bind / /` is emitted before any specific bind mounts so that
-/// read-write and read-only overlays take precedence over the read-only root.
+/// `--ro-bind / /` is emitted before any specific bind mounts so that the
+/// write set, the read-only overlays and the masks take precedence over the
+/// read-only root. The specific mounts bind in depth order, so a private
+/// path inside a writable tree is still hidden and a grant that names a
+/// masked path exactly reopens it; see [`bind_order`].
+///
+/// `egress_socket` is the host proxy's socket to bind into the sandbox and
+/// name in the child's environment; `None` leaves the sandbox with no route
+/// to the network unless the policy shares the host's.
 pub fn build_bwrap_command(
     config: &SandboxConfig,
     socket_path: &Path,
+    egress_socket: Option<&Path>,
     agent_binary: &Path,
 ) -> Result<Command, SandboxError> {
     let bwrap_path = find_bwrap()?;
-    build_bwrap_command_with_path(&bwrap_path, config, socket_path, agent_binary)
+    build_bwrap_command_with_path(
+        &bwrap_path,
+        config,
+        socket_path,
+        egress_socket,
+        agent_binary,
+    )
 }
 
 /// Constructs the `bwrap` command given an explicit path to the binary.
@@ -69,12 +83,76 @@ pub(crate) fn build_bwrap_command_with_path(
     bwrap_path: &Path,
     config: &SandboxConfig,
     socket_path: &Path,
+    egress_socket: Option<&Path>,
     agent_binary: &Path,
 ) -> Result<Command, SandboxError> {
-    let mut cmd = Command::new(bwrap_path);
+    let mut cmd = policy_command(
+        bwrap_path,
+        config,
+        &[socket_path],
+        &[agent_binary],
+        egress_socket,
+    )?;
+    cmd.arg("--setenv").arg("SWAGE_IPC_SOCKET").arg(socket_path);
+    cmd.arg("--").arg(agent_binary).arg("--sandbox-mode");
+    Ok(cmd)
+}
 
-    // Isolate all namespaces (PID, network, mount, user, IPC, UTS).
+/// Construct the shared namespace and filesystem boundary for a child.
+pub fn policy_command(
+    bwrap_path: &Path,
+    config: &SandboxConfig,
+    sockets: &[&Path],
+    executables: &[&Path],
+    egress_socket: Option<&Path>,
+) -> Result<Command, SandboxError> {
+    let mut cmd = Command::new(bwrap_path);
+    // Only named development settings cross the process boundary. In
+    // particular, no inherited Git selector, command configuration, askpass
+    // or provider credential can become a second authority; what else a
+    // command needs the host names in the policy's environment.
+    cmd.env_clear();
+    for key in [
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "TERM",
+        "COLORTERM",
+        "TZ",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+        // Which system and global git configuration the operator uses.
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    // Git reads the operator's own system and global configuration, as it
+    // would outside the sandbox: HOME, XDG_CONFIG_HOME and the GIT_CONFIG_*
+    // file selectors above locate it.
+
+    // Isolate every namespace (PID, network, mount, user, IPC, UTS), the
+    // network excepted where the policy shares the host's.
     cmd.arg("--unshare-all");
+    if config.host_network {
+        cmd.arg("--share-net");
+    }
 
     // Terminate the child automatically if the host process dies — prevents
     // orphaned sandbox processes when the daemon crashes or is killed.
@@ -85,37 +163,36 @@ pub(crate) fn build_bwrap_command_with_path(
     cmd.args(["--ro-bind", "/", "/"]);
 
     // Minimal virtual filesystem. These mounts must overlay the read-only
-    // root: mounting the root afterwards exposes the host's nodev /dev.
+    // root: mounting the root afterwards exposes the host's nodev /dev, and
+    // without its own procfs the sandbox would see the host's, whose
+    // /proc/<pid>/root walks around every mask below.
     cmd.args(["--dev", "/dev"]);
+    cmd.args(["--proc", "/proc"]);
     cmd.args(["--tmpfs", "/tmp"]);
 
-    // The host IPC socket may live under /tmp (a relocated or over-long
-    // runtime directory), where the tmpfs above hides it. Bind the socket
-    // file itself — never its directory — after the overlay so the agent can
-    // connect and sees nothing else of the host's socket root.
-    let socket = socket_path.as_os_str();
-    cmd.arg("--bind").arg(socket).arg(socket);
-
-    // Working directory: read-write inside the sandbox.
-    let wd = config.working_directory.as_os_str();
-    cmd.arg("--bind").arg(wd).arg(wd);
-
-    // Additional read-write mounts (e.g. output directories).
-    for mount in &config.read_write_mounts {
-        let p = mount.as_os_str();
-        cmd.arg("--bind").arg(p).arg(p);
+    if let Some(egress) = egress_socket {
+        cmd.arg("--setenv")
+            .arg(crate::egress::EGRESS_SOCKET_ENV)
+            .arg(egress);
     }
 
-    // Additional read-only mounts (e.g. shared libraries, topic source).
-    for mount in &config.read_only_mounts {
-        let p = mount.as_os_str();
-        cmd.arg("--ro-bind").arg(p).arg(p);
+    // The policy's mounts, shallowest path first, so the deepest mount at any
+    // point wins: a mask inside a writable tree still hides, and a grant
+    // inside a masked tree reopens only its own subtree. The write set binds
+    // writable (the working directory only when the policy lists it), the
+    // read-only paths overlay, and a mask makes a directory an empty tmpfs
+    // and a file read as /dev/null. A masked path absent on the host needs
+    // no mask.
+    for (path, kind) in policy_mounts(config, sockets, executables, egress_socket) {
+        let p = path.as_os_str();
+        match kind {
+            PolicyMount::Write => cmd.arg("--bind").arg(p).arg(p),
+            PolicyMount::ReadOnly => cmd.arg("--ro-bind").arg(p).arg(p),
+            PolicyMount::MaskDirectory => cmd.arg("--tmpfs").arg(p),
+            PolicyMount::MaskFile => cmd.arg("--ro-bind").arg("/dev/null").arg(p),
+        };
     }
 
-    // Expose the IPC socket path to the agent process via the environment.
-    cmd.arg("--setenv")
-        .arg("SWAGE_IPC_SOCKET")
-        .arg(socket_path.as_os_str());
     let config_json = serde_json::to_string(config).map_err(|error| SandboxError::SpawnFailed {
         message: format!("failed to serialise sandbox config for child Landlock setup: {error}"),
     })?;
@@ -123,10 +200,103 @@ pub(crate) fn build_bwrap_command_with_path(
         .arg("SWAGE_SANDBOX_CONFIG_JSON")
         .arg(config_json);
 
-    // Separator then the agent binary, instructing it to enter sandbox mode.
-    cmd.arg("--").arg(agent_binary).arg("--sandbox-mode");
+    for (key, value) in &config.environment {
+        cmd.arg("--setenv").arg(key).arg(value);
+    }
 
     Ok(cmd)
+}
+
+/// One mount the policy asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyMount {
+    Write,
+    ReadOnly,
+    MaskDirectory,
+    MaskFile,
+}
+
+/// The policy's mounts in the order they bind, deepest last so it wins;
+/// at one path the order is [`bind_order`]'s: a mask, then a write grant,
+/// then a read-only grant, so a grant that names a masked path reopens it
+/// and a read-only grant of a written path holds it read-only.
+fn policy_mounts<'a>(
+    config: &'a SandboxConfig,
+    sockets: &[&'a Path],
+    executables: &[&'a Path],
+    egress_socket: Option<&'a Path>,
+) -> Vec<(&'a Path, PolicyMount)> {
+    // Service sockets can sit beneath a private data root or /tmp. They
+    // reopen only their own file after the containing mask, just as a grant
+    // does; binding them before the masks would hide the transport itself.
+    let mut mounts: Vec<(&Path, PolicyMount)> = sockets
+        .iter()
+        .copied()
+        .chain(egress_socket)
+        .map(|path| (path, PolicyMount::Write))
+        .collect();
+    mounts.extend(
+        config
+            .write_paths
+            .iter()
+            .map(|path| (path.as_path(), PolicyMount::Write)),
+    );
+    mounts.extend(
+        config
+            .read_only_paths
+            .iter()
+            .map(|path| (path.as_path(), PolicyMount::ReadOnly)),
+    );
+    for path in &config.masked_paths {
+        if path.is_dir() {
+            mounts.push((path.as_path(), PolicyMount::MaskDirectory));
+        } else if path.is_file() {
+            mounts.push((path.as_path(), PolicyMount::MaskFile));
+        }
+    }
+    // Only reopen executables hidden by an overlay. Binding an already
+    // visible executable is unnecessary and fails for symlink destinations
+    // such as /usr/bin/python3. The mount covering an executable is the one
+    // that binds last over it — the same order the policy binds in, so an
+    // executable beneath a grant that reopens its mask is already visible.
+    // An exact mask still wins over an executable.
+    let executable_mounts: Vec<_> = executables
+        .iter()
+        .filter(|path| {
+            let covering = mounts
+                .iter()
+                .filter(|(parent, _)| path.starts_with(parent))
+                .max_by_key(|(parent, kind)| bind_order(parent, *kind));
+            match covering {
+                Some((parent, kind)) => {
+                    parent != *path
+                        && matches!(kind, PolicyMount::MaskDirectory | PolicyMount::MaskFile)
+                }
+                None => path.starts_with("/tmp"),
+            }
+        })
+        .map(|path| (*path, PolicyMount::ReadOnly))
+        .collect();
+    mounts.extend(executable_mounts);
+    mounts.sort_by_key(|(path, kind)| bind_order(path, *kind));
+    mounts
+}
+
+/// The order the policy's mounts bind in, and so which of two mounts over
+/// one path wins: depth first, so a deeper mount shows through the one
+/// above it; at one depth a mask, then a write grant, then a read-only
+/// grant. So a grant that names exactly a masked path — a workspace at
+/// `~/.ssh`, the data root under C64 — reopens what it names, while a
+/// grant above the mask (the home directory) still leaves the mask in
+/// place, being a shallower mount; and a path both written and held
+/// read-only is read-only, the overlay binding last.
+fn bind_order(path: &Path, kind: PolicyMount) -> (usize, u8) {
+    let rank = match kind {
+        PolicyMount::MaskDirectory | PolicyMount::MaskFile => 0,
+        PolicyMount::Write => 1,
+        PolicyMount::ReadOnly => 2,
+    };
+    (path.components().count(), rank)
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +363,7 @@ mod tests {
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/agent.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
@@ -209,12 +380,241 @@ mod tests {
     }
 
     #[test]
+    fn the_host_network_is_shared_only_when_the_policy_shares_it() {
+        let shares = |host_network: bool| {
+            let config = SandboxConfig::builder()
+                .working_directory("/tmp/agent")
+                .host_network(host_network)
+                .build()
+                .unwrap();
+            let cmd = build_bwrap_command_with_path(
+                Path::new("/usr/bin/bwrap"),
+                &config,
+                Path::new("/run/swage/agent.sock"),
+                None,
+                Path::new("/usr/bin/swage-agent"),
+            )
+            .unwrap();
+            args_of(&cmd).contains(&OsStr::new("--share-net"))
+        };
+        assert!(shares(true));
+        assert!(!shares(false));
+    }
+
+    #[test]
+    fn command_gives_the_sandbox_its_own_proc() {
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &basic_config(),
+            Path::new("/run/swage/agent.sock"),
+            None,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let root = args
+            .windows(3)
+            .position(|w| w == [OsStr::new("--ro-bind"), OsStr::new("/"), OsStr::new("/")])
+            .unwrap();
+        let proc_ = args
+            .windows(2)
+            .position(|w| w == [OsStr::new("--proc"), OsStr::new("/proc")])
+            .expect("the sandbox mounts its own /proc over the host's");
+        assert!(root < proc_, "the procfs must overlay the root bind");
+    }
+
+    /// A grant that names exactly a masked path reopens it: the grant binds
+    /// after the mask at that path, while a grant above the mask does not
+    /// disturb it.
+    #[test]
+    fn a_grant_equal_to_a_masked_path_binds_after_the_mask() {
+        let home = tempfile::tempdir().unwrap();
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let data_root = home.path().join(".swage");
+        std::fs::create_dir(&data_root).unwrap();
+        let config = SandboxConfig::builder()
+            .working_directory(home.path())
+            .write_path(home.path())
+            .read_only_path(&ssh)
+            .write_path(&data_root)
+            .masked_path(&ssh)
+            .masked_path(&data_root)
+            .build()
+            .unwrap();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            None,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let positions = |needle: &Path| -> Vec<usize> {
+            args.iter()
+                .enumerate()
+                .filter(|(_, a)| **a == needle.as_os_str())
+                .map(|(i, _)| i)
+                .collect()
+        };
+        // A directory mask is `--tmpfs <p>`; a grant binds `<p>` onto `<p>`,
+        // naming the path twice. The mask comes first, the grant after it.
+        for (path, grant_flag) in [(&ssh, "--ro-bind"), (&data_root, "--bind")] {
+            let found = positions(path);
+            assert_eq!(
+                found.len(),
+                3,
+                "{} is masked once and bound once (source and target): {args:?}",
+                path.display()
+            );
+            assert_eq!(
+                args[found[0] - 1],
+                "--tmpfs",
+                "the mask binds first at {}",
+                path.display()
+            );
+            assert_eq!(
+                args[found[1] - 1],
+                grant_flag,
+                "the grant binds after the mask at {}",
+                path.display()
+            );
+        }
+        let home_bind = positions(home.path())[0];
+        assert!(
+            home_bind < positions(&ssh)[0],
+            "the home grant above the mask leaves the mask after it"
+        );
+    }
+
+    /// A path both in the write set and held read-only binds read-only
+    /// last, whatever order the policy listed them in: the bind order,
+    /// not the builder's collection order, decides.
+    #[test]
+    fn a_read_only_grant_of_a_written_path_binds_after_the_write() {
+        let config = SandboxConfig::builder()
+            .working_directory("/tmp/agent-workspace")
+            .write_path("/tmp/agent-workspace/vendored")
+            .read_only_path("/tmp/agent-workspace/vendored")
+            .build()
+            .unwrap();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            None,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let flag_before = |needle: &str| -> Vec<usize> {
+            args.iter()
+                .enumerate()
+                .filter(|(i, a)| {
+                    *i > 0
+                        && **a == OsStr::new("/tmp/agent-workspace/vendored")
+                        && args[*i - 1] == OsStr::new(needle)
+                })
+                .map(|(i, _)| i)
+                .collect()
+        };
+        let write = flag_before("--bind");
+        let read_only = flag_before("--ro-bind");
+        assert_eq!(write.len(), 1, "{args:?}");
+        assert_eq!(read_only.len(), 1, "{args:?}");
+        assert!(
+            write[0] < read_only[0],
+            "the read-only overlay binds after the write grant: {args:?}"
+        );
+    }
+
+    /// An executable beneath a path that a grant reopens through its mask
+    /// is already visible — the grant binds last over it — so it is not
+    /// bound again; a second, deeper read-only bind would override the
+    /// grant for that file and fail for a symlinked executable.
+    #[test]
+    fn an_executable_beneath_a_grant_that_reopens_its_mask_is_not_bound_again() {
+        let home = tempfile::tempdir().unwrap();
+        let data_root = home.path().join(".swage");
+        let binary = data_root.join("bin").join("swage-agent");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, b"").unwrap();
+        let config = SandboxConfig::builder()
+            .working_directory(home.path())
+            .write_path(&data_root)
+            .masked_path(&data_root)
+            .build()
+            .unwrap();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            None,
+            &binary,
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let mentions = args.iter().filter(|a| **a == binary.as_os_str()).count();
+        assert_eq!(
+            mentions, 1,
+            "the binary is named once, as the command run, never as a bind: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_grant_inside_a_masked_tree_is_bound_after_the_mask_and_a_mask_inside_a_grant_after_the_grant()
+     {
+        let home = tempfile::tempdir().unwrap();
+        let data_root = home.path().join(".swage");
+        let scratch = data_root.join("scratch").join("session-1");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let config = SandboxConfig::builder()
+            .working_directory(&scratch)
+            .write_path(&scratch)
+            .write_path(home.path())
+            .masked_path(&data_root)
+            .masked_path(&ssh)
+            .build()
+            .unwrap();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            None,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let position = |needle: &Path| {
+            args.iter()
+                .position(|a| *a == needle.as_os_str())
+                .unwrap_or_else(|| panic!("{} must be mounted; args: {args:?}", needle.display()))
+        };
+        let home_bind = position(home.path());
+        let root_mask = position(&data_root);
+        let ssh_mask = position(&ssh);
+        let scratch_bind = position(&scratch);
+        assert!(
+            home_bind < root_mask && home_bind < ssh_mask,
+            "masks under the home grant follow it"
+        );
+        assert!(
+            root_mask < scratch_bind,
+            "the scratch grant under the masked data root follows the mask"
+        );
+    }
+
+    #[test]
     fn command_includes_dev_and_tmpfs() {
         let config = basic_config();
         let cmd = build_bwrap_command_with_path(
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/agent.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
@@ -233,6 +633,7 @@ mod tests {
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/agent.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
@@ -267,6 +668,7 @@ mod tests {
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/agent.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
@@ -295,11 +697,16 @@ mod tests {
 
     #[test]
     fn working_directory_appears_as_rw_bind_after_root() {
-        let config = basic_config();
+        let config = SandboxConfig::builder()
+            .working_directory("/tmp/agent-workspace")
+            .write_path("/tmp/agent-workspace")
+            .build()
+            .unwrap();
         let cmd = build_bwrap_command_with_path(
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/agent.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
@@ -325,132 +732,177 @@ mod tests {
     }
 
     #[test]
-    fn read_write_mounts_appear_as_bind() {
-        let config = SandboxConfig::builder()
+    fn the_write_set_is_bound_writable_and_the_working_directory_only_when_listed() {
+        let writable = SandboxConfig::builder()
             .working_directory("/tmp/agent-workspace")
-            .read_write_mount("/tmp/output")
+            .write_path("/tmp/agent-workspace")
+            .write_path("/home/u/.cache")
             .build()
             .unwrap();
-
         let cmd = build_bwrap_command_with_path(
             Path::new("/usr/bin/bwrap"),
-            &config,
+            &writable,
             Path::new("/run/swage/agent.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
-
         let args = args_of(&cmd);
+        for path in ["/tmp/agent-workspace", "/home/u/.cache"] {
+            assert!(
+                args.windows(3)
+                    .any(|w| w == [OsStr::new("--bind"), OsStr::new(path), OsStr::new(path)]),
+                "{path} must be bound writable; args: {args:?}"
+            );
+        }
 
-        // Find --bind /tmp/output /tmp/output sequence.
-        let bind_positions: Vec<usize> = args
-            .iter()
-            .enumerate()
-            .filter_map(|(i, a)| {
-                if *a == OsStr::new("--bind") {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let output_bind = bind_positions.iter().any(|&pos| {
-            args.get(pos + 1) == Some(&OsStr::new("/tmp/output"))
-                && args.get(pos + 2) == Some(&OsStr::new("/tmp/output"))
-        });
-
+        // A read-only workspace is left to the read-only root: no bind at all.
+        let read_only = basic_config();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &read_only,
+            Path::new("/run/swage/agent.sock"),
+            None,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
         assert!(
-            output_bind,
-            "--bind /tmp/output /tmp/output not found; args: {args:?}"
+            !args.contains(&OsStr::new("/tmp/agent-workspace")),
+            "an unlisted working directory must not be bound; args: {args:?}"
         );
     }
 
     #[test]
-    fn read_only_mounts_appear_as_ro_bind() {
+    fn read_only_paths_overlay_the_write_set() {
         let config = SandboxConfig::builder()
             .working_directory("/tmp/agent-workspace")
-            .read_only_mount("/usr/lib")
+            .write_path("/tmp/agent-workspace")
+            .read_only_path("/tmp/agent-workspace/vendored")
             .build()
             .unwrap();
-
         let cmd = build_bwrap_command_with_path(
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/agent.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
-
         let args = args_of(&cmd);
-
-        // There are two --ro-bind entries: the root bind and /usr/lib.
-        let ro_bind_positions: Vec<usize> = args
-            .iter()
-            .enumerate()
-            .filter_map(|(i, a)| {
-                if *a == OsStr::new("--ro-bind") {
-                    Some(i)
-                } else {
-                    None
-                }
+        let write = args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    OsStr::new("--bind"),
+                    OsStr::new("/tmp/agent-workspace"),
+                    OsStr::new("/tmp/agent-workspace"),
+                ]
             })
-            .collect();
+            .expect("the workspace is bound writable");
+        let read_only = args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    OsStr::new("--ro-bind"),
+                    OsStr::new("/tmp/agent-workspace/vendored"),
+                    OsStr::new("/tmp/agent-workspace/vendored"),
+                ]
+            })
+            .expect("the read-only path is overlaid");
+        assert!(write < read_only, "the overlay must follow the write bind");
+    }
 
-        let lib_bind = ro_bind_positions.iter().any(|&pos| {
-            args.get(pos + 1) == Some(&OsStr::new("/usr/lib"))
-                && args.get(pos + 2) == Some(&OsStr::new("/usr/lib"))
-        });
-
+    #[test]
+    fn masked_paths_are_hidden_last_as_an_empty_directory_or_an_empty_file() {
+        let home = tempfile::tempdir().unwrap();
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let netrc = home.path().join(".netrc");
+        std::fs::write(&netrc, "machine x login y").unwrap();
+        let absent = home.path().join(".never-made");
+        let config = SandboxConfig::builder()
+            .working_directory(home.path())
+            .write_path(home.path())
+            .masked_path(&ssh)
+            .masked_path(&netrc)
+            .masked_path(&absent)
+            .build()
+            .unwrap();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            None,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let write = args
+            .iter()
+            .position(|a| *a == home.path().as_os_str())
+            .expect("the home is bound writable");
+        let dir_mask = args
+            .windows(2)
+            .position(|w| w == [OsStr::new("--tmpfs"), ssh.as_os_str()])
+            .expect("a masked directory becomes an empty tmpfs");
+        let file_mask = args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    OsStr::new("--ro-bind"),
+                    OsStr::new("/dev/null"),
+                    netrc.as_os_str(),
+                ]
+            })
+            .expect("a masked file reads as /dev/null");
         assert!(
-            lib_bind,
-            "--ro-bind /usr/lib /usr/lib not found; args: {args:?}"
+            write < dir_mask && write < file_mask,
+            "masks follow the write set"
+        );
+        assert!(
+            !args.contains(&absent.as_os_str()),
+            "a masked path that does not exist needs no mask; args: {args:?}"
         );
     }
 
     #[test]
-    fn ro_root_appears_before_specific_mounts() {
-        // Verifies the overlay ordering invariant: ro-bind / / comes first,
-        // so that subsequent bind mounts take precedence over the read-only root.
-        let config = SandboxConfig::builder()
-            .working_directory("/tmp/agent-workspace")
-            .read_only_mount("/usr/lib")
-            .read_write_mount("/tmp/output")
-            .build()
-            .unwrap();
+    fn the_egress_socket_is_bound_and_named_only_when_given() {
+        let config = basic_config();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            Some(Path::new("/run/swage/egress.sock")),
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        assert!(args.windows(3).any(|w| w
+            == [
+                OsStr::new("--bind"),
+                OsStr::new("/run/swage/egress.sock"),
+                OsStr::new("/run/swage/egress.sock")
+            ]));
+        assert!(args.windows(3).any(|w| w
+            == [
+                OsStr::new("--setenv"),
+                OsStr::new(crate::egress::EGRESS_SOCKET_ENV),
+                OsStr::new("/run/swage/egress.sock")
+            ]));
 
         let cmd = build_bwrap_command_with_path(
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/agent.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
-
         let args = args_of(&cmd);
-
-        let root_ro_pos = args
-            .iter()
-            .position(|a| *a == OsStr::new("/"))
-            .expect("/ must appear as bind src");
-
-        let usr_lib_pos = args
-            .iter()
-            .position(|a| *a == OsStr::new("/usr/lib"))
-            .expect("/usr/lib must appear");
-
-        let output_pos = args
-            .iter()
-            .position(|a| *a == OsStr::new("/tmp/output"))
-            .expect("/tmp/output must appear");
-
         assert!(
-            root_ro_pos < usr_lib_pos,
-            "/ must appear before /usr/lib; positions: root={root_ro_pos}, lib={usr_lib_pos}"
-        );
-        assert!(
-            root_ro_pos < output_pos,
-            "/ must appear before /tmp/output; positions: root={root_ro_pos}, out={output_pos}"
+            !args.contains(&OsStr::new(crate::egress::EGRESS_SOCKET_ENV)),
+            "no egress socket means no proxy named; args: {args:?}"
         );
     }
 
@@ -461,25 +913,22 @@ mod tests {
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/test.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
 
         let args = args_of(&cmd);
 
-        let setenv_pos = args
-            .iter()
-            .position(|a| *a == OsStr::new("--setenv"))
-            .expect("--setenv must appear");
-
+        let assignment = args
+            .windows(3)
+            .find(|args| {
+                args[0] == OsStr::new("--setenv") && args[1] == OsStr::new("SWAGE_IPC_SOCKET")
+            })
+            .expect("the IPC socket environment assignment must be present");
         assert_eq!(
-            args.get(setenv_pos + 1),
-            Some(&OsStr::new("SWAGE_IPC_SOCKET")),
-            "env var name must be SWAGE_IPC_SOCKET"
-        );
-        assert_eq!(
-            args.get(setenv_pos + 2),
-            Some(&OsStr::new("/run/swage/test.sock")),
+            assignment[2],
+            OsStr::new("/run/swage/test.sock"),
             "socket path must be set correctly"
         );
     }
@@ -491,6 +940,7 @@ mod tests {
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/test.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
@@ -527,6 +977,7 @@ mod tests {
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/test.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap_err();
@@ -546,6 +997,7 @@ mod tests {
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/agent.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
@@ -576,6 +1028,7 @@ mod tests {
             Path::new("/usr/bin/bwrap"),
             &config,
             Path::new("/run/swage/agent.sock"),
+            None,
             Path::new("/usr/bin/swage-agent"),
         )
         .unwrap();
@@ -605,6 +1058,7 @@ mod tests {
                 Path::new("/usr/bin/bwrap"),
                 &basic_config(),
                 socket,
+                None,
                 Path::new("/usr/bin/swage-agent"),
             )
             .unwrap();

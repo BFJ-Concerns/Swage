@@ -272,7 +272,7 @@ describe("TopicSettingsPage", () => {
     vi.mocked(settingsApi.fetchTopicSecuritySettings).mockResolvedValue({
       available_tools: ["shell", "file_write"],
       scope: { kind: "topic", topic_id: "topic-1" },
-      effective: { sandbox_enabled: false, access_gate: "token", require_approval: ["shell", "file_write"] },
+      effective: { sandbox_enabled: false, sandbox_network: "open" as const, access_gate: "token", require_approval: ["shell", "file_write"] },
       overrides: {},
       relaxed: [
         { check: "sandbox", relaxed_by: { kind: "install" }, detail: "The per-turn sandbox is off." },
@@ -281,7 +281,7 @@ describe("TopicSettingsPage", () => {
     vi.mocked(settingsApi.saveTopicSecuritySettings).mockResolvedValue({
       available_tools: ["shell", "file_write"],
       scope: { kind: "topic", topic_id: "topic-1" },
-      effective: { sandbox_enabled: true, access_gate: "token", require_approval: ["shell", "file_write"] },
+      effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "token", require_approval: ["shell", "file_write"] },
       overrides: { sandbox_enabled: true },
       relaxed: [],
     });
@@ -308,7 +308,7 @@ describe("TopicSettingsPage", () => {
   it("edits a topic approval timeout while preserving policy, and removes a tool", async () => {
     const reading: SecuritySettingsResponse = {
       available_tools: ["shell", "file_write"], scope: { kind: "topic" as const, topic_id: topic.id },
-      effective: { sandbox_enabled: true, access_gate: "token" as const,
+      effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "token" as const,
         require_approval: [{ tool: "shell", timeout: 12, timeout_policy: "interrupt" as const }] },
       overrides: { require_approval: [{ tool: "shell", timeout: 12, timeout_policy: "interrupt" }] }, relaxed: [],
     };

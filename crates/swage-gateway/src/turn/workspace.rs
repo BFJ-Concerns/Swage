@@ -150,6 +150,18 @@ pub(crate) async fn resolve_authorised_worker_directory(
             candidate.display()
         ));
     }
+    // A placement is the model's choice within a person's grant; it never
+    // reaches the private paths the sandbox masks, which only the person's
+    // own grant of exactly that path reopens.
+    if let Ok(roots) = super::dispatcher::PolicyRoots::from_environment(&state.config_root)
+        && let Some(private) = super::dispatcher::private_path_covering(&candidate, &roots)
+    {
+        return Err(format!(
+            "worker cwd {} is within {}, a private path the sandbox masks; a worker cannot be placed there",
+            candidate.display(),
+            private.display()
+        ));
+    }
 
     let policy =
         load_trusted_workspace_policy(&state.storage, topic_id, active_workspace_attachment_id)

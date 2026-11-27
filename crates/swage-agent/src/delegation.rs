@@ -116,6 +116,10 @@ pub struct DelegationExecutor {
     pub hook_registry: Option<Arc<HookRegistry>>,
     pub leak_detector: Option<Arc<LeakDetector>>,
     pub approval_registrar: Option<ApprovalChannelRegistrar>,
+    /// Who answers for a child's request beyond its grants — alone when no
+    /// person is watching, first when one is; a child without one fails such
+    /// requests closed in an unattended turn.
+    pub request_judge: Option<crate::judge::SharedRequestJudge>,
     pub delegation_handler: Option<Arc<dyn DelegationHandler>>,
     pub router: Arc<MessageRouter>,
     /// Shared registry of in-flight delegations — lets `handle_cancel`
@@ -407,6 +411,9 @@ impl DelegationExecutor {
         }
         if let Some(ref registry) = self.hook_registry {
             builder = builder.hook_registry(registry.clone());
+        }
+        if let Some(ref judge) = self.request_judge {
+            builder = builder.request_judge(judge.clone());
         }
         if let Some(ref detector) = self.leak_detector {
             builder = builder.leak_detector(detector.clone());
@@ -864,6 +871,7 @@ mod tests {
             hook_registry: None,
             leak_detector: None,
             approval_registrar: None,
+            request_judge: None,
             delegation_handler: None,
             router,
             active_delegations: ActiveDelegations::new(),
@@ -953,6 +961,7 @@ mod tests {
             hook_registry: None,
             leak_detector: None,
             approval_registrar: None,
+            request_judge: None,
             delegation_handler: None,
             router,
             active_delegations: ActiveDelegations::new(),

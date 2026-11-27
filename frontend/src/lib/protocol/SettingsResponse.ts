@@ -4,6 +4,7 @@ import type { CommunicationConfig } from "./CommunicationConfig";
 import type { ContextConfig } from "./ContextConfig";
 import type { GenerationPresetConfig } from "./GenerationPresetConfig";
 import type { HitlConfig } from "./HitlConfig";
+import type { JudgeConfig } from "./JudgeConfig";
 import type { MemoryConfig } from "./MemoryConfig";
 import type { ModelSettings } from "./ModelSettings";
 import type { ObservabilityConfig } from "./ObservabilityConfig";
@@ -15,4 +16,4 @@ import type { ToolPermissionConfig } from "./ToolPermissionConfig";
 import type { ToolRuntimeSettings } from "./ToolRuntimeSettings";
 import type { VoiceConfig } from "./VoiceConfig";
 
-export type SettingsResponse = { providers: { [key in string]: ProviderSettings }, default_provider: string, models: { [key in string]: ModelSettings }, default_model: string, generation_presets: { [key in string]: GenerationPresetConfig }, tool_runtime: ToolRuntimeSettings, tool_permissions: ToolPermissionConfig, hitl: HitlConfig, sandbox: SandboxConfig, context: ContextConfig, pricing: PricingConfig, observability: ObservabilityConfig, communication: CommunicationConfig, sessions: SessionsConfig, memory: MemoryConfig, attachments: AttachmentsConfig, voice: VoiceConfig, restart_required: boolean, can_restart: boolean, };
+export type SettingsResponse = { providers: { [key in string]: ProviderSettings }, default_provider: string, models: { [key in string]: ModelSettings }, default_model: string, generation_presets: { [key in string]: GenerationPresetConfig }, tool_runtime: ToolRuntimeSettings, tool_permissions: ToolPermissionConfig, hitl: HitlConfig, sandbox: SandboxConfig, context: ContextConfig, pricing: PricingConfig, observability: ObservabilityConfig, communication: CommunicationConfig, sessions: SessionsConfig, memory: MemoryConfig, judge: JudgeConfig, attachments: AttachmentsConfig, voice: VoiceConfig, restart_required: boolean, can_restart: boolean, };

@@ -9,12 +9,13 @@ use serde_json::Value;
 use tempfile::TempDir;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::process::Command;
+use tokio::task::{JoinHandle, JoinSet};
 use uuid::Uuid;
 
 use swage_config::model::PythonExecuteToolConfig;
-use swage_sandbox::{ChildProcessManager, find_bwrap};
+use swage_sandbox::{ChildProcessManager, EgressSetup, SandboxConfig, find_bwrap};
 
 use crate::runtime_resolver::{PythonRuntimeError, ResolvedPythonRuntime};
 use crate::worker_protocol::{
@@ -109,6 +110,28 @@ impl PythonWorkerRuntime {
         &self,
         sandboxed: bool,
     ) -> Result<ReadyWorker, PythonWorkerError> {
+        self.spawn_worker(sandboxed, None, None).await
+    }
+
+    /// A worker for one turn's call. A policy runs the worker sandboxed
+    /// under it; none runs it on the host, which the calling turn decides:
+    /// its sandbox switched off, or a degraded host where Python need not be
+    /// sandboxed. An egress setup puts the worker's network behind the
+    /// recording proxy.
+    pub async fn spawn_worker_for_turn(
+        &self,
+        policy: Option<SandboxConfig>,
+        egress: Option<EgressSetup>,
+    ) -> Result<ReadyWorker, PythonWorkerError> {
+        self.spawn_worker(policy.is_some(), policy, egress).await
+    }
+
+    async fn spawn_worker(
+        &self,
+        sandboxed: bool,
+        policy: Option<SandboxConfig>,
+        egress: Option<EgressSetup>,
+    ) -> Result<ReadyWorker, PythonWorkerError> {
         if sandboxed && !self.sandbox_supported() {
             return Err(PythonWorkerError::SandboxUnavailable(
                 "bubblewrap is required".to_string(),
@@ -123,16 +146,41 @@ impl PythonWorkerRuntime {
             ))
         })?;
 
+        let scoped = policy.is_some();
+        let proxy = egress
+            .map(swage_sandbox::egress::EgressProxy::start)
+            .transpose()
+            .map_err(|error| PythonWorkerError::SandboxUnavailable(error.to_string()))?;
+        // Unsandboxed workers do not enter the sandbox command launcher, so
+        // their TCP-to-Unix proxy bridge lives beside the worker on the host.
+        let bridge = if !sandboxed {
+            match proxy.as_ref() {
+                Some(proxy) => Some(WorkerEgressBridge::start(proxy.socket_path()).await?),
+                None => None,
+            }
+        } else {
+            None
+        };
         let mut command = if sandboxed {
+            let policy = policy.unwrap_or_else(|| {
+                SandboxConfig::builder()
+                    .working_directory(worker_dir.work_dir())
+                    .write_path(worker_dir.work_dir())
+                    .build()
+                    .expect("worker directory")
+            });
             std::fs::write(worker_dir.bootstrap_path(), BOOTSTRAP_SCRIPT)
                 .map_err(|error| PythonWorkerError::SpawnFailed(error.to_string()))?;
-            build_sandboxed_command(&self.runtime, &worker_dir)?
+            build_sandboxed_command(&self.runtime, &worker_dir, policy, proxy.as_ref())?
         } else {
             let mut command = build_unsandboxed_command(&self.runtime, &worker_dir);
             command.kill_on_drop(true);
             command
         };
 
+        if let Some(bridge) = &bridge {
+            command.envs(bridge.endpoint.environment());
+        }
         command.stdin(Stdio::piped());
         let mut child = ChildProcessManager::spawn(command).map_err(|error| {
             PythonWorkerError::SpawnFailed(format!("child spawn failed: {error}"))
@@ -184,6 +232,9 @@ impl PythonWorkerRuntime {
                 child,
                 transport,
                 sandboxed,
+                uses_worker_directory: sandboxed && !scoped,
+                _egress_proxy: proxy,
+                _egress_bridge: bridge,
                 _worker_dir: worker_dir,
             }),
             Err(error) => {
@@ -334,16 +385,74 @@ impl PythonWorkerRuntime {
     }
 }
 
+struct WorkerEgressBridge {
+    endpoint: swage_sandbox::egress::EgressBridge,
+    task: JoinHandle<()>,
+}
+
+impl WorkerEgressBridge {
+    async fn start(socket: &Path) -> Result<Self, PythonWorkerError> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|error| {
+            PythonWorkerError::SpawnFailed(format!("failed to bind Python egress bridge: {error}"))
+        })?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| PythonWorkerError::SpawnFailed(error.to_string()))?;
+        let socket = socket.to_owned();
+        let task = tokio::spawn(async move {
+            // Dropping this task aborts every connection as well as accepting.
+            let mut connections = JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (mut client, _) = match accepted {
+                            Ok(connection) => connection,
+                            Err(error) => {
+                                tracing::warn!(%error, "Python egress bridge stopped accepting");
+                                break;
+                            }
+                        };
+                        let socket = socket.clone();
+                        connections.spawn(async move {
+                            let mut proxy = UnixStream::connect(socket).await?;
+                            tokio::io::copy_bidirectional(&mut client, &mut proxy)
+                                .await.map(|_| ())
+                        });
+                    }
+                    Some(result) = connections.join_next(), if !connections.is_empty() => {
+                        if !matches!(result, Ok(Ok(()))) {
+                            tracing::debug!(?result, "Python egress bridge connection ended");
+                        }
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            endpoint: swage_sandbox::egress::EgressBridge { address },
+            task,
+        })
+    }
+}
+
+impl Drop for WorkerEgressBridge {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 pub struct ReadyWorker {
     child: ChildProcessManager,
     transport: WorkerTransport,
     sandboxed: bool,
+    uses_worker_directory: bool,
     _worker_dir: WorkerDirectory,
+    _egress_proxy: Option<swage_sandbox::egress::EgressProxy>,
+    _egress_bridge: Option<WorkerEgressBridge>,
 }
 
 impl ReadyWorker {
     fn execution_working_directory<'a>(&'a self, logical_working_directory: &'a Path) -> &'a Path {
-        if self.sandboxed {
+        if self.uses_worker_directory {
             // Sandboxed workers are pooled before a turn supplies its logical
             // workspace, so only the worker directory is guaranteed mounted.
             // Host-side nested tools still receive the logical workspace.
@@ -503,10 +612,6 @@ impl WorkerDirectory {
     fn work_dir(&self) -> &Path {
         &self.work_dir
     }
-
-    fn socket_dir(&self) -> &Path {
-        &self.socket_dir
-    }
 }
 
 fn build_unsandboxed_command(
@@ -527,45 +632,69 @@ fn build_unsandboxed_command(
 fn build_sandboxed_command(
     runtime: &ResolvedPythonRuntime,
     worker_dir: &WorkerDirectory,
+    mut policy: SandboxConfig,
+    proxy: Option<&swage_sandbox::egress::EgressProxy>,
 ) -> Result<Command, PythonWorkerError> {
-    let bwrap =
-        find_bwrap().map_err(|error| PythonWorkerError::SandboxUnavailable(error.to_string()))?;
-    let mut command = Command::new("/bin/sh");
-    command
-        .process_group(0)
-        .args(["-c", SANDBOX_SUPERVISOR, "swage-python-supervisor"])
-        .arg(worker_dir.bootstrap_path())
-        .arg(bwrap);
-    command.arg("--unshare-all");
-    command.arg("--die-with-parent");
-    command.args(["--dev", "/dev"]);
-    command.args(["--proc", "/proc"]);
-    command.args(["--tmpfs", "/tmp"]);
-    command
-        .arg("--bind")
-        .arg(worker_dir.socket_dir())
-        .arg(worker_dir.socket_dir());
-    command
-        .arg("--bind")
-        .arg(worker_dir.work_dir())
-        .arg(worker_dir.work_dir());
-
+    let map_error =
+        |error: swage_core::SandboxError| PythonWorkerError::SandboxUnavailable(error.to_string());
+    let bwrap = find_bwrap().map_err(map_error)?;
+    policy.write_paths.push(worker_dir.work_dir().to_owned());
     for mount in &runtime.read_only_mounts {
-        command.arg("--ro-bind").arg(mount).arg(mount);
+        // System runtime roots can be aliases such as /lib -> /usr/lib;
+        // bubblewrap requires the mount destination itself to be a real path.
+        let mount = mount.canonicalize().map_err(|error| {
+            PythonWorkerError::SpawnFailed(format!(
+                "failed to resolve runtime mount {}: {error}",
+                mount.display()
+            ))
+        })?;
+        policy.read_only_paths.push(mount);
     }
-
-    command.arg("--chdir").arg(worker_dir.work_dir());
-    command.arg("--setenv");
-    command.arg("SWAGE_PYTHON_WORKER_SOCKET");
-    command.arg(worker_dir.socket_path());
+    let agent_binary = swage_sandbox::resolve_agent_binary().map_err(map_error)?;
+    let mut command = swage_sandbox::policy_command(
+        &bwrap,
+        &policy,
+        &[&worker_dir.socket_path()],
+        &[&agent_binary, &runtime.executable_path],
+        proxy.map(|proxy| proxy.socket_path()),
+    )
+    .map_err(map_error)?;
+    command.arg("--chdir").arg(&policy.working_directory);
+    command
+        .arg("--setenv")
+        .arg("SWAGE_PYTHON_WORKER_SOCKET")
+        .arg(worker_dir.socket_path());
     for (key, value) in &runtime.environment {
         command.arg("--setenv").arg(key).arg(value);
     }
     command
         .arg("--")
+        .arg(agent_binary)
+        .arg("--sandbox-exec")
         .arg(&runtime.executable_path)
         .args(worker_python_startup_args(runtime));
-    Ok(command)
+    Ok(under_supervisor(&command, &worker_dir.bootstrap_path()))
+}
+
+/// Run a bubblewrap command beneath [`SANDBOX_SUPERVISOR`] in a process group
+/// of its own, keeping the environment the command was built with.
+fn under_supervisor(bwrap: &Command, bootstrap: &Path) -> Command {
+    let bwrap = bwrap.as_std();
+    let mut command = Command::new("/bin/sh");
+    command.env_clear();
+    for (key, value) in bwrap.get_envs() {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    command
+        .process_group(0)
+        .args(["-c", SANDBOX_SUPERVISOR, "swage-python-supervisor"])
+        .arg(bootstrap)
+        .arg(bwrap.get_program())
+        .args(bwrap.get_args());
+    command
 }
 
 fn worker_python_startup_args(runtime: &ResolvedPythonRuntime) -> &'static [&'static str] {

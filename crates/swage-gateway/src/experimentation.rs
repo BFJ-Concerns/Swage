@@ -50,6 +50,11 @@ pub const LOCATION_CLOSING_ACCOUNT_REQUEST: &str = "turn.closing_account_request
 /// under. The authored default is the first variant.
 pub const LOCATION_MEMORY_CURATOR_PROMPT: &str = "prompts.memory_curator";
 
+/// The request judge's instruction: what the judging model is told before it
+/// decides a request beyond a session's grants. The authored default is the
+/// first variant; a candidate decision model's instruction registers here.
+pub const LOCATION_REQUEST_JUDGE_PROMPT: &str = "prompts.request_judge";
+
 /// The succession summariser's instruction: the text the hand-over notes
 /// are written under when a session's history outgrows its room or keeps
 /// hitting walls. Drawn when a summary is first asked for, never before, so

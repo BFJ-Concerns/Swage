@@ -22,6 +22,7 @@ fn test_llm_handler() -> HostLlmHandler {
 fn test_config(temp_dir: &tempfile::TempDir) -> SandboxConfig {
     SandboxConfig::builder()
         .working_directory(temp_dir.path())
+        .write_path(temp_dir.path())
         .tool_call_timeout(std::time::Duration::from_secs(10))
         .llm_request_timeout(std::time::Duration::from_secs(10))
         .shutdown_grace_period(std::time::Duration::from_secs(5))
@@ -54,7 +55,7 @@ async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_
 
     assert!(
         result.error.is_none(),
-        "git init and commit must work while ungranted /dev/ptmx remains denied by Landlock: {:?}",
+        "git init and commit must work in the writable workspace: {:?}",
         result.error
     );
     assert_eq!(result.output["exit_code"], 0, "shell result: {result:?}");
@@ -78,23 +79,22 @@ async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_
         "/dev/full failure must remain ENOSPC rather than a sandbox denial: {full:?}"
     );
 
+    // Everything outside the write set is read-only: the root is bound
+    // read-only and Landlock grants no write there.
     let denied = sandbox
         .execute_tool(
             "shell",
-            json!({ "command": "dd if=/dev/ptmx of=/dev/null count=0 status=none" }),
+            json!({ "command": "touch /usr/swage-sandbox-wrote-here 2>&1; echo exit=$?" }),
         )
         .await
         .unwrap();
     assert!(denied.error.is_none(), "shell dispatch failed: {denied:?}");
-    assert_ne!(
-        denied.output["exit_code"], 0,
-        "an ungranted device operation must be rejected by Landlock: {denied:?}"
-    );
     assert!(
         denied.output["output"]
             .as_str()
-            .is_some_and(|output| output.contains("Permission denied")),
-        "Landlock denial must be EACCES rather than the /dev/full ENOSPC result: {denied:?}"
+            .is_some_and(|output| output.contains("Read-only file system")
+                || output.contains("Permission denied")),
+        "a write outside the write set must fail: {denied:?}"
     );
 
     let tty = sandbox
@@ -117,6 +117,255 @@ async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_
     );
     sandbox.shutdown().await.unwrap();
     eprintln!("bubblewrap check completed: {name}");
+}
+
+/// A host-side HTTP server the sandboxed command can only reach through the
+/// proxy: it answers every request with its request line.
+fn host_http_server() -> (u16, std::thread::JoinHandle<()>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        for stream in listener.incoming().take(1) {
+            let mut stream = stream.unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let body = format!("served {}", line.trim_end());
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    (port, handle)
+}
+
+struct OnlyPort(u16);
+
+#[async_trait::async_trait]
+impl swage_sandbox::EgressPolicy for OnlyPort {
+    async fn decide(&self, request: &swage_sandbox::EgressRequest) -> swage_sandbox::EgressVerdict {
+        if request.port == self.0 {
+            swage_sandbox::EgressVerdict::Allowed {
+                basis: "the test's one port".into(),
+            }
+        } else {
+            swage_sandbox::EgressVerdict::Refused {
+                reason: "not the test's port".into(),
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct Recorded(std::sync::Mutex<Vec<swage_sandbox::EgressConnection>>);
+
+#[async_trait::async_trait]
+impl swage_sandbox::EgressRecorder for Recorded {
+    async fn record(&self, connection: swage_sandbox::EgressConnection) -> Result<(), String> {
+        self.0.lock().unwrap().push(connection);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_network_only_through_the_recording_proxy()
+ {
+    let bwrap = match find_bwrap() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("bubblewrap consumer unavailable: {error}");
+            return;
+        }
+    };
+    let probe = std::process::Command::new(bwrap)
+        .args([
+            "--unshare-all",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "true",
+        ])
+        .output()
+        .expect("invoke real bubblewrap namespace probe");
+    if !probe.status.success() {
+        eprintln!(
+            "bubblewrap consumer unavailable: namespace probe {}",
+            probe.status
+        );
+        return;
+    }
+
+    // A home with a key directory and a token file to mask, a workspace to
+    // write, and a sibling directory outside the write set.
+    // Ungranted host /tmp contents are intentionally hidden. Put the home
+    // fixture beside the runtime, as in the development sandbox tests, so
+    // notes exercise broad host reads rather than private temporary storage.
+    // The environment is read under its lock: another test may point
+    // XDG_RUNTIME_DIR at a directory of its own while it runs.
+    let mut env_guard = ProcessEnvGuard::new();
+    let home = tempfile::Builder::new()
+        .prefix("t")
+        .tempdir_in(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .filter(|path| !std::path::Path::new(path).starts_with("/tmp"))
+                .unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into()),
+        )
+        .unwrap();
+    let ssh = home.path().join(".ssh");
+    std::fs::create_dir(&ssh).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "PRIVATE KEY").unwrap();
+    std::fs::write(
+        home.path().join(".netrc"),
+        "machine forge login me password secret",
+    )
+    .unwrap();
+    std::fs::write(home.path().join("notes.txt"), "readable").unwrap();
+    let workspace = home.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let outside = home.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+
+    let granted = ssh.join("granted");
+    std::fs::create_dir(&granted).unwrap();
+    std::fs::write(granted.join("visible"), "granted subtree").unwrap();
+
+    let (port, server) = host_http_server();
+    let recorded = std::sync::Arc::new(Recorded::default());
+    let config = SandboxConfig::builder()
+        .working_directory(&workspace)
+        .write_path(&workspace)
+        .masked_path(&ssh)
+        .read_only_path(&granted)
+        .masked_path(home.path().join(".netrc"))
+        .tool_call_timeout(std::time::Duration::from_secs(15))
+        .llm_request_timeout(std::time::Duration::from_secs(10))
+        .shutdown_grace_period(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let mut sandbox = BubblewrapSandbox::new(config, test_llm_handler()).with_egress(
+        swage_sandbox::EgressSetup {
+            policy: std::sync::Arc::new(OnlyPort(port)),
+            recorder: recorded.clone(),
+        },
+    );
+    sandbox.spawn_agent().await.unwrap();
+
+    let shell = |command: String| {
+        let sandbox = &sandbox;
+        async move {
+            let result = sandbox
+                .execute_tool("shell", json!({ "command": command }))
+                .await
+                .unwrap();
+            assert!(result.error.is_none(), "shell dispatch failed: {result:?}");
+            result.output["output"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        }
+    };
+
+    // Keep observations separate: an empty token must not satisfy the
+    // assertion about hidden directory entries.
+    let notes = shell(format!("cat {}", home.path().join("notes.txt").display())).await;
+    assert_eq!(notes.trim(), "readable", "reads beside masks remain broad");
+    let siblings = shell(format!(
+        "find {} -mindepth 1 -maxdepth 1 ! -name granted -printf '%f\\n'",
+        ssh.display(),
+    ))
+    .await;
+    assert_eq!(
+        siblings.trim(),
+        "",
+        "masked sibling entries must stay hidden even if their contents are unreadable"
+    );
+    let token_bytes = shell(format!(
+        "cat {} 2>/dev/null | wc -c",
+        home.path().join(".netrc").display()
+    ))
+    .await;
+    assert_eq!(
+        token_bytes.trim(),
+        "0",
+        "the masked token must yield no readable bytes"
+    );
+
+    let reopened = shell(format!("cat {}/visible", granted.display())).await;
+    assert_eq!(
+        reopened.trim(),
+        "granted subtree",
+        "grant beneath mask must reopen"
+    );
+    let sibling_state = shell(format!(
+        "if test -e {}/id_ed25519; then printf present; else printf absent; fi",
+        ssh.display(),
+    ))
+    .await;
+    assert_eq!(
+        sibling_state.trim(),
+        "absent",
+        "the granted subtree must not expose its private sibling's name"
+    );
+
+    let sibling_contents = shell(format!(
+        "cat {}/id_ed25519 2>/dev/null || true",
+        ssh.display(),
+    ))
+    .await;
+    assert_eq!(
+        sibling_contents.trim(),
+        "",
+        "the granted subtree must not reveal its private sibling's contents"
+    );
+
+    // Writes: the workspace yes, the sibling outside the write set no.
+    let writes = shell(format!(
+        "echo made > {ws}/made && cat {ws}/made; touch {out}/nope 2>&1; echo outside=$?",
+        ws = workspace.display(),
+        out = outside.display(),
+    ))
+    .await;
+    assert!(writes.contains("made"), "{writes}");
+    assert!(
+        writes.contains("outside=1")
+            && (writes.contains("Read-only") || writes.contains("Permission denied")),
+        "a write outside the write set must fail: {writes}"
+    );
+
+    // The network: the proxy is in the environment, an allowed destination is
+    // served through it, a refused one gets 403, and both are recorded. The
+    // test server is on the host's loopback, which the bridge spares, so the
+    // client is told to proxy it anyway.
+    let network = shell(format!(
+        "echo proxy=$HTTPS_PROXY; curl -sS --noproxy '' http://127.0.0.1:{port}/served-path; echo; \
+         curl -s --noproxy '' -o /dev/null -w 'refused=%{{http_code}}' http://127.0.0.1:1/other"
+    ))
+    .await;
+    assert!(network.contains("proxy=http://127.0.0.1:"), "{network}");
+    assert!(
+        network.contains("served GET /served-path HTTP/1.1"),
+        "{network}"
+    );
+    assert!(network.contains("refused=403"), "{network}");
+    let records = recorded.0.lock().unwrap().clone();
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert!(
+        records[0].verdict.is_allowed() && records[0].port == port,
+        "{records:?}"
+    );
+    assert!(
+        !records[1].verdict.is_allowed() && records[1].port == 1,
+        "{records:?}"
+    );
+
+    sandbox.shutdown().await.unwrap();
+    server.join().unwrap();
 }
 
 #[tokio::test]
@@ -471,6 +720,7 @@ async fn fallback_sandbox_real_binary_uses_configured_shell_timeout_then_serves_
         let runtime = serde_json::from_value(serde_json::to_value(tools).unwrap()).unwrap();
         let config = SandboxConfig::builder()
             .working_directory(root.path())
+            .write_path(root.path())
             .tool_runtime(runtime)
             .build()
             .unwrap();
@@ -512,6 +762,7 @@ async fn bubblewrap_sandbox_real_binary_uses_configured_shell_timeout_then_serve
         let runtime = serde_json::from_value(serde_json::to_value(tools).unwrap()).unwrap();
         let config = SandboxConfig::builder()
             .working_directory(root.path())
+            .write_path(root.path())
             .tool_runtime(runtime)
             .build()
             .unwrap();
@@ -607,20 +858,15 @@ fn bubblewrap_disabled_reports_each_named_fallback() {
 
 #[tokio::test]
 async fn regression_read_only_workspace_shell_returns_output_and_readable_runtime_artifact() {
-    use swage_tool::context::ToolOutputLocation;
     let mut env_guard = ProcessEnvGuard::new();
     let workspace = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("reference"), "keep").unwrap();
     let config = SandboxConfig::builder()
         .working_directory(workspace.path())
-        .read_only_mount(workspace.path())
-        .landlock_read_path(workspace.path())
-        .read_write_mount(runtime.path())
-        .landlock_write_path(runtime.path())
-        .tool_output_location(ToolOutputLocation {
-            directory: runtime.path().into(),
-        })
+        .read_only_path(workspace.path())
+        .write_path(runtime.path())
+        .tool_output_directory(runtime.path())
         .build()
         .unwrap();
     env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));

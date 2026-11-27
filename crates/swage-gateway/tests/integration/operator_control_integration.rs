@@ -185,7 +185,8 @@ async fn conversational_agent_definition_create_and_update_record_audited_rows()
         "default_model": "sonnet",
         "models": {"sonnet": {"provider_id": "local", "model_id": "claude-sonnet-5-5",
             "aliases": [], "capabilities": {"reasoning_replay": false, "effort": null}}},
-        "sandbox": {"enabled": false, "allow_degraded_execution": false},
+        "sandbox": {"enabled": false, "allow_degraded_execution": false,
+            "network": "open", "egress_hosts": []},
         "tool_permissions": {"allow": ["*"], "deny": [], "bundles": {}, "require_approval": []}
     });
     let (status, saved) = live_http_json(
