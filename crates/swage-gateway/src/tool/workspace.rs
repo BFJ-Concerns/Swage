@@ -833,15 +833,14 @@ fn approval_root_for_request(
             .ok()?
             .join(requested)
     };
-    let normalised = normalise_path(&raw);
+    let resolved = resolve_existing_prefix(&normalise_path(&raw), requested).ok()?;
     // Missing parents are part of the requested location, not a reason to
     // grant access to a broader existing ancestor.
-    let root = if normalised.is_dir() || (directory_target && !normalised.exists()) {
-        normalised.as_path()
+    if resolved.is_dir() || (directory_target && !resolved.exists()) {
+        Some(resolved)
     } else {
-        normalised.parent()?
-    };
-    resolve_existing_prefix(root, requested).ok()
+        resolved.parent().map(Path::to_path_buf)
+    }
 }
 
 /// Follows every symlink before appending missing path components, including
@@ -1072,6 +1071,34 @@ mod tests {
     #[test]
     fn symlinked_working_directory_sibling_write_is_released_by_its_grant() {
         symlinked_working_directory_sibling_grant(true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_symlink_approval_grants_the_targets_parent() {
+        use swage_tool::context::MockToolContext;
+
+        let files = tmp_workspace();
+        let project = files.path().join("project");
+        let sibling = files.path().join("project-Annexe");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        let target = sibling.join("plan");
+        std::fs::write(&target, "sibling plan").unwrap();
+        std::os::unix::fs::symlink(&target, project.join("plan")).unwrap();
+
+        let mut ctx = MockToolContext::new("agent", "session");
+        ctx.working_directory = project;
+        assert!(resolve_context_path(&ctx, "plan").is_err());
+
+        let ToolError::RequiresLocationApproval { path, .. } =
+            location_approval_error("file_read", &ctx, "plan", "read", false)
+        else {
+            panic!("location approval expected");
+        };
+        assert_eq!(Path::new(&path), sibling);
+        ctx.allowed_paths.push(path.into());
+        assert_eq!(resolve_context_path(&ctx, "plan").unwrap().path, target);
     }
 
     // --- validate_path ---
