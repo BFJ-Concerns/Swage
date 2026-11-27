@@ -855,8 +855,7 @@ async fn output_limit_marks_an_ordinary_reply_incomplete_live_and_on_reload() {
             json!({"type":"send_message", "content":"Compare"}),
         )
         .await;
-        let mut events =
-            ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(10)).await;
+        let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(10)).await;
         let terminal = events
             .iter()
             .find(|e| e["type"] == "turn_complete")
@@ -866,13 +865,13 @@ async fn output_limit_marks_an_ordinary_reply_incomplete_live_and_on_reload() {
             limited.then_some("length"),
             "live completion must carry the output-limit cause"
         );
-        // Recorded messages arrive on the broadcast channel, independently
-        // of the turn stream; completion is not a broadcast-drained barrier.
-        if limited && !events.iter().any(|e| e["type"] == "message_appended") {
-            events.extend(
-                ws_collect_until(&mut stream, "message_appended", Duration::from_secs(10)).await,
-            );
-        }
+        // The account follows the completed reply on the turn's stream, so
+        // the open view places it below the reply, as a reload does.
+        let after_completion = if limited {
+            ws_collect_until(&mut stream, "message_appended", Duration::from_secs(10)).await
+        } else {
+            Vec::new()
+        };
         let (_, detail) = http(&gateway, "GET", &format!("/api/conversations/{id}")).await;
         let messages = detail["messages"].as_array().unwrap();
         let reply = messages.iter().find(|m| m["role"] == "assistant").unwrap();
@@ -894,11 +893,11 @@ async fn output_limit_marks_an_ordinary_reply_incomplete_live_and_on_reload() {
                     .contains("output token limit reached (length)")
             );
             assert!(
-                events
+                after_completion
                     .iter()
                     .any(|e| e["type"] == "message_appended"
                         && e["message"]["id"] == accounts[0]["id"]),
-                "the durable account must reach the open view"
+                "the durable account must reach the open view after the reply"
             );
         }
     }

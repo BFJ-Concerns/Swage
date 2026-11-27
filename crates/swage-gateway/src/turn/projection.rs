@@ -511,20 +511,6 @@ pub(super) async fn project_agent_events(
                     }
                 }
 
-                if let Some(account) = incomplete_account {
-                    match crate::service::message_view(
-                        *account,
-                        Some(swage_protocol::client::conversation::TurnState::Incomplete),
-                        Vec::new(),
-                    ) {
-                        Ok(view) => {
-                            crate::service::announce_appended_message(state, session_id, view)
-                        }
-                        Err(error) => {
-                            record_integrity_lost.get_or_insert(error.to_string());
-                        }
-                    }
-                }
                 let _ = ws_tx.send(ServerEvent::TurnComplete {
                     incomplete_reason,
                     turn_id,
@@ -533,6 +519,26 @@ pub(super) async fn project_agent_events(
                     cost_microcents: ws_cost,
                     structured_output: structured_output.clone(),
                 });
+                // The account follows the reply on the turn's own channel, so
+                // an open view places it below the reply, as a reload does.
+                if let Some(account) = incomplete_account {
+                    match crate::service::message_view(
+                        *account,
+                        Some(swage_protocol::client::conversation::TurnState::Incomplete),
+                        Vec::new(),
+                    ) {
+                        Ok(message) => {
+                            let _ = ws_tx.send(ServerEvent::MessageAppended {
+                                session_id,
+                                message,
+                            });
+                            crate::service::announce_session_updated(&state.broadcast, session_id);
+                        }
+                        Err(error) => {
+                            record_integrity_lost.get_or_insert(error.to_string());
+                        }
+                    }
+                }
             }
             AgentEvent::ProviderRefused { .. } => {
                 let _ = ws_tx.send(ServerEvent::Error {
