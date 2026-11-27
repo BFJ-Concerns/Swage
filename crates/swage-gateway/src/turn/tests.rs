@@ -23566,32 +23566,6 @@ async fn approval_scope_deadline_race(
         Some(root.path().to_path_buf()),
     )
     .await;
-    // A topic approval needs a session with a topic; the others run in the
-    // general scope the state seeds.
-    let session_id = if scope == swage_agent::approval::ApprovalDecisionScope::Permanent {
-        let topic = swage_storage::store::TopicStore::create(
-            &*storage,
-            swage_storage::NewTopic {
-                name: "Orchard".into(),
-                slug: "orchard".into(),
-            },
-        )
-        .await
-        .unwrap();
-        let session = storage.create_session(new_session(topic.id)).await.unwrap();
-        ThreadStore::create(
-            &*storage,
-            NewThread {
-                session_id: session.id,
-                agent_id: "gateway".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-        session.id
-    } else {
-        session_id
-    };
     let thread = storage.list_by_session(session_id).await.unwrap()[0].clone();
     let turn = storage
         .create_turn(NewTurn {

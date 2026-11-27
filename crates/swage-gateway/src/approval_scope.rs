@@ -66,6 +66,22 @@ pub(crate) async fn claim_approval_waiter(
     ))
 }
 
+/// Put a claimed waiter back in its slot, so a later decision can claim it.
+fn restore_approval_waiter(
+    state: &AppState,
+    approval: &ApprovalRequest,
+    sender: tokio::sync::oneshot::Sender<swage_agent::ApprovalDecision>,
+) {
+    if let Some(slot) = state
+        .approval_channels
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(&approval.id)
+    {
+        slot.sender = Some(sender);
+    }
+}
+
 /// Storage settlement owns the decision. Delivery and retained scope follow
 /// only a successful pending-to-decided write, on both client routes.
 pub(crate) async fn decide_approval(
@@ -75,17 +91,30 @@ pub(crate) async fn decide_approval(
 ) -> Result<(), ApiError> {
     use swage_storage::ApprovalState;
 
-    // Refused before anything settles, so the request stays pending for a
-    // decision the session can hold.
+    let sender = claim_approval_waiter(state, approval).await?;
+    // A tool allowed for a topic is written to the topic's configuration,
+    // which a session in the general scope never reads. Refused before the
+    // decision settles, with the waiter put back, so the request stays
+    // pending for a decision the session can hold. A location grant is
+    // kept against the scope itself and holds there.
     if decision.decision == ApprovalDecisionValue::Approved
         && decision.scope == ApprovalDecisionScope::Permanent
-        && approval_topic(state, approval).await?.is_general
+        && approval.kind != swage_storage::model::ApprovalKind::Location
     {
-        return Err(ApiError::validation(
-            "this session has no topic to allow it for; allow it once, for this session, or permanently for every topic".to_string(),
-        ));
+        let topicless = match approval_topic(state, approval).await {
+            Ok(topic) => topic.is_general,
+            Err(error) => {
+                restore_approval_waiter(state, approval, sender);
+                return Err(error);
+            }
+        };
+        if topicless {
+            restore_approval_waiter(state, approval, sender);
+            return Err(ApiError::validation(
+                "this session has no topic to allow it for; allow it once, for this session, or permanently for every topic".to_string(),
+            ));
+        }
     }
-    let sender = claim_approval_waiter(state, approval).await?;
     let outcome = match decision.decision {
         ApprovalDecisionValue::Approved => ApprovalState::Approved,
         ApprovalDecisionValue::Rejected => ApprovalState::Rejected,
@@ -99,14 +128,7 @@ pub(crate) async fn decide_approval(
         Err(error) => {
             // Keep the receiver open after a failed write. A competing client
             // still sees a claimed slot until the sender is restored.
-            if let Some(slot) = state
-                .approval_channels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get_mut(&approval.id)
-            {
-                slot.sender = Some(sender);
-            }
+            restore_approval_waiter(state, approval, sender);
             return Err(ApiError::internal(error.to_string()));
         }
     };

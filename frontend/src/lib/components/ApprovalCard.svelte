@@ -10,11 +10,13 @@
     approval: PendingApproval;
     /** Whether the session runs under a topic. A session in the general
      *  scope has no topic to allow a tool for, so only the global permanent
-     *  approval is offered there. */
+     *  approval is offered there for a tool; a location is kept against the
+     *  scope itself and is offered either way. */
     inTopic?: boolean;
   }
 
   let { approval, inTopic = true }: Props = $props();
+  const offerTopicScope = $derived(inTopic || approval.kind === "location");
 
   type ApprovalAction =
     | "allow"
@@ -94,7 +96,7 @@
       {busy === "allow-session" ? "Allowing…" : "Allow for this session"}
     </button>
 
-    {#if inTopic}
+    {#if offerTopicScope}
       <div class="split-action">
         <button
           type="button"

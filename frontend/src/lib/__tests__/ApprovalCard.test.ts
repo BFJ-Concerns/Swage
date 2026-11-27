@@ -67,6 +67,12 @@ describe("permanent approval scopes", () => {
     expect(labels()).toContain("Allow permanently globally");
   });
 
+  it("offers a location approval for the scope in a session without a topic", () => {
+    component = mount(ApprovalCard, { target: document.body, props: { approval: { ...approval, kind: "location" }, inTopic: false } });
+    flushSync();
+    expect(labels()).toContain("Allow permanently");
+  });
+
   it("offers the topic approval in a session with a topic", () => {
     component = mount(ApprovalCard, { target: document.body, props: { approval, inTopic: true } });
     flushSync();
