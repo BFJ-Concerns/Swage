@@ -11,7 +11,6 @@
  *   - connectTo() delegates to the WS client and sets status via callback
  *   - disconnect() delegates and surfaces "disconnected"
  *   - sendMessage() emits a send_message ClientEvent
- *   - cancelTurn() emits a cancel ClientEvent
  *   - Server events are routed to registered handlers
  *   - Error status + message on handshake rejection (mirrors 409 Conflict)
  *   - onReconnect callback fires when reconnect succeeds
@@ -266,19 +265,6 @@ describe("sendMessage", () => {
       attachments: [{ kind: "image_url", url: "https://example.test/cat.png" }],
     });
     expect(events).toContainEqual({ type: "send_message", content: "And this?" });
-  });
-});
-
-describe("cancelTurn", () => {
-  it("sends a cancel ClientEvent via the WS client", () => {
-    const mock = createMockWsClient();
-    const store = createConnectionStore({ wsClientFactory: () => mock });
-
-    store.connectTo("conv-abc");
-    store.cancelTurn("conv-abc");
-
-    const events = mock.sentEvents().map((s) => JSON.parse(s));
-    expect(events).toContainEqual({ type: "cancel" });
   });
 });
 

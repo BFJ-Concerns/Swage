@@ -24,6 +24,26 @@ use crate::worker_protocol::{
 
 const BOOTSTRAP_SCRIPT: &str = include_str!("../resources/worker.py");
 
+// Bubblewrap's namespace child can block in setup before arming its own
+// parent-death signal. Start the watchdog before bubblewrap so EOF on the
+// host's pipe kills the entire, dedicated process group even in that window.
+const SANDBOX_SUPERVISOR: &str = r#"
+bootstrap=$1
+shift
+exec 3<&0
+(
+    while IFS= read -r line; do :; done
+    kill -KILL 0
+) <&3 3<&- &
+watchdog=$!
+exec 3<&-
+"$@" < "$bootstrap"
+status=$?
+kill "$watchdog" 2>/dev/null
+wait "$watchdog" 2>/dev/null
+exit "$status"
+"#;
+
 #[derive(Debug, Error)]
 pub enum PythonWorkerError {
     #[error(transparent)]
@@ -149,9 +169,13 @@ impl PythonWorkerRuntime {
                     .build()
                     .expect("worker directory")
             });
+            std::fs::write(worker_dir.bootstrap_path(), BOOTSTRAP_SCRIPT)
+                .map_err(|error| PythonWorkerError::SpawnFailed(error.to_string()))?;
             build_sandboxed_command(&self.runtime, &worker_dir, policy, proxy.as_ref())?
         } else {
-            build_unsandboxed_command(&self.runtime, &worker_dir)
+            let mut command = build_unsandboxed_command(&self.runtime, &worker_dir);
+            command.kill_on_drop(true);
+            command
         };
 
         if let Some(bridge) = &bridge {
@@ -162,21 +186,22 @@ impl PythonWorkerRuntime {
             PythonWorkerError::SpawnFailed(format!("child spawn failed: {error}"))
         })?;
 
-        let stdin = match child.take_stdin() {
-            Some(stdin) => stdin,
-            None => {
-                let _ = child.graceful_shutdown(Duration::from_secs(2)).await;
-                return Err(PythonWorkerError::SpawnFailed(
-                    "worker stdin was not piped".into(),
-                ));
-            }
-        };
-
-        tokio::spawn(async move {
-            let mut stdin = stdin;
-            let _ = stdin.write_all(BOOTSTRAP_SCRIPT.as_bytes()).await;
-            let _ = stdin.shutdown().await;
-        });
+        if !sandboxed {
+            let stdin = match child.take_stdin() {
+                Some(stdin) => stdin,
+                None => {
+                    let _ = stop_worker_process(&mut child, false).await;
+                    return Err(PythonWorkerError::SpawnFailed(
+                        "worker stdin was not piped".into(),
+                    ));
+                }
+            };
+            tokio::spawn(async move {
+                let mut stdin = stdin;
+                let _ = stdin.write_all(BOOTSTRAP_SCRIPT.as_bytes()).await;
+                let _ = stdin.shutdown().await;
+            });
+        }
 
         let startup_result = async {
             let stream = tokio::time::timeout(
@@ -206,13 +231,14 @@ impl PythonWorkerRuntime {
             Ok(transport) => Ok(ReadyWorker {
                 child,
                 transport,
+                sandboxed,
                 uses_worker_directory: sandboxed && !scoped,
                 _egress_proxy: proxy,
                 _egress_bridge: bridge,
                 _worker_dir: worker_dir,
             }),
             Err(error) => {
-                let _ = child.graceful_shutdown(Duration::from_secs(2)).await;
+                let _ = stop_worker_process(&mut child, sandboxed).await;
                 Err(error)
             }
         }
@@ -417,6 +443,7 @@ impl Drop for WorkerEgressBridge {
 pub struct ReadyWorker {
     child: ChildProcessManager,
     transport: WorkerTransport,
+    sandboxed: bool,
     uses_worker_directory: bool,
     _worker_dir: WorkerDirectory,
     _egress_proxy: Option<swage_sandbox::egress::EgressProxy>,
@@ -443,9 +470,14 @@ impl ReadyWorker {
             .await?
         {
             WorkerToHostMessage::ShutdownAck => {
-                self.child
-                    .graceful_shutdown(Duration::from_secs(2))
+                // Keep the sandbox's lifeline open while a worker that
+                // acknowledged shutdown exits on its own.
+                let _lifeline = self.child.take_stdin();
+                tokio::time::timeout(Duration::from_secs(2), self.child.wait_for_exit())
                     .await
+                    .map_err(|_| {
+                        PythonWorkerError::Protocol("worker did not exit after shutdown".into())
+                    })?
                     .map_err(|error| PythonWorkerError::SpawnFailed(error.to_string()))?;
                 Ok(())
             }
@@ -457,18 +489,37 @@ impl ReadyWorker {
 
     pub async fn terminate(&mut self) {
         if self.shutdown().await.is_err() {
-            let _ = self.child.graceful_shutdown(Duration::from_secs(2)).await;
+            let _ = stop_worker_process(&mut self.child, self.sandboxed).await;
         }
     }
 
     pub async fn force_kill(&mut self) {
-        let _ = self.child.force_kill();
+        if self.sandboxed {
+            let _ = stop_worker_process(&mut self.child, true).await;
+        } else {
+            let _ = self.child.force_kill();
+        }
     }
 
     #[cfg(test)]
     pub fn pid(&self) -> u32 {
         self.child.pid()
     }
+}
+
+async fn stop_worker_process(
+    child: &mut ChildProcessManager,
+    sandboxed: bool,
+) -> Result<(), PythonWorkerError> {
+    let result = if sandboxed {
+        // Closing this pipe also works during bootstrap, before the socket
+        // exists or Bubblewrap can propagate a signal to all its children.
+        drop(child.take_stdin());
+        child.wait_for_exit().await.map(|_| ())
+    } else {
+        child.graceful_shutdown(Duration::from_secs(2)).await
+    };
+    result.map_err(|error| PythonWorkerError::SpawnFailed(error.to_string()))
 }
 
 struct WorkerTransport {
@@ -550,6 +601,10 @@ impl WorkerDirectory {
         })
     }
 
+    fn bootstrap_path(&self) -> PathBuf {
+        self._temp_dir.path().join("bootstrap.py")
+    }
+
     fn socket_path(&self) -> PathBuf {
         self.socket_dir.join("worker.sock")
     }
@@ -618,7 +673,28 @@ fn build_sandboxed_command(
         .arg("--sandbox-exec")
         .arg(&runtime.executable_path)
         .args(worker_python_startup_args(runtime));
-    Ok(command)
+    Ok(under_supervisor(&command, &worker_dir.bootstrap_path()))
+}
+
+/// Run a bubblewrap command beneath [`SANDBOX_SUPERVISOR`] in a process group
+/// of its own, keeping the environment the command was built with.
+fn under_supervisor(bwrap: &Command, bootstrap: &Path) -> Command {
+    let bwrap = bwrap.as_std();
+    let mut command = Command::new("/bin/sh");
+    command.env_clear();
+    for (key, value) in bwrap.get_envs() {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    command
+        .process_group(0)
+        .args(["-c", SANDBOX_SUPERVISOR, "swage-python-supervisor"])
+        .arg(bootstrap)
+        .arg(bwrap.get_program())
+        .args(bwrap.get_args());
+    command
 }
 
 fn worker_python_startup_args(runtime: &ResolvedPythonRuntime) -> &'static [&'static str] {
@@ -789,6 +865,83 @@ mod tests {
         if worker.child.is_running() {
             worker.force_kill().await;
         }
+    }
+
+    #[tokio::test]
+    async fn python_execute_has_standard_builtins_and_no_memory_helpers() {
+        let runtime = unsandboxed_test_runtime(5);
+        let mut worker = runtime.spawn_ready_worker(false).await.unwrap();
+        let directory = TempDir::new().unwrap();
+        let execution = runtime
+            .execute_python(
+                &mut worker,
+                r#"
+import swage
+with open("values", "w") as values:
+    values.write("1.24")
+with open("values") as values:
+    numbers = list(map(float, values))
+print(type(numbers).__name__, round(numbers[0], 1), globals()["swage"] is swage)
+print([name for name in dir(swage) if name.startswith("memory_")])
+"#,
+                directory.path(),
+                &NoopToolHost,
+            )
+            .await
+            .unwrap();
+        assert_eq!(execution.exception_type, None, "{:?}", execution.traceback);
+        assert_eq!(execution.stdout, "list 1.2 True\n[]\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn aborting_an_execution_that_owns_the_worker_terminates_it() {
+        struct BlockingToolHost(tokio::sync::Notify);
+
+        #[async_trait]
+        impl NestedToolHost for BlockingToolHost {
+            async fn dispatch_tool(
+                &self,
+                _name: &str,
+                _arguments: Value,
+            ) -> Result<Value, WorkerToolError> {
+                self.0.notify_one();
+                std::future::pending().await
+            }
+        }
+
+        let runtime = unsandboxed_test_runtime(10);
+        let mut worker = runtime.spawn_ready_worker(false).await.unwrap();
+        let pid = worker.pid();
+        let directory = TempDir::new().unwrap();
+        let host = Arc::new(BlockingToolHost(tokio::sync::Notify::new()));
+        let execution = tokio::spawn({
+            let host = Arc::clone(&host);
+            async move {
+                runtime
+                    .execute_python(
+                        &mut worker,
+                        "swage.shell('echo waiting')",
+                        directory.path(),
+                        host.as_ref(),
+                    )
+                    .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), host.0.notified())
+            .await
+            .expect("execution should reach the nested tool");
+        execution.abort();
+        assert!(execution.await.unwrap_err().is_cancelled());
+        let path = PathBuf::from(format!("/proc/{pid}"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled worker should exit and be reaped");
     }
 
     #[tokio::test]

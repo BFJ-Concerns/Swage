@@ -150,7 +150,7 @@ function makeStreamingStore(
     },
     handleServerEvent: () => {},
     startTurn: () => {},
-    cancelTurn: () => {},
+    cancelTurn: async () => {},
     clearConnectionError: () => {},
     reconcileAfterReconnect: () => {},
   };
@@ -235,7 +235,7 @@ describe("provider failure notice", () => {
     Object.defineProperty(store.activeConversation!, "selected_model_id", { value: "sol" });
     const raw = `provider 'cliproxy-openai' at https://Proxy.Example/v1: HTTP error 400: ${JSON.stringify({ error: { message: "Authentication rejected" } })}`;
     const sendMessage = vi.fn();
-    const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage, cancelTurn: vi.fn() } });
+    const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage } });
     streaming.startTurn("Hello", "cliproxy-openai:gpt-model-access-does-not-exist");
     streaming.handleServerEvent({ type: "error", code: "provider_error", message: raw });
     component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore: streaming } });
@@ -250,7 +250,7 @@ describe("provider failure notice", () => {
     const store = makeConversationStore([{ role: "user", content: "Queued", timestamp: "2026-10-15T12:00:00Z" }]);
     Object.defineProperty(store.activeConversation!, "root_thread_id", { value: "main-thread" });
     const sendMessage = vi.fn();
-    const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage, cancelTurn: vi.fn() } });
+    const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage } });
     streaming.startTurn("First", "first-model");
     streaming.startTurn("Queued", "Queued-Model");
     const clientId = sendMessage.mock.calls[1][5] as string;

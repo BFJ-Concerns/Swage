@@ -48,13 +48,55 @@ is already in use, the gateway exits with a diagnostic. The runtime-metadata
 file written for CLI discovery records the actual bound address, which may
 differ from the configured one when port `0` (OS-assigned) is used.
 
-### Security boundary
+### Pairing beyond loopback
 
-The gateway has no authentication layer. Binding to any address other than
-loopback exposes the full API — including every configured provider key — to
-every host that can reach the port. The intended use is trusted
-private-network addresses (a LAN segment, a tailnet, or similar).
-Public-internet binding is not supported until authentication exists.
+Bound to loopback, the gateway asks nothing of a request. Bound to any other
+address, it serves a request from another machine only when the request
+carries the gateway's token; requests from the gateway's own machine —
+over loopback, or from the one address it is bound to — never need it.
+Liveness (`/api/health`), the access status (`/api/access`) and pairing
+itself (`/api/pair`) answer anyone, and the web UI's own files load
+unpaired so the page can ask to pair. A device's link
+(`/api/devices/connect`) needs no gateway token either: the device proves
+itself with its registered shared token, and the gateway refuses the link
+without it.
+
+The gateway generates the token on its first start, in `gateway-token` in
+the data root, readable only by its owner. A client gets it by pairing
+once:
+
+1. On the gateway's machine, run `swage gateway pair`. It prints a one-time
+   code that expires after ten minutes; codes are issued only to requests
+   from that machine.
+2. Enter the code on the other device:
+   - **Web UI** — the page shows a pairing prompt when the gateway refuses
+     it. Pairing sets a cookie the browser keeps for 400 days.
+   - **Command line** — `swage run --url http://<gateway>:<port>` asks for
+     the code on its terminal, or takes it as `--pairing-code <code>`.
+   - **Desktop app** — it shows the web UI's pairing prompt when it opens a
+     network gateway unpaired.
+
+Each client remembers the token for that gateway and sends it with every
+request, HTTP and WebSocket alike: the command line in `client-pairings.json`
+in its own data root (`SWAGE_HOME`, by default `~/.swage`), the desktop app
+in `gateway-pairings.json` in its profile directory, and the browser as its
+cookie. Nothing is asked again.
+
+The gate is one setting for the whole install, `[server] access`, set under
+**Settings → Security**:
+
+| Value | A request from another machine without the token |
+|---|---|
+| `token` (default) | is refused with `401` |
+| `warn` | is admitted and logged as a warning |
+| `off` | is admitted |
+
+A change applies at once, without a restart, and is recorded in the audit
+trail when it is saved. A client given a pairing code while the gate warns
+still pairs, so it stays admitted when the gate goes back to `token`.
+
+The gate is not authentication for the public internet: bind only to a
+trusted private network, such as a LAN segment or a tailnet.
 
 The host machine's own firewall must also permit inbound connections on the
 chosen port — a correctly bound gateway is unreachable from the LAN if the
@@ -276,13 +318,15 @@ A credential travels in plaintext when the provider's `base_url` is
 `http://` and names an address other than this machine's loopback: anyone
 on the path can read it. A local model server on `localhost` or `127.0.0.1`
 is never plaintext in this sense, and needs no setting. For a remote
-`http://` endpoint the provider entry's `plaintext_credentials` decides what
-happens, judged when the provider is built:
+`http://` endpoint, **Plaintext credentials** in the provider's form under
+**Settings → Providers** sets `plaintext_credentials`. The policy applies
+when the provider is built and when model discovery sends a credential.
 
 - `warn` (the default) — requests are sent, after one warning for the
   provider in the audit record (event kind `provider_credential_exposure`).
-  A rebuild of the same provider finds the warning and adds none; if the
-  warning cannot be recorded, nothing is sent.
+  A rebuild of the same provider finds the warning and adds none. If the
+  audit record cannot be written, the gateway logs the warning and still
+  sends the request.
 - `refuse` — nothing is sent: every request fails with the reason, and the
   refusal is recorded once.
 - `allow` — requests are sent and nothing is recorded.
@@ -849,9 +893,7 @@ links and verifies it against the version and checksum pinned in
 `v8` crate's build script. The pin must match the `v8` package Cargo.lock
 resolves, so a dependency upgrade that moves V8 fails the fetch until the
 pin is updated on purpose. The prebuilt archive is pinned for x86-64 Linux
-with glibc. To compile the locked engine from source, install the [rusty_v8
-build prerequisites](https://github.com/denoland/rusty_v8#building-from-source)
-and run `V8_FROM_SOURCE=1 cargo build --locked --bin swage`.
+with glibc.
 
 Other useful recipes:
 
@@ -862,6 +904,15 @@ Other useful recipes:
   behaviour as the verify gate.
 - `just build-dev-embedded` — a debug build with the current frontend baked
   into the gateway binary.
+
+### Building V8 from source
+
+The experimental source build uses Cargo directly. After installing the
+[rusty_v8 build prerequisites](https://github.com/denoland/rusty_v8#building-from-source),
+run `V8_FROM_SOURCE=1 cargo build --locked --bin swage`. On x86-64 Linux
+with glibc, the locked V8 crate's source build stops because Ninja cannot
+find its ICU data file (`icudtl.dat`). Support for other targets remains
+unverified.
 
 ## Client-side route handling
 
@@ -941,6 +992,11 @@ one is available.
 `file_search`, `shell`, and `python_execute`. Of these, `shell` is one of the
 two sandbox-eligible tools.
 
+`python_execute` runs each program in a fresh interpreter with Python's standard
+built-ins and standard-library imports. The default Python sandbox starts it in
+a private working directory with no network access. The supplied `swage` module
+can call the file, shell and web tools available to the turn.
+
 **Browser** — `browser_navigate`, `browser_snapshot`, `browser_click`,
 `browser_type`, `browser_select`, and `browser_scroll`.
 
@@ -993,7 +1049,9 @@ of the attached workspace's write permission:
 
 `shell` retains stdout and stderr artefacts only when the output stream was
 truncated — a stream that fits in the tool result is reported inline and the
-artefact file is removed. Three browser action tools — `browser_click`,
+artefact file is removed. The two streams share the output limit: a short
+stream is reported whole beside a long one, and two long streams take half
+the limit each. Three browser action tools — `browser_click`,
 `browser_select`, and `browser_scroll` — write a post-action screenshot when
 the browser screenshot policy is not Off; `browser_type` never captures.
 `browser_snapshot` writes a full
@@ -1016,4 +1074,6 @@ workspace. Paired-device execution still stores artefacts relative to its
 working directory at `.swage/tool-output/` and reports relative paths.
 
 Operators can register additional tools through plugins; plugin tool names come
-from the plugin manifest rather than the gateway's built-in set.
+from the plugin manifest rather than the gateway's built-in set. A plugin
+whose tool takes a built-in tool's name, or a name another tool already has,
+is left out at startup with a warning in the gateway's log.

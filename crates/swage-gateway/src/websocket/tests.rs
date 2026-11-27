@@ -18,13 +18,6 @@ fn client_event_send_message_deserialises() {
 }
 
 #[test]
-fn client_event_cancel_deserialises() {
-    let json = r#"{"type": "cancel"}"#;
-    let event: ClientEvent = serde_json::from_str(json).unwrap();
-    assert!(matches!(event, ClientEvent::Cancel {}));
-}
-
-#[test]
 fn server_event_token_serialises() {
     let event = ServerEvent::Token {
         content: "hi".to_string(),
@@ -405,7 +398,7 @@ async fn activate_skill_with_missing_session_surfaces_discovery_error() {
     let event = rx.recv().await.expect("should receive an event");
     match event {
         ServerEvent::Error { code, message } => {
-            assert_eq!(code, error_codes::INTERNAL_ERROR);
+            assert_eq!(code, error_codes::REQUEST_FAILED);
             assert!(message.contains("skill discovery failed"));
             assert!(message.contains("session"));
         }
@@ -1056,7 +1049,7 @@ async fn approval_decision_invalid_uuid_sends_error() {
     let event = rx.recv().await.expect("should receive an error event");
     match event {
         ServerEvent::Error { code, message } => {
-            assert_eq!(code, "internal_error");
+            assert_eq!(code, "request_failed");
             assert!(message.contains("invalid event"));
         }
         other => panic!("expected Error, got {other:?}"),
@@ -1568,7 +1561,7 @@ fn session_updated_is_a_list_signal_and_not_a_conversation_event() {
     let event = ServerEvent::SessionUpdated {
         session_id: Uuid::new_v4(),
     };
-    assert!(super::work_surface::is_work_surface_signal(&event));
+    assert!(super::work_surface::work_surface_signal(&event).is_some());
     assert!(!super::connection::broadcast_event_matches_session(
         Uuid::new_v4(),
         &event

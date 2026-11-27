@@ -1207,11 +1207,18 @@
             "$ref": "#/$defs/OperatorSessionSummary"
           },
           "type": "array"
+        },
+        "workflow_runs": {
+          "items": {
+            "$ref": "#/$defs/OperatorWorkflowRunSummary"
+          },
+          "type": "array"
         }
       },
       "required": [
         "gateway",
         "sessions",
+        "workflow_runs",
         "approvals",
         "schedules",
         "channels",
@@ -1219,11 +1226,40 @@
       ],
       "type": "object"
     },
+    "OperatorSessionEnding": {
+      "description": "A terminal turn's standing on the operator surface.",
+      "enum": [
+        "cancelled",
+        "failed",
+        "interrupted"
+      ],
+      "type": "string"
+    },
     "OperatorSessionSummary": {
       "properties": {
+        "activity": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "awaiting_approval": {
+          "description": "The running turn is held on a request only the person can answer.",
+          "type": "boolean"
+        },
         "created_at": {
           "format": "date-time",
           "type": "string"
+        },
+        "ending": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperatorSessionEnding"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "has_active_connection": {
           "type": "boolean"
@@ -1248,6 +1284,20 @@
             "null"
           ]
         },
+        "parent_session_id": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "The schedule or workflow run that opened this session, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "topic_id": {
           "description": "Absent for a session in the general scope.",
           "format": "uuid",
@@ -1259,6 +1309,13 @@
         "topic_name": {
           "description": "The topic's name, or \"General\" for a session without one.",
           "type": "string"
+        },
+        "workflow_run_id": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1268,7 +1325,54 @@
         "last_activity",
         "has_interrupted_turn",
         "has_active_connection",
-        "has_running_turn"
+        "has_running_turn",
+        "awaiting_approval",
+        "agent_id",
+        "activity"
+      ],
+      "type": "object"
+    },
+    "OperatorWorkflowRunSummary": {
+      "properties": {
+        "activity": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent_run_id": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_session_id": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "state",
+        "activity"
       ],
       "type": "object"
     },

@@ -36,11 +36,14 @@ impl Tool for WorkflowRunTool {
          does what is being asked for, starting it is the way to do the job, in place of \
          carrying the work out by hand in the conversation. A script run from `source` can \
          reach no further than this session can, and can deliver nothing outside the run. \
-         The call returns once the run has started, with the run's record in `run`, which carries its \
-         `id` and `state`, and `workflow_run_status` reads the run by that id later. \
-         With `wait` the call holds until the run stops running and returns its final \
-         output; a run still going after ten minutes fails the wait and not the run. A run \
-         that has failed by the time the call returns is reported as a failed call. \
+         The call returns the run's record once the run has started: `id` and `state` are \
+         fields of the result itself, beside `view_url`, the address of the run's page, and \
+         `workflow_run_status` reads the run by that id later. With `wait` the call holds \
+         until the run is no longer running and returns the record as it then stands: \
+         `final_output` holds what the script returned once `state` is `completed`, and a \
+         run that has parked on a wait of its own comes back `parked`, with no output yet. \
+         A run still running after ten minutes fails the wait and not the run. A run that \
+         has failed by the time the call returns is reported as a failed call. \
          The script interface is set out by the `workflow-authoring` skill and by the \
          `workflow-engine` document that `docs_read` returns."
     }
@@ -84,7 +87,7 @@ impl Tool for WorkflowRunTool {
                 "wait": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Hold the call until the run stops running, and return its final output, for when this turn cannot go on without it. Left out or false, the call returns once the run has started."
+                    "description": "Hold the call until the run is no longer running, and return its record as it then stands, for when this turn cannot go on without the run's result. Left out or false, the call returns once the run has started."
                 }
             },
             "additionalProperties": false

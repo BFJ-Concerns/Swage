@@ -90,12 +90,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn install_path_ends_with_service_json() {
-        let path = install_config_path();
-        assert_eq!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("service.json")
-        );
+    fn install_path_uses_the_swage_root() {
+        let home = crate::test_support::SwageHomeGuard::new();
+        assert_eq!(install_config_path(), home.path().join("service.json"));
     }
 
     #[tokio::test]

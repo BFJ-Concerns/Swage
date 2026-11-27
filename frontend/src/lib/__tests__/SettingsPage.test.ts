@@ -7,8 +7,10 @@ import modelManagementSource from "../components/settings/ProviderModelManagemen
 import { createClassComponent } from "svelte/legacy";
 import { fromStore, writable } from "svelte/store";
 
+import { parseRoute } from "../router";
 import { emptySettings } from "./fixtures/settings";
 import SettingsPage from "../components/SettingsPage.svelte";
+import type { SecuritySettingsResponse } from "../protocol/SecuritySettingsResponse";
 import type { Schedule } from "../protocol/Schedule";
 import type { SettingsPayload, SettingsResponse } from "../types";
 
@@ -20,6 +22,8 @@ import * as operatorApi from "../api/operator";
 import { makeSchedule } from "./fixtures/schedules";
 
 vi.mock("../api/settings", () => ({
+  fetchInstallSecuritySettings: vi.fn(),
+  saveInstallSecuritySettings: vi.fn(),
   discoverModels: vi.fn(),
   fetchProviderSecrets: vi.fn(async () => ({ secrets: [] })),
   fetchSettings: vi.fn(),
@@ -121,9 +125,9 @@ describe("SettingsPage", () => {
       default_model: payload.default_model,
       generation_presets: payload.generation_presets,
       tool_runtime: payload.tool_runtime ?? emptySettings().tool_runtime,
-      tool_permissions: payload.tool_permissions ?? emptySettings().tool_permissions,
+      tool_permissions: { ...emptySettings().tool_permissions, ...payload.tool_permissions },
       hitl: payload.hitl ?? emptySettings().hitl,
-      sandbox: payload.sandbox,
+      sandbox: emptySettings().sandbox,
       context: payload.context ?? emptySettings().context,
       pricing: payload.pricing ?? emptySettings().pricing,
       observability: payload.observability ?? emptySettings().observability,
@@ -189,11 +193,6 @@ describe("SettingsPage", () => {
       expect.soft(notice?.textContent?.trim()).toBe("Saved automatically. Changes apply to new turns.");
       expect.soft(notice?.getAttribute("role")).toBe("status");
       expect.soft(notice?.querySelector("button")).toBeNull();
-      if (tab === "automation") {
-        const sandbox = [...document.querySelectorAll(".field")].find((field) => field.querySelector(".key")?.textContent?.startsWith("Sandbox"));
-        expect.soft(sandbox?.textContent).toContain("Saved changes apply to new turns.");
-        expect.soft(sandbox?.textContent).not.toContain("require a gateway restart");
-      }
       await vi.advanceTimersByTimeAsync(5000);
       expect(document.querySelector(".notice")).toBeNull();
     },
@@ -461,6 +460,33 @@ describe("SettingsPage", () => {
     expect(sent.api_key_secret_ref).toBe(owned.reference); expect(sent.api_key_env).toBeNull(); expect(sent.api_key).toBe("");
   });
 
+  it("uses the selected plaintext policy for discovery and saves it with the provider", async () => {
+    const settings = configuredProvider("environment");
+    settings.providers.proxy.base_url = "http://proxy.example/v1";
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(settings);
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
+    await flushUi();
+
+    const label = [...document.querySelectorAll("label")].find(
+      (candidate) => candidate.textContent?.trim() === "Plaintext credentials",
+    );
+    const policy = label?.control as HTMLSelectElement;
+    expect(policy.value).toBe("warn");
+    policy.value = "refuse";
+    policy.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    buttonNamed("Refresh").click();
+    await flushUi();
+
+    expect(settingsApi.discoverModels).toHaveBeenLastCalledWith("proxy", "", expect.objectContaining({
+      plaintext_credentials: "refuse",
+    }));
+    await waitForSaveCall();
+    const provider = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.proxy;
+    expect(provider.plaintext_credentials).toBe("refuse");
+    expect(provider.api_key_env).toBe("PROXY_KEY");
+  });
+
   it("renders model choices with a font that has lower-case glyphs", () => {
     for (const source of [defaultModelSource, modelManagementSource]) {
       const css = compile(source, { generate: "client", css: "external" }).css!.code;
@@ -485,6 +511,76 @@ describe("SettingsPage", () => {
     const input = document.querySelector<HTMLInputElement>('.provider-section input[type="password"]');
     expect(input).not.toBeNull();
     expect(input?.closest(".field")?.querySelector(".key")?.firstChild?.textContent).toBe("API key");
+  });
+
+  it("omits security fields from an Automation autosave holding an old snapshot", async () => {
+    const old = emptySettings();
+    old.sandbox.enabled = false;
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(old);
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
+    await flushUi();
+    const newer = { available_tools: [], scope: { kind: "install" as const },
+      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: ["shell"] },
+      overrides: { sandbox_enabled: true, require_approval: ["shell"] }, relaxed: [] };
+    vi.mocked(settingsApi.saveInstallSecuritySettings).mockResolvedValue(newer);
+    await settingsApi.saveInstallSecuritySettings(newer.overrides);
+    const editor = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
+    editor.value = '{"inspect":["file_read"]}';
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    const body = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0];
+    expect(body).not.toHaveProperty("sandbox");
+    expect(body.tool_permissions).not.toHaveProperty("require_approval");
+    expect(body.tool_permissions?.bundles).toEqual({ inspect: ["file_read"] });
+  });
+
+  it("edits install security through its own reading and saves picker timeouts and removals", async () => {
+    expect(parseRoute("/settings/security").settingsTab).toBe("security");
+    const reading: SecuritySettingsResponse = {
+      available_tools: ["shell", "file_write"], scope: { kind: "install" as const },
+      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: [] },
+      overrides: {}, relaxed: [],
+    };
+    vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);
+    vi.mocked(settingsApi.saveInstallSecuritySettings).mockImplementation(async (overrides) => {
+      reading.overrides = JSON.parse(JSON.stringify(overrides));
+      reading.effective = { ...reading.effective, ...reading.overrides };
+      return JSON.parse(JSON.stringify(reading));
+    });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "security" } });
+    await flushUi();
+    expect(document.querySelector('[aria-label="Sandbox for the install"]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain("require a gateway restart");
+    const choose = (label: string, value: string) => {
+      const select = document.querySelector<HTMLSelectElement>(`[aria-label="${label}"]`)!;
+      select.value = value; select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    choose("Sandbox for the install", "off");
+    choose("Access gate for the install", "warn");
+    choose("Approval prompts for the install", "own");
+    await flushUi();
+    choose("Tool to require approval", "shell");
+    await flushUi(); buttonNamed("Add tool").click(); await flushUi();
+    const timeout = document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')!;
+    timeout.value = "42"; timeout.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi(); buttonNamed("Save security settings").click(); await flushUi();
+    expect(settingsApi.saveInstallSecuritySettings).toHaveBeenLastCalledWith({
+      sandbox_enabled: false, access_gate: "warn",
+      require_approval: [{ tool: "shell", timeout: 42, timeout_policy: null }],
+    });
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    choose("Approval prompts for the install", "own"); await flushUi();
+    choose("Tool to require approval", "file_write"); await flushUi();
+    buttonNamed("Add tool").click(); await flushUi();
+    document.querySelector<HTMLButtonElement>('[aria-label="Remove file_write approval"]')!.click();
+    await flushUi(); buttonNamed("Save security settings").click(); await flushUi();
+    expect(vi.mocked(settingsApi.saveInstallSecuritySettings).mock.calls.at(-1)![0].require_approval)
+      .toEqual([{ tool: "shell", timeout: 42, timeout_policy: null }]);
+    unmount(component);
+    component = mount(SettingsPage, { target: document.body, props: { tab: "security" } });
+    await flushUi();
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')?.value).toBe("42");
+    expect(document.querySelector('[aria-label="Remove file_write approval"]')).toBeNull();
   });
 
   it("refuses invalid provider URL drafts before autosave and accepts corrections or clearing", async () => {
@@ -705,7 +801,7 @@ describe("SettingsPage", () => {
     });
     component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
     await flushUi();
-    buttonNamed("Disabled").click();
+    buttonNamed("Interrupt").click();
     await waitForSaveCall();
     if (action === "begin") document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.click();
     await flushUi();
@@ -756,19 +852,20 @@ describe("SettingsPage", () => {
     }
   });
 
-  it.each(["bundles", "approvals"])("allows saving after a tab switch discards an invalid %s editor", async (kind) => {
+  it("allows saving after a tab switch discards an invalid bundles editor", async () => {
     const tab = writable<"automation" | "generation">("automation");
     const currentTab = fromStore(tab);
     component = mount(SettingsPage, { target: document.body, props: { get tab() { return currentTab.current; } } });
     await flushUi();
-    const selector = kind === "bundles" ? '[aria-label="Tool bundles"]' : 'textarea[id$="-approvals"]';
+    const selector = '[aria-label="Tool bundles"]';
     const editor = document.querySelector<HTMLTextAreaElement>(selector)!;
     editor.value = "{";
     editor.dispatchEvent(new Event("input", { bubbles: true }));
     await flushUi();
-    if (kind === "bundles") expect(editor.getAttribute("aria-invalid")).toBe("true");
-    else expect(document.querySelector(".notice.error")?.textContent).toBeTruthy();
-    if (kind === "bundles") buttonNamed("Disabled").click();
+    expect(editor.getAttribute("aria-invalid")).toBe("true");
+    const deny = document.querySelector<HTMLTextAreaElement>('textarea[id$="-deny"]')!;
+    deny.value = "shell";
+    deny.dispatchEvent(new Event("input", { bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
     expect(document.querySelector(".notice.error")?.textContent).toBeTruthy();
@@ -779,7 +876,7 @@ describe("SettingsPage", () => {
     await flushUi();
     const restored = document.querySelector<HTMLTextAreaElement>(selector)!;
     expect(restored.getAttribute("aria-invalid")).toBeNull();
-    expect(JSON.parse(restored.value)).toEqual(kind === "bundles" ? emptySettings().tool_permissions.bundles : emptySettings().tool_permissions.require_approval);
+    expect(JSON.parse(restored.value)).toEqual(emptySettings().tool_permissions.bundles);
     expect(document.querySelector(".notice.error"), "discarded JSON drafts must not leave a page warning").toBeNull();
     expect(settingsApi.saveSettings).not.toHaveBeenCalled();
     const delay = document.querySelector<HTMLInputElement>('[aria-label="Archive sessions after days"]')!;
@@ -788,7 +885,7 @@ describe("SettingsPage", () => {
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
     expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].sandbox?.enabled).toBe(kind !== "bundles");
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].tool_permissions?.deny).toEqual(["shell"]);
   });
 
   it("waits for the required search fields before autosaving", async () => {
@@ -828,11 +925,13 @@ describe("SettingsPage", () => {
     });
     await flushUi();
     document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.click();
-    buttonNamed("Disabled").click();
+    const delay = document.querySelector<HTMLInputElement>('[aria-label="Archive sessions after days"]')!;
+    delay.value = "8";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
     expect(settingsApi.saveSettings, "an incomplete search draft must not block other settings").toHaveBeenCalled();
-    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].sandbox?.enabled).toBe(false);
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].sessions?.archive_after_days).toBe(8);
     expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toBeNull();
     expect(document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.checked).toBe(true);
     expect(document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.value).toBe("");
@@ -850,11 +949,12 @@ describe("SettingsPage", () => {
     vi.mocked(settingsApi.saveSettings).mockClear();
     document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.value = "";
     document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.dispatchEvent(new Event("input", { bubbles: true }));
-    buttonNamed("Enabled").click();
+    delay.value = "9";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
     expect(settingsApi.saveSettings).toHaveBeenCalled();
-    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].sandbox?.enabled).toBe(true);
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].sessions?.archive_after_days).toBe(9);
     expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toEqual({
       provider_type: "searxng", base_url: "http://127.0.0.1:35123",
     });

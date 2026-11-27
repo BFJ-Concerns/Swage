@@ -24,8 +24,9 @@ two that resemble the one in hand before writing.
   `crates/swage-tool/src/tool.rs`.
 - The framework, in `crates/swage-tool/src/`: the registry (`registry.rs`),
   the dispatch pipeline (`dispatch.rs`), permissions (`permission.rs`),
-  parameter validation (`validation.rs`), redaction (`params.rs`), rate
-  limits (`rate_limit.rs`) and the delegate tool (`delegate.rs`).
+  parameter validation (`validation.rs`), helpers that read a parameter out
+  of a call's arguments (`params.rs`), rate limits (`rate_limit.rs`) and the
+  delegate tool (`delegate.rs`).
 - The built-in tools: `crates/swage-gateway/src/tool/`, one file for a tool
   or a family of them.
 - `ToolError`: `crates/swage-core/src/error.rs`.
@@ -44,8 +45,10 @@ these in the same change:
    `ToolRegistry::register_builtin`.
 2. **The reserved name.** Add the name to `PROTECTED_NAMES` in
    `crates/swage-tool/src/registry.rs`. `ToolRegistry::register`, the entry
-   point for a tool that is not built in, refuses a name on that list, and
-   that refusal is what stops such a tool taking a built-in's name.
+   point for a tool that is not built in, refuses a name on that list. The
+   gateway passes each plugin's tool through it at startup, and that refusal
+   is what stops a plugin taking a built-in's name, on a host that did not
+   register the built-in as much as on one that did.
 3. **Where it executes.** A tool whose `requires_device_execution()` returns
    false can be sent to the sandbox child process, which builds its own tool
    list in `build_sandbox_agent_tools` (`crates/swage-gateway/src/main.rs`).

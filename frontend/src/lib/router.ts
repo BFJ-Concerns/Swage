@@ -14,6 +14,7 @@ export type SettingsTab =
   | "commands"
   | "skills"
   | "generation"
+  | "security"
   | "automation"
   | "plugins"
   | "channels"
@@ -24,7 +25,7 @@ export type SettingsTab =
   | "display"
   | "account";
 
-export type TopicSettingsTab = "overview" | "workspaces" | "sessions" | "surfaces";
+export type TopicSettingsTab = "overview" | "workspaces" | "sessions" | "surfaces" | "security";
 
 export interface Route {
   path: string;
@@ -138,7 +139,7 @@ export function parseRoute(location: string): Route {
     };
   }
   const topicSettingsMatch = pathname.match(
-    /^\/settings\/topic\/([^/]+)(?:\/(overview|workspaces|sessions|surfaces))?$/,
+    /^\/settings\/topic\/([^/]+)(?:\/(overview|workspaces|sessions|surfaces|security))?$/,
   );
   if (topicSettingsMatch) {
     return {
@@ -148,7 +149,7 @@ export function parseRoute(location: string): Route {
     };
   }
   const settingsMatch = pathname.match(
-    /^\/settings(?:\/(providers|agents|commands|skills|generation|automation|plugins|channels|devices|voice|memory|recovery|display|account))?$/,
+    /^\/settings(?:\/(providers|agents|commands|skills|generation|automation|security|plugins|channels|devices|voice|memory|recovery|display|account))?$/,
   );
   if (settingsMatch) {
     const settingsTab = (settingsMatch[1] as SettingsTab | undefined) ?? "providers";

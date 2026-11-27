@@ -14,6 +14,7 @@
 
 pub mod error;
 pub mod http;
+pub mod pairing;
 pub mod runtime;
 pub mod websocket;
 

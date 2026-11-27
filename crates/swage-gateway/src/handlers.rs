@@ -109,6 +109,95 @@ pub async fn save_settings(
     Ok(Json(crate::settings::save_settings(&state, request).await?))
 }
 
+/// Whether the gate applies to this gateway and whether this request is
+/// admitted — the web UI's first question before it asks for a pairing code.
+pub async fn access_status(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Json<swage_protocol::client::access::AccessStatusResponse> {
+    Json(crate::access_gate::access_status(&state, &request))
+}
+
+/// Issue a one-time pairing code — from the gateway's own machine only.
+pub async fn issue_pairing_code(
+    State(state): State<AppState>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+) -> Result<
+    (
+        StatusCode,
+        Json<swage_protocol::client::access::PairingCodeResponse>,
+    ),
+    ApiError,
+> {
+    let peer = connect_info.map(|Extension(ConnectInfo(addr))| addr);
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::access_gate::issue_pairing_code(&state, peer)?),
+    ))
+}
+
+/// Redeem a pairing code: the token in the body and as the browser's cookie.
+pub async fn pair_client(
+    State(state): State<AppState>,
+    Json(request): Json<swage_protocol::client::access::PairClientRequest>,
+) -> Result<axum::response::Response, ApiError> {
+    crate::access_gate::pair_client(&state, request)
+}
+
+pub async fn get_install_security_settings(
+    State(state): State<AppState>,
+) -> Result<Json<swage_protocol::client::security_settings::SecuritySettingsResponse>, ApiError> {
+    Ok(Json(
+        crate::security_settings::read_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Install,
+        )
+        .await?,
+    ))
+}
+
+pub async fn save_install_security_settings(
+    State(state): State<AppState>,
+    Json(request): Json<swage_protocol::client::security_settings::SaveSecuritySettingsRequest>,
+) -> Result<Json<swage_protocol::client::security_settings::SecuritySettingsResponse>, ApiError> {
+    Ok(Json(
+        crate::security_settings::save_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Install,
+            request,
+        )
+        .await?,
+    ))
+}
+
+pub async fn get_topic_security_settings(
+    State(state): State<AppState>,
+    Path(topic_id): Path<Uuid>,
+) -> Result<Json<swage_protocol::client::security_settings::SecuritySettingsResponse>, ApiError> {
+    Ok(Json(
+        crate::security_settings::read_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Topic { topic_id },
+        )
+        .await?,
+    ))
+}
+
+pub async fn save_topic_security_settings(
+    State(state): State<AppState>,
+    Path(topic_id): Path<Uuid>,
+    Json(request): Json<swage_protocol::client::security_settings::SaveSecuritySettingsRequest>,
+) -> Result<Json<swage_protocol::client::security_settings::SecuritySettingsResponse>, ApiError> {
+    Ok(Json(
+        crate::security_settings::save_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Topic { topic_id },
+            request,
+        )
+        .await?,
+    ))
+}
+
 pub async fn discover_provider_models(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,
@@ -404,6 +493,7 @@ pub async fn create_agent_definition(
     State(state): State<AppState>,
     Json(request): Json<CreateAgentDefinitionRequest>,
 ) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let _write = state.agent_definition_writes.lock().await;
     let definition = new_agent_definition(
         request.id,
         UpdateAgentDefinitionRequest {
@@ -428,6 +518,7 @@ pub async fn update_agent_definition(
     Path(agent_id): Path<String>,
     Json(request): Json<UpdateAgentDefinitionRequest>,
 ) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let _write = state.agent_definition_writes.lock().await;
     let change = crate::service::upsert_agent_definition(
         &state,
         new_agent_definition(agent_id, request),
@@ -443,6 +534,7 @@ pub async fn delete_agent_definition(
     Path(agent_id): Path<String>,
     Query(query): Query<AgentDefinitionScopeQuery>,
 ) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let _write = state.agent_definition_writes.lock().await;
     let change = crate::service::delete_agent_definition(
         &state,
         &agent_id,
@@ -1026,6 +1118,23 @@ pub async fn delete_conversation(
     let svc =
         ConversationService::new(state.storage, state.topic_store).with_broadcast(state.broadcast);
     svc.delete_conversation(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/conversations/:id/cancel` — stop the conversation's running turn.
+///
+/// Reaches the turn whichever client holds the conversation's socket, or
+/// none: the conversation socket admits one client, while anyone supervising
+/// the gateway may need to stop the work. Returns 204 once cancellation is
+/// signalled — the turn settles and records its ending on its own — or 409
+/// when nothing is running there.
+pub async fn cancel_conversation_turn(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    crate::turn::cancel_turn(&state, id).await.map_err(|_| {
+        ApiError::conflict("Nothing is running in this conversation to stop.".into())
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2309,7 +2418,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let storage =
             Arc::new(swage_storage::SqliteStorage::open(&root.path().join("codes.db")).unwrap());
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(MockProvider::new(vec![])),
@@ -3130,7 +3239,7 @@ mod tests {
         config.sessions.max_delegation_depth = 1;
         config.tools.permissions.allow = vec!["delegate".into()];
         config.tools.permissions.require_approval = vec![];
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage.clone(),
             Arc::new(provider),
@@ -3230,7 +3339,7 @@ mod tests {
         let (provider, _) = CapturingMultiRoundProvider::new(vec![]);
         let mut config = swage_config::ResolvedConfig::default();
         config.sandbox.enabled = false;
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage.clone(),
             Arc::new(provider),
@@ -4151,15 +4260,15 @@ mod tests {
                     finish_reason: None,
                 },
             ]]);
-            let mut state = AppState::new(
+            let state = AppState::new_with_config_root(
                 storage.clone() as Arc<dyn Storage>,
                 storage.clone() as Arc<dyn TopicStore>,
                 Arc::new(provider),
                 swage_config::ResolvedConfig::default(),
                 crate::tool::ToolDispatcher::allow_all(vec![]),
                 None,
+                root.path().to_owned(),
             );
-            state.config_root = root.path().to_owned();
             let router = build_router(state);
             let url = if agent_override {
                 "ftp://example.test/a.png"
@@ -4474,6 +4583,63 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = body_json(resp).await;
         assert_eq!(body["code"].as_str().unwrap(), "not_found");
+    }
+
+    // -----------------------------------------------------------------------
+    // POST /api/conversations/:id/cancel
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cancel_conversation_turn_stops_the_running_turn_without_a_socket() {
+        let storage = Arc::new(MockStorage::new());
+        let state = AppState::for_test(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let session_id = Uuid::new_v4();
+        let token = tokio_util::sync::CancellationToken::new();
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session_id, token.clone());
+
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/conversations/{session_id}/cancel"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_conversation_turn_refuses_when_nothing_runs() {
+        let (router, _) = make_router();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/conversations/{}/cancel", Uuid::new_v4()))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"].as_str().unwrap(), "conflict");
     }
 
     // -----------------------------------------------------------------------

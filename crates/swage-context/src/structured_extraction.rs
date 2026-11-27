@@ -113,7 +113,11 @@ impl StructuredExtractionCompactor {
             effort: None,
             messages: vec![ChatMessage::new(Role::System, &prompt)],
             model: None,
-            max_tokens: Some(budget as u32),
+            // No output limit of the request's own: one set at `budget`
+            // would cut the reply inside its JSON, and a reply that does
+            // not parse loses every item. `truncate_to_budget` below fits
+            // the formatted record to the budget instead.
+            max_tokens: None,
             temperature: Some(0.0),
             stop_sequences: None,
             metadata: None,

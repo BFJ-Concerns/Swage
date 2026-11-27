@@ -6,6 +6,7 @@
 import { fromStore, get, writable, type Writable } from "svelte/store";
 
 import type { MessageAttachment } from "../protocol/MessageAttachment";
+import { stopConversationTurn } from "../api/conversations";
 import type { MessageView, ServerEvent, ToolCallView } from "../types";
 
 /**
@@ -88,7 +89,12 @@ export interface StreamingStore {
     recoveredMessages?: MessageView[],
   ): void;
   startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
-  cancelTurn(): void;
+  /**
+   * Stop the running turn in the current conversation. Resolves once the
+   * gateway has accepted the stop; rejects with the gateway's reason when it
+   * refused or could not be reached. The turn's ending arrives on its stream.
+   */
+  cancelTurn(): Promise<void>;
 }
 
 // Cancellation records the stop decision without asserting completed effects.
@@ -131,7 +137,7 @@ export interface StreamingStoreOptions {
      */
     settleUnansweredRequest?(
       settlement: {
-        turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted" | "cancelled">;
+        turn_state: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled">;
         tool_calls: ToolCallView[];
       },
       conversationId?: string | null,
@@ -149,7 +155,12 @@ export interface StreamingStoreOptions {
     /** The held messages became the next turn's input. */
     clearQueuedMessages?(conversationId: string, queuedIds: string[]): void;
   };
-  /** Sends WebSocket events for outgoing user messages and cancellation. */
+  /**
+   * Stops a conversation's running turn through the gateway's HTTP route,
+   * which reaches the turn whichever client holds its socket.
+   */
+  stopTurn?: (conversationId: string) => Promise<void>;
+  /** Sends WebSocket events for outgoing user messages. */
   connectionStore?: {
     sendMessage(
       conversationId: string,
@@ -159,7 +170,6 @@ export interface StreamingStoreOptions {
       threadId?: string | null,
       clientId?: string,
     ): void;
-    cancelTurn(conversationId: string): void;
     setStreamActive?(conversationId: string, active: boolean): void;
   };
 }
@@ -247,15 +257,22 @@ export function createStreamingStore(
     return options?.conversationStore?.activeConversation?.id ?? null;
   }
 
+  function hasProcessingRequest(conversationId: string | null): boolean {
+    const conversation = options?.conversationStore?.activeConversation;
+    if (!conversationId || conversation?.id !== conversationId) return false;
+    const latest = conversation.messages.at(-1);
+    return ["pending", "processing", "delegating", "awaiting_approval"].includes(latest?.turn_state ?? "");
+  }
+
   function currentStreamState(): InternalStreamState | undefined {
     return streams.get(currentConversationId());
   }
 
-  function streamView(stream: InternalStreamState | undefined): ConversationStreamState {
+  function streamView(stream: InternalStreamState | undefined, conversationId: string | null = currentConversationId()): ConversationStreamState {
     if (!stream) return emptyStream;
     return {
       get threadId() { return stream.threadId; },
-      get isStreaming() { return stream.isStreamingState.current; },
+      get isStreaming() { return stream.isStreamingState.current || hasProcessingRequest(conversationId); },
       get activeTurnGeneration() { return stream.activeTurnGeneration; },
       get streamedContent() { return stream.streamedContentState.current; },
       get turnError() { return stream.turnErrorState.current; },
@@ -307,10 +324,7 @@ export function createStreamingStore(
     const streamedContent = get(stream.streamedContentStore);
     if (streamedContent || (toolCalls?.length ?? 0) > 0) {
       pushAssistantMessage(conversationId, streamedContent, turnState, turnId, toolCalls);
-    } else if (
-      (turnState === "failed" || turnState === "interrupted" || turnState === "cancelled") &&
-      get(stream.activeToolCallsStore).length === 0
-    ) {
+    } else if (get(stream.activeToolCallsStore).length === 0) {
       options?.conversationStore?.settleUnansweredRequest?.(
         { turn_state: turnState, tool_calls: [] }, conversationId,
       );
@@ -327,7 +341,7 @@ export function createStreamingStore(
     streamFor(conversationId: string | null): ConversationStreamState {
       // Create the projection when a surface first reads it, so the Svelte
       // derivation subscribes before a later turn starts for that conversation.
-      return streamView(streamStateFor(conversationId));
+      return streamView(streamStateFor(conversationId), conversationId);
     },
     get activeTurnGeneration(): number {
       return currentStreamState()?.activeTurnGeneration ?? 0;
@@ -460,10 +474,26 @@ export function createStreamingStore(
         case "error":
         case "shutdown": {
           if (event.type === "shutdown" && !get(stream.isStreamingStore)) break;
+          if (
+            event.type === "error" &&
+            (event.code === "request_failed" ||
+              event.code === "invalid_frame" ||
+              // A message that could not be delivered to a turn this tab only
+              // reads (another tab holds its socket) started nothing here.
+              (event.code === "not_connected" && !get(stream.isStreamingStore)))
+          ) {
+            // A request this client sent failed, or a frame could not be
+            // read; any running turn carries on, so only the reason is shown.
+            stream.turnErrorStore.set({ code: event.code, message: event.message });
+            break;
+          }
 
           const code = event.type === "shutdown" ? "gateway_shutdown" : event.code;
           const message = event.type === "shutdown" ? event.reason : event.message;
-          const interrupted = code === "approval_timeout" || code === "gateway_shutdown";
+          // An interruption the gateway names (a shutdown stopping a delegated
+          // child) ends the turn interrupted, like an expired approval.
+          const interrupted =
+            code === "approval_timeout" || code === "gateway_shutdown" || code === "turn_interrupted";
           const refused = code === "provider_refused";
           const toolCalls = get(stream.activeToolCallsStore);
           const settleCalls = interrupted || refused || code === "agent_error";
@@ -669,7 +699,7 @@ export function createStreamingStore(
       const conversationId = currentConversationId();
       const stream = streamStateFor(conversationId);
       const clientId = newClientId();
-      if (stream.isStreamingState.current) {
+      if (stream.isStreamingState.current || hasProcessingRequest(conversationId)) {
         // A turn is running: the message is sent and the gateway holds it
         // for the next turn, announcing it as queued. The live stream and
         // the message list are left as they are.
@@ -705,10 +735,10 @@ export function createStreamingStore(
       }
     },
 
-    cancelTurn(): void {
+    async cancelTurn(): Promise<void> {
       const conversationId = currentConversationId();
-      if (conversationId && streams.get(conversationId)?.isStreamingState.current) {
-        options?.connectionStore?.cancelTurn(conversationId);
+      if (conversationId && (streams.get(conversationId)?.isStreamingState.current || hasProcessingRequest(conversationId))) {
+        await (options?.stopTurn ?? stopConversationTurn)(conversationId);
       }
     },
   };

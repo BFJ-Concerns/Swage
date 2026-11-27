@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use swage_core::{ToolError, tool_result_reference};
 use swage_tool::context::ToolContext;
 use tokio::io::AsyncWriteExt;
+use tokio::time::{Instant, timeout_at};
 
 use crate::tool::Tool;
 use crate::tool::workspace::{
@@ -28,6 +29,7 @@ pub struct UrlFetchTool {
     pub max_output_bytes: usize,
 }
 
+const MAX_REDIRECTS: usize = 10;
 const BLOCKED_HOSTNAMES: &[&str] = &["localhost", "metadata.google.internal"];
 const RAW_HTML_ARTIFACT_FILENAME: &str = "raw-body.html";
 const RAW_TEXT_ARTIFACT_FILENAME: &str = "raw-body.txt";
@@ -59,9 +61,12 @@ impl Tool for UrlFetchTool {
          back as they are, and any other kind of content is refused. The page is taken as \
          served, without running its scripts, so a page that builds itself in the browser \
          comes back with little in it; the `browser_*` tools, where they are offered, read \
-         such a page. A redirect is not followed: it fails the call with its status, as any \
-         response that is not a success does. An address on this machine or a private \
-         network is refused. A long response is cut and marked `truncated`. Text and JSON \
+         such a page. An address on this machine or a private network is refused. A \
+         redirect is followed, each address it leads to meeting the same checks as the one \
+         given, and `final_url` in the result is the address that answered in the end. The \
+         call fails, naming the address it stopped at, when a redirect leads to a refused \
+         address, when redirects go on too long, or when the last response is not a success. \
+         A long response is cut and marked `truncated`. Text and JSON \
          carry on from `next_offset_bytes`; an HTML page does not, but every result names, \
          in `raw_body_artifact_path`, a file holding everything that was fetched, which \
          `file_read` opens. Where there is no address to give, `web_search` finds one."
@@ -111,7 +116,6 @@ impl Tool for UrlFetchTool {
         ensure_url_target_is_safe(&parsed_url, self.name()).await?;
 
         let client = reqwest::Client::builder()
-            .timeout(self.timeout)
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!(
                 "Swage/",
@@ -131,6 +135,64 @@ impl Tool for UrlFetchTool {
 }
 
 impl UrlFetchTool {
+    async fn fetch_response(
+        &self,
+        client: &reqwest::Client,
+        mut url: reqwest::Url,
+    ) -> Result<reqwest::Response, ToolError> {
+        let deadline = Instant::now() + self.timeout;
+        let mut redirects = 0;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let response = client
+                .get(url.clone())
+                .timeout(remaining)
+                .send()
+                .await
+                .map_err(|error| {
+                    let message = if error.is_timeout() {
+                        self.timeout_message(&url)
+                    } else if error.is_connect() || error.is_request() {
+                        format!("Failed to reach {url}: {error}")
+                    } else {
+                        format!("Request failed for {url}: {error}")
+                    };
+                    self.fetch_error(message)
+                })?;
+            ensure_connected_peer_is_safe(response.remote_addr(), self.name()).map_err(
+                |error| self.fetch_error(format!("Connection to {url} refused: {error}")),
+            )?;
+
+            let Some(target) = redirect_target(&response, self.name())? else {
+                return Ok(response);
+            };
+            if redirects == MAX_REDIRECTS {
+                return Err(self.fetch_error(format!(
+                    "Too many redirects at {url} (limit {MAX_REDIRECTS}); next address: {target}"
+                )));
+            }
+            timeout_at(deadline, ensure_url_target_is_safe(&target, self.name()))
+                .await
+                .map_err(|_| self.fetch_error(self.timeout_message(&target)))?
+                .map_err(|error| {
+                    self.fetch_error(format!("Redirect from {url} to {target} refused: {error}"))
+                })?;
+            url = target;
+            redirects += 1;
+        }
+    }
+
+    fn fetch_error(&self, message: String) -> ToolError {
+        ToolError::ExecutionFailed {
+            name: self.name().to_owned(),
+            message,
+        }
+    }
+
+    fn timeout_message(&self, url: &reqwest::Url) -> String {
+        format!("Request timed out after {}s: {url}", self.timeout.as_secs())
+    }
+
     async fn fetch_and_retain(
         &self,
         client: reqwest::Client,
@@ -139,31 +201,14 @@ impl UrlFetchTool {
         offset_bytes: usize,
         ctx: &dyn ToolContext,
     ) -> Result<Value, ToolError> {
-        let mut response = client.get(parsed_url.clone()).send().await.map_err(|e| {
-            let message = if e.is_timeout() {
-                format!(
-                    "Request timed out after {}s: {}",
-                    self.timeout.as_secs(),
-                    parsed_url
-                )
-            } else if e.is_connect() || e.is_request() {
-                format!("Failed to reach {parsed_url}: {e}")
-            } else {
-                format!("Request failed for {parsed_url}: {e}")
-            };
-            ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message,
-            }
-        })?;
-        ensure_connected_peer_is_safe(response.remote_addr(), self.name())?;
-
+        let mut response = self.fetch_response(&client, parsed_url).await?;
+        let final_url = response.url().to_string();
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             return Err(ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
-                message: format!("HTTP {status}: {parsed_url}\n{body}"),
+                message: format!("HTTP {status}: {final_url}\n{body}"),
             });
         }
 
@@ -220,7 +265,7 @@ impl UrlFetchTool {
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
-                    message: format!("Failed to read response body: {e}"),
+                    message: format!("Failed to read response body at {final_url}: {e}"),
                 })?;
             let Some(chunk) = chunk else { break };
             if let Some(writer) = raw_body_artifact_writer.as_mut() {
@@ -270,14 +315,14 @@ impl UrlFetchTool {
             media_type: &content_type,
             capture: capture_hint(ctx),
         };
-        if is_html {
-            Ok(fetch_html_output_value(
+        let mut value = if is_html {
+            fetch_html_output_value(
                 &text,
                 self.max_output_bytes,
                 total_body_bytes,
                 body_bytes.len(),
                 &retained,
-            ))
+            )
         } else {
             fetch_text_output_value(
                 &text,
@@ -290,9 +335,49 @@ impl UrlFetchTool {
             .map_err(|message| ToolError::InvalidParameters {
                 name: self.name().to_owned(),
                 message,
-            })
-        }
+            })?
+        };
+        value["final_url"] = json!(final_url);
+        Ok(value)
     }
+}
+
+/// Resolve a redirect reference against the address that returned it.
+fn redirect_target(
+    response: &reqwest::Response,
+    tool_name: &str,
+) -> Result<Option<reqwest::Url>, ToolError> {
+    use reqwest::StatusCode;
+
+    let status = response.status();
+    if !matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    ) {
+        return Ok(None);
+    }
+    let from = response.url();
+    let failure = |detail| ToolError::ExecutionFailed {
+        name: tool_name.to_owned(),
+        message: format!("HTTP {status} at {from}: {detail}"),
+    };
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .ok_or_else(|| failure("redirect has no Location header".to_owned()))?;
+    let location = location
+        .to_str()
+        .map_err(|_| failure(format!("invalid redirect Location: {location:?}")))?;
+    let target = from
+        .join(location)
+        .map_err(|error| failure(format!("invalid redirect Location {location:?}: {error}")))?;
+    ensure_fetch_scheme(&target, tool_name)
+        .map_err(|error| failure(format!("redirect to {target} refused: {error}")))?;
+    Ok(Some(target))
 }
 
 /// What a fetch result says about the body it kept: where the bytes are,
@@ -421,8 +506,13 @@ pub(crate) fn parse_fetch_url(url: &str, tool_name: &str) -> Result<reqwest::Url
         message: format!("Invalid URL: {error}"),
     })?;
 
-    match parsed.scheme() {
-        "http" | "https" => Ok(parsed),
+    ensure_fetch_scheme(&parsed, tool_name)?;
+    Ok(parsed)
+}
+
+fn ensure_fetch_scheme(url: &reqwest::Url, tool_name: &str) -> Result<(), ToolError> {
+    match url.scheme() {
+        "http" | "https" => Ok(()),
         scheme => Err(ToolError::InvalidParameters {
             name: tool_name.to_owned(),
             message: format!("Unsupported URL scheme: {scheme}"),
@@ -574,6 +664,29 @@ mod tests {
 
     fn ctx() -> MockToolContext {
         MockToolContext::new("agent-test", "sess-test")
+    }
+
+    #[test]
+    fn resolves_relative_redirects_and_names_refused_destinations() {
+        use axum::http::Response;
+        use reqwest::ResponseBuilderExt;
+
+        let redirect = |location| {
+            Response::builder()
+                .status(302)
+                .url("http://example.com/old/page".parse().unwrap())
+                .header("location", location)
+                .body("")
+                .unwrap()
+                .into()
+        };
+        let target = redirect_target(&redirect("../new/page"), "url_fetch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.as_str(), "http://example.com/new/page");
+
+        let error = redirect_target(&redirect("file:///index.html"), "url_fetch").unwrap_err();
+        assert!(error.to_string().contains("file:///index.html"), "{error}");
     }
 
     #[tokio::test]

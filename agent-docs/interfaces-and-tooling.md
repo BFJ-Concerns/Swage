@@ -7,6 +7,40 @@ description: Provider setup and credentials, protocol selection, Settings, turn 
 CLI examples assume `swage` is on `PATH`; see the build and `PATH` steps in
 the [README quick start](../README.md#quick-start).
 
+## Access gate beyond loopback
+
+`crates/swage-gateway/src/access_gate.rs` is an axum layer on every `/api/`
+route. It applies only when the bound host is not loopback, and admits a
+request that comes from the gateway's own machine (loopback, or the one
+specific address bound) or presents the token: `Authorization: Bearer`,
+`X-Swage-Token`, the `swage_token` cookie, or `token` in a WebSocket
+upgrade's query. `/api/health`, `/api/access`, `/api/pair` and the device
+link `/api/devices/connect` (authenticated by the device's shared token in
+its hello frame) are ungated; assets outside `/api/` are never gated.
+
+- The token is `gateway-token` in the data root, created `0600` at startup
+  when absent.
+- `POST /api/pair/codes` issues a ten-minute one-time code to the
+  gateway's own machine only (`swage gateway pair`); `POST /api/pair`
+  redeems it for the token, also set as a 400-day `HttpOnly` cookie.
+- Clients remember the token per gateway origin: `swage-client`'s
+  `pairing.rs` (`$SWAGE_HOME/client-pairings.json`) for `swage run`,
+  `desktop/src/pairing.mjs` (`gateway-pairings.json` in the Electron
+  profile) for the desktop shell; the web UI shows `PairingDialog.svelte`
+  when a request is refused with `unauthorised`.
+- `[server] access` (`token`, `warn`, `off`) is read per request from the
+  active configuration, so a change from Settings → Security applies at
+  once. `swage run --pairing-code` pairs whenever the gate applies, warn
+  included.
+
+Settings → Security (`security_settings.rs`, `GET`/`PUT
+/api/settings/security` and `/api/topics/{id}/settings/security`) reads
+and writes the sandbox toggle, the approval list and, for the install
+only, the access gate; each save writes one `configuration_change` audit
+event naming the checks left relaxed. Every writer of a configuration file
+— general settings, security settings, permanent approvals — holds
+`AppState::config_updates` for its read-modify-write.
+
 ## Settings memory view
 
 Settings has a **Memory** tab that lists every memory page — general and
@@ -282,6 +316,18 @@ A provider entry in `config.toml` has two credential fields
 `api_key_secret_ref` first; if absent, it falls back to `api_key_env`. The
 resolved secret must have `material_kind` `"provider_key"`. OAuth-token
 records are not provider-key secrets.
+
+For credentials sent over `http://` to a non-loopback address,
+`plaintext_credentials` applies to provider requests and model discovery.
+The provider form under **Settings → Providers** exposes the policy as
+**Plaintext credentials**.
+
+- `warn` (the default) records the warning once in the audit trail
+  (`provider_credential_exposure`) and sends the request. If the audit
+  record cannot be written, the gateway logs the warning and still sends
+  the request.
+- `refuse` blocks the request and records the refusal once.
+- `allow` sends the request without a warning.
 
 The built-in Codex app server (`protocol = "codex"`, the gateway spawning
 `codex app-server` and driving it over stdio) is temporarily disabled.
@@ -835,11 +881,11 @@ tests), followed by a separate `cargo test --workspace --doc` stage for
 doctests (nextest cannot run doctests). When set to `cargo`, Rust tests run
 under `cargo test --workspace --no-fail-fast`.
 
-Gateway integration tests (`scratch_tempdir` in
-`crates/swage-gateway/tests/integration/support.rs`) and the browser E2E
-launchers (`frontend/e2e/scratch-root.mjs`) create their disposable roots
-under `SWAGE_TEST_SCRATCH_DIR` when it is set, otherwise under the system
-temporary directory.
+`just verify` clears any inherited `SWAGE_HOME`. Gateway test state owns a
+temporary data root, and tests of discovery set their own roots explicitly.
+Gateway integration tests, browser E2E runs and desktop smoke tests create
+disposable browser state under `SWAGE_TEST_SCRATCH_DIR` when it is set.
+Otherwise they use the system temporary directory.
 
 When both tests and projections fail, both errors surface in one message.
 The test suite aggregates Rust, frontend, and desktop-smoke failures rather
@@ -1129,4 +1175,7 @@ Paired-device execution still stores artefacts in its working directory at
 `.swage/tool-output/` and reports relative paths.
 
 Plugin tools (`plugin.rs`) are dynamically registered from operator
-configuration; their names come from the plugin manifest.
+configuration; their names come from the plugin manifest. Each enters
+through `ToolRegistry::register`, so one named after a built-in
+(`PROTECTED_NAMES`) or after a tool already registered is left out with a
+startup warning.

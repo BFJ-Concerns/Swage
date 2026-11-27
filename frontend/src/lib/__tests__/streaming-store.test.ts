@@ -14,7 +14,7 @@
  *   - turn_complete: pushes assistant message, resets streaming state
  *   - error: preserves partial response, records turnError, stops streaming
  *   - cancelled: preserves partial response, stops streaming
- *   - cancelTurn() delegates to connection store
+ *   - cancelTurn() stops the turn through the gateway's stop route
  *   - Graceful no-ops when dependencies are not injected
  *   - activeToolCalls: initial empty state
  *   - tool_start: adds in-progress entry to activeToolCalls
@@ -60,7 +60,6 @@ function createMockConversationStore() {
 function createMockConnectionStore() {
   return {
     sendMessage: vi.fn(),
-    cancelTurn: vi.fn(),
     setStreamActive: vi.fn(),
   };
 }
@@ -820,21 +819,37 @@ describe("cancelled events", () => {
 // ---------------------------------------------------------------------------
 
 describe("cancelTurn", () => {
-  it("delegates to the connection store", () => {
+  it("stops the running turn through the gateway's stop route", async () => {
     const conn = createMockConnectionStore();
     const conv = createMockConversationStore();
-    const store = createStreamingStore({ connectionStore: conn, conversationStore: conv });
+    const stopTurn = vi.fn(async () => {});
+    const store = createStreamingStore({ connectionStore: conn, conversationStore: conv, stopTurn });
 
     store.startTurn("cancel me");
-    store.cancelTurn();
+    await store.cancelTurn();
 
-    expect(conn.cancelTurn).toHaveBeenCalledWith("test-conversation");
+    expect(stopTurn).toHaveBeenCalledWith("test-conversation");
   });
 
-  it("does not throw when no connection store is injected", () => {
-    const store = createStreamingStore();
+  it("passes a refused stop to the caller and leaves the turn running", async () => {
+    const conv = createMockConversationStore();
+    const stopTurn = vi.fn(async () => { throw new Error("Nothing is running in this conversation to stop."); });
+    const store = createStreamingStore({ connectionStore: createMockConnectionStore(), conversationStore: conv, stopTurn });
 
-    expect(() => store.cancelTurn()).not.toThrow();
+    store.startTurn("cancel me");
+    await expect(store.cancelTurn()).rejects.toThrow("Nothing is running");
+
+    expect(store.isStreaming).toBe(true);
+    expect(store.turnError).toBeNull();
+  });
+
+  it("stops nothing when no turn is running", async () => {
+    const stopTurn = vi.fn(async () => {});
+    const store = createStreamingStore({ stopTurn });
+
+    await store.cancelTurn();
+
+    expect(stopTurn).not.toHaveBeenCalled();
   });
 });
 
@@ -1495,20 +1510,118 @@ describe("output-limit completion", () => {
   });
 });
 
-describe("approval timeout interruption", () => {
-  it.each(["partial answer", ""])("keeps the interrupted state for partial content %j", (content) => {
+describe("interrupted turns", () => {
+  it.each([
+    ["approval_timeout", "approval timed out before tool execution; turn interrupted", "partial answer"],
+    ["approval_timeout", "approval timed out before tool execution; turn interrupted", ""],
+    ["turn_interrupted", "the gateway shut down while the turn ran", "partial answer"],
+    ["turn_interrupted", "the gateway shut down while the turn ran", ""],
+  ])("keeps the interrupted state for %s (%s) with partial content %j", (code, message, content) => {
     const conv = createMockConversationStore();
     const settleUnansweredRequest = vi.fn();
     const store = createStreamingStore({ conversationStore: { ...conv, settleUnansweredRequest } });
     store.startTurn("Use echo");
     if (content) store.handleServerEvent({ type: "token", content });
-    store.handleServerEvent({ type: "error", code: "approval_timeout", message: "approval timed out before tool execution; turn interrupted" });
+    store.handleServerEvent({ type: "error", code, message });
     if (content) {
       expect(conv.getMessages().find((m) => m.role === "assistant")?.turn_state).toBe("interrupted");
     } else {
       expect(settleUnansweredRequest).toHaveBeenCalledWith({ turn_state: "interrupted", tool_calls: [] }, "test-conversation");
     }
-    expect(store.turnError?.message).toContain("approval timed out");
+    expect(store.turnError?.message).toBe(message);
     expect(store.isStreaming).toBe(false);
+  });
+});
+
+describe("errors that end no turn", () => {
+  it.each(["request_failed", "invalid_frame"])("leaves the running request and its stream alone for %s", (code) => {
+    const conv = createMockConversationStore();
+    const settleUnansweredRequest = vi.fn();
+    const store = createStreamingStore({ conversationStore: { ...conv, settleUnansweredRequest } });
+    store.startTurn("Long task");
+    store.handleServerEvent({ type: "error", code, message: "The message could not be queued." });
+    expect(settleUnansweredRequest).not.toHaveBeenCalled();
+    expect(store.isStreaming).toBe(true);
+    expect(store.turnError?.message).toBe("The message could not be queued.");
+    store.handleServerEvent({ type: "token", content: "still answering" });
+    expect(store.streamedContent).toBe("still answering");
+  });
+});
+
+describe("an undeliverable message beside a turn this tab only reads", () => {
+  it("leaves the running request standing", () => {
+    const messages: MessageView[] = [{ role: "user", origin: "user", content: "Long task", timestamp: "2026-10-20T10:00:00Z", turn_state: "processing" }];
+    const settleUnansweredRequest = vi.fn();
+    const sendMessage = vi.fn();
+    const store = createStreamingStore({
+      conversationStore: {
+        activeConversation: { id: "other-tab", messages },
+        appendOptimisticUserMessage: vi.fn(), appendAssistantMessage: vi.fn(), settleUnansweredRequest,
+      },
+      connectionStore: { sendMessage },
+    });
+    store.startTurn("Follow-up");
+    expect(sendMessage).toHaveBeenCalled();
+    store.handleServerEvent({ type: "error", code: "not_connected", message: "Not connected to the conversation — the message was not sent." }, "other-tab");
+    expect(settleUnansweredRequest).not.toHaveBeenCalled();
+    expect(store.streamFor!("other-tab").isStreaming).toBe(true);
+    expect(store.streamFor!("other-tab").turnError?.code).toBe("not_connected");
+  });
+
+  it("still ends a send this tab started", () => {
+    const conv = createMockConversationStore();
+    const settleUnansweredRequest = vi.fn();
+    const store = createStreamingStore({ conversationStore: { ...conv, settleUnansweredRequest } });
+    store.startTurn("question");
+    store.handleServerEvent({ type: "error", code: "not_connected", message: "Not connected" });
+    expect(store.isStreaming).toBe(false);
+    expect(settleUnansweredRequest).toHaveBeenCalledWith({ turn_state: "failed", tool_calls: [] }, "test-conversation");
+  });
+});
+
+describe("gateway shutdown", () => {
+  it("settles an unanswered request as interrupted, as the gateway records it", () => {
+    const conv = createMockConversationStore();
+    const settleUnansweredRequest = vi.fn();
+    const store = createStreamingStore({ conversationStore: { ...conv, settleUnansweredRequest } });
+    store.startTurn("question");
+    store.handleServerEvent({ type: "shutdown", reason: "admin shutdown request" });
+    expect(settleUnansweredRequest).toHaveBeenCalledWith({ turn_state: "interrupted", tool_calls: [] }, "test-conversation");
+  });
+
+  it("keeps a partial reply as interrupted", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+    store.startTurn("question");
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({ type: "shutdown", reason: "admin shutdown request" });
+    expect(conv.getMessages().find((m) => m.role === "assistant")?.turn_state).toBe("interrupted");
+  });
+});
+
+describe("opened delegated view settlement", () => {
+  it.each([
+    [{ type: "turn_complete", turn_id: "child-turn" } as const, "completed"],
+    [{ type: "error", code: "agent_error", message: "child failed" } as const, "failed"],
+  ])("settles the loaded processing request on %s", (event, expected) => {
+    const messages: MessageView[] = [{ role: "user", origin: "user", content: "Delegated request", timestamp: "2026-10-20T10:00:00Z", turn_id: "child-turn", turn_state: "processing" }];
+    const store = createStreamingStore({ conversationStore: {
+      activeConversation: { id: "child", messages },
+      appendOptimisticUserMessage: vi.fn(), appendAssistantMessage: vi.fn(),
+      settleUnansweredRequest: (ending) => { Object.assign(messages[0], ending); },
+    } });
+    expect(store.streamFor!("child").isStreaming).toBe(true);
+    store.handleServerEvent(event, "child");
+    expect(store.streamFor!("child").isStreaming).toBe(false);
+    expect(messages[0].turn_state).toBe(expected);
+  });
+
+  it("reads a loaded request the gateway has recorded but not yet started as running", () => {
+    const messages: MessageView[] = [{ role: "user", origin: "user", content: "Request", timestamp: "2026-10-20T10:00:00Z", turn_state: "pending" }];
+    const store = createStreamingStore({ conversationStore: {
+      activeConversation: { id: "other-tab", messages },
+      appendOptimisticUserMessage: vi.fn(), appendAssistantMessage: vi.fn(),
+    } });
+    expect(store.streamFor!("other-tab").isStreaming).toBe(true);
   });
 });

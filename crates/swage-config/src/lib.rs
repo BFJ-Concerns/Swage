@@ -25,7 +25,7 @@ pub const RESERVED_WORKFLOW_AGENT_ID: &str = "__workflow_ephemeral__";
 // Resolved config types
 pub use masked_string::MaskedString;
 pub use model::{
-    AttachmentsConfig, BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig,
+    AccessGateMode, AttachmentsConfig, BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig,
     CommunicationConfig, ContextConfig, ContextTransferConfig, ContextTransferField,
     ContextTransferMode, ContextTransferTargetConfig, GenerationConfig, GenerationPresetConfig,
     HierarchyLevel, HitlConfig, JudgeConfig, LogLevel, LoggingConfig, MemoryConfig,

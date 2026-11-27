@@ -32,8 +32,10 @@ impl Tool for DelegateTool {
     fn description(&self) -> &str {
         "Hand one self-contained task to another agent, which works on it in a \
          session of its own and answers when it is done. The child starts from \
-         `task` and, unless the installation is set to pass it more, sees none \
-         of this conversation, so the task carries everything the child needs. \
+         `task`. Of this conversation it sees only what the installation is set \
+         to pass it, which may be nothing and which no argument here changes, so \
+         `task` carries everything the child needs, the background as well as \
+         the job. \
          `completion_mode` decides whether this turn waits for the child's \
          answer or carries on beside it. A job of many agent calls that has to \
          survive an interruption belongs to `workflow_run`. Name a \
@@ -50,7 +52,7 @@ impl Tool for DelegateTool {
                 },
                 "task": {
                     "type": "string",
-                    "description": "The whole brief for the child: what is wanted, how the result will be judged, what to send back, and the facts it needs to do it."
+                    "description": "The whole brief for the child: what is wanted, how the result will be judged, what to send back, and the background it needs to do it. Whatever the child has to know of this conversation is written out here: it may see none of it, and a reference to something said earlier would then mean nothing to it."
                 },
                 "task_definition": {
                     "type": "string",
@@ -64,13 +66,6 @@ impl Tool for DelegateTool {
                 "child": {
                     "type": "string",
                     "description": "A name for this child. Give the same name in a later delegate call to continue with that child rather than starting a fresh one: it keeps everything it was told and did before. Its agent, skills, and working directory are fixed by the first call that names it."
-                },
-                "context": {
-                    "type": "array",
-                    "description": "Messages handed to the child as background ahead of the task, in place of whatever of this conversation the installation would pass by itself. Each item has to be a complete stored message, with its `id`, `role`, `created_at` and a `content` list of parts such as `{\"type\": \"text\", \"text\": …}`; an item in any other shape is dropped without notice. What the child needs to know is more surely written into `task`.",
-                    "items": {
-                        "type": "object"
-                    }
                 },
                 "completion_mode": {
                     "type": "string",
@@ -111,7 +106,19 @@ impl Tool for DelegateTool {
         true
     }
 
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        if params.get("context").is_some() {
+            return Err(ToolError::InvalidParameters {
+                name: DELEGATE_TOOL_NAME.to_string(),
+                message: "Put background for the child in task. The context argument is no longer accepted."
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        self.validate_call(&params)?;
         // Parse required fields — the schema validator has already checked
         // these, but defensive parsing avoids panics if called directly.
         let target_agent_id = params
@@ -132,7 +139,6 @@ impl Tool for DelegateTool {
             })?
             .to_string();
 
-        let context = params.get("context").cloned();
         let task_definition = params
             .get("task_definition")
             .and_then(Value::as_str)
@@ -192,7 +198,6 @@ impl Tool for DelegateTool {
                 target_agent_id,
                 task,
                 task_definition,
-                context,
                 cwd,
                 isolation,
                 skills,
@@ -240,7 +245,6 @@ mod tests {
             ToolError::RequiresDelegation { request } => {
                 assert_eq!(request.target_agent_id, "reviewer");
                 assert_eq!(request.task, "Review this code for correctness");
-                assert!(request.context.is_none());
                 assert_eq!(request.completion_mode, DelegateCompletionMode::Wait);
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
@@ -356,7 +360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegate_tool_with_context() {
+    async fn delegate_tool_sends_callers_with_context_to_task() {
         let tool = DelegateTool;
         let ctx = MockToolContext::new("test-agent", "session-1");
         let params = json!({
@@ -366,12 +370,10 @@ mod tests {
         });
 
         let result = tool.execute(params, &ctx).await;
-        match result.unwrap_err() {
-            ToolError::RequiresDelegation { request } => {
-                assert!(request.context.is_some());
-            }
-            other => panic!("expected RequiresDelegation, got: {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            Err(ToolError::InvalidParameters { message, .. }) if message.contains("task")
+        ));
     }
 
     #[tokio::test]

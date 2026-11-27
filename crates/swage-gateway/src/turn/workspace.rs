@@ -453,7 +453,7 @@ pub(super) fn path_within_device_workspace(path: &Path, workspace_roots: &[PathB
         .any(|root| candidate.starts_with(root))
 }
 
-pub(super) fn expand_require_approval_entries(
+pub(crate) fn expand_require_approval_entries(
     config: &swage_config::ResolvedConfig,
 ) -> Vec<ToolRequireApprovalEntry> {
     config

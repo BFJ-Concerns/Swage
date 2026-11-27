@@ -32,7 +32,6 @@ export interface ConnectionStore {
     threadId?: string | null,
     clientId?: string,
   ): void;
-  cancelTurn(conversationId: string): void;
   onServerEvent(handler: (event: ServerEvent, conversationId: string) => void): void;
 }
 
@@ -173,10 +172,6 @@ export function createConnectionStore(
         ...(threadId ? { thread_id: threadId } : {}),
         ...(selectedModelId ? { selected_model_id: selectedModelId } : {}),
       });
-    },
-
-    cancelTurn(conversationId: string): void {
-      clientFor(conversationId).send({ type: "cancel" });
     },
 
     onServerEvent(handler: (event: ServerEvent, conversationId: string) => void): void {

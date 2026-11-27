@@ -275,6 +275,7 @@ function makeOperatorOverview(
       active_turn_count: 1,
       active_connection_count: 1,
     },
+    workflow_runs: [],
     sessions: [
       {
         id: "conv-ops",
@@ -286,6 +287,9 @@ function makeOperatorOverview(
         has_interrupted_turn: false,
         has_active_connection: true,
         has_running_turn: true,
+        awaiting_approval: false,
+        agent_id: "gateway",
+        activity: "processing",
       },
     ],
     approvals: [],
@@ -583,6 +587,7 @@ describe("App", () => {
             message_preview: "Pick up where we left off",
             has_interrupted_turn: false,
             has_running_turn: false,
+            awaiting_approval: false,
           },
         },
         last_activity: "2026-09-15T09:00:00Z",
@@ -2037,7 +2042,8 @@ describe("App", () => {
       ),
     ).find((button) => button.textContent?.trim() === "Operator");
     flushSync(() => operator!.click());
-    await waitForText("Live control surface for the running gateway");
+    await settleUi();
+    expect(document.querySelector("main.operator h1")?.textContent).toBe("Gateway supervision");
 
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledOnce();
     expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
@@ -2270,11 +2276,12 @@ describe("App", () => {
     expect(operatorButton).toBeDefined();
 
     flushSync(() => operatorButton!.click());
-    await waitForText("Live control surface for the running gateway");
+    await settleUi();
+    expect(document.querySelector("main.operator h1")?.textContent).toBe("Gateway supervision");
 
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalled();
     expect(document.body.textContent).toContain(
-      "Live control surface for the running gateway",
+      "Gateway supervision",
     );
     expect(document.body.textContent).toContain("dev_dm");
     expect(document.body.textContent).toContain("Local device");
