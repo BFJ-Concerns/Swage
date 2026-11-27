@@ -1540,6 +1540,13 @@
           "$ref": "#/$defs/Duration",
           "description": "Time to wait for graceful shutdown before SIGKILL."
         },
+        "substituted_files": {
+          "description": "Files shown read-only in place of what the host has at their path.\nEnforced by the mount layer, so the fallback backend cannot honour\nthem.",
+          "items": {
+            "$ref": "#/$defs/SubstitutedFile"
+          },
+          "type": "array"
+        },
         "tool_call_timeout": {
           "$ref": "#/$defs/Duration",
           "description": "Per-tool-call IPC timeout."
@@ -1579,6 +1586,7 @@
         "write_paths",
         "read_only_paths",
         "masked_paths",
+        "substituted_files",
         "host_network",
         "environment",
         "shutdown_grace_period",
@@ -1934,6 +1942,22 @@
           "type": "object"
         }
       ]
+    },
+    "SubstitutedFile": {
+      "description": "A file the sandbox shows at `path` with the content of `source`, a\nfile on the host.",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "source"
+      ],
+      "type": "object"
     },
     "ToolRuntimeSettings": {
       "properties": {

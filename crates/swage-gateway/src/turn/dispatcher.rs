@@ -708,16 +708,6 @@ pub(crate) fn build_sandbox_config(
     for private in &masked {
         builder = builder.masked_path(private);
     }
-    // Inside the sandbox's user namespace the host's root-owned files show
-    // as owned by nobody, and OpenSSH refuses an included configuration
-    // file owned by anyone but root or the user — the system's drop-ins,
-    // which its own configuration includes, among them. So ssh, and git's
-    // ssh with it, reads the operator's configuration and the system's
-    // without the drop-ins.
-    let ssh_drop_ins = Path::new(SYSTEM_SSH_DROP_INS);
-    if ssh_drop_ins.is_dir() {
-        builder = builder.masked_path(ssh_drop_ins);
-    }
     for path in ssh_files_without_keys(&roots.home) {
         builder = builder.read_only_path(path);
     }
@@ -745,6 +735,7 @@ pub(crate) fn build_sandbox_config(
         .map_err(|error| swage_core::SandboxError::SpawnFailed {
             message: format!("failed to build sandbox config: {error}"),
         })?;
+    policy.substituted_files = ssh_configuration_substitutes(roots);
     if let Some(socket) = ssh_agent {
         policy
             .environment
@@ -762,8 +753,126 @@ pub(crate) fn build_sandbox_config(
     Ok(policy)
 }
 
-/// Where the system's ssh configuration keeps the drop-ins it includes.
-const SYSTEM_SSH_DROP_INS: &str = "/etc/ssh/ssh_config.d";
+/// The system's ssh configuration, and the directory its relative includes
+/// are read from.
+const SYSTEM_SSH_CONFIGURATION: &str = "/etc/ssh/ssh_config";
+const SYSTEM_SSH_DIRECTORY: &str = "/etc/ssh";
+
+/// How many configuration files the walk of ssh's includes reads at most.
+const SSH_CONFIGURATION_FILE_LIMIT: usize = 256;
+
+/// The configuration files ssh includes that the gateway's user does not
+/// own, each with a copy they own to show in its place.
+///
+/// Inside the sandbox's user namespace the host's root-owned files show as
+/// owned by nobody, and OpenSSH refuses an included configuration file owned
+/// by anyone but root or the user — the system's drop-ins, or a file the
+/// operator's own configuration includes — so ssh, and git over ssh, would
+/// stop at the first such include. A copy with the same content, owned by
+/// the user, reads as theirs. The copies are kept beneath the gateway's data
+/// root, which the sandbox masks, and are refreshed each time a policy is
+/// built.
+fn ssh_configuration_substitutes(roots: &PolicyRoots) -> Vec<swage_sandbox::SubstitutedFile> {
+    use std::os::unix::fs::MetadataExt;
+
+    // Safety: geteuid has no preconditions and cannot fail.
+    let user = unsafe { libc::geteuid() };
+    let user_directory = roots.home.join(".ssh");
+    let copies = roots.data_root.join("sandbox").join("ssh-configuration");
+    // Each file with the directory its relative includes are read from, and
+    // whether it was included (the top-level files are never checked).
+    let mut pending = vec![
+        (
+            PathBuf::from(SYSTEM_SSH_CONFIGURATION),
+            PathBuf::from(SYSTEM_SSH_DIRECTORY),
+            false,
+        ),
+        (user_directory.join("config"), user_directory.clone(), false),
+    ];
+    let mut read: Vec<PathBuf> = Vec::new();
+    let mut substitutes = Vec::new();
+    while let Some((file, base, included)) = pending.pop() {
+        let Ok(file) = file.canonicalize() else {
+            continue;
+        };
+        if read.contains(&file) || read.len() >= SSH_CONFIGURATION_FILE_LIMIT {
+            continue;
+        }
+        read.push(file.clone());
+        let Ok(content) = std::fs::read(&file) else {
+            continue;
+        };
+        for pattern in ssh_includes(&String::from_utf8_lossy(&content)) {
+            let pattern = if let Some(rest) = pattern.strip_prefix("~/") {
+                roots.home.join(rest)
+            } else {
+                base.join(pattern)
+            };
+            let Ok(matches) = glob::glob(&pattern.to_string_lossy()) else {
+                continue;
+            };
+            for path in matches.filter_map(Result::ok).filter(|path| path.is_file()) {
+                pending.push((path, base.clone(), true));
+            }
+        }
+        let owned = std::fs::metadata(&file).is_ok_and(|metadata| metadata.uid() == user);
+        if !included || owned {
+            continue;
+        }
+        let copy = copies.join(file.strip_prefix("/").unwrap_or(&file));
+        match write_owned_copy(&copy, &content) {
+            Ok(()) => substitutes.push(swage_sandbox::SubstitutedFile {
+                path: file,
+                source: copy,
+            }),
+            Err(error) => tracing::warn!(
+                path = %file.display(),
+                %error,
+                "the ssh configuration file could not be copied; sandboxed ssh will refuse it"
+            ),
+        }
+    }
+    substitutes
+}
+
+/// The patterns of every `Include` directive in an ssh configuration.
+fn ssh_includes(configuration: &str) -> Vec<String> {
+    configuration
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let (keyword, rest) = line.split_at(line.find([' ', '\t', '=']).unwrap_or(line.len()));
+            keyword
+                .eq_ignore_ascii_case("include")
+                .then(|| rest.trim_start_matches([' ', '\t', '=']))
+        })
+        .flat_map(|patterns| {
+            patterns
+                .split_whitespace()
+                .map(|pattern| pattern.trim_matches('"').to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Write `content` to `path` as a file the user owns that only they may
+/// write, replacing what is there only when it differs.
+fn write_owned_copy(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|existing| existing == content) {
+        return Ok(());
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let directory = path.parent().unwrap_or(Path::new("/"));
+    std::fs::create_dir_all(directory)?;
+    // Staged beside it and renamed over it, so a turn building its policy
+    // at the same time never reads half a file.
+    let staged = directory.join(format!(".{}.staged", Uuid::new_v4()));
+    std::fs::write(&staged, content)?;
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&staged, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&staged);
+    })
+}
 
 /// The operator's network proxy settings, which a command on the host's
 /// network inherits.
@@ -2213,7 +2322,8 @@ mod tests {
     }
 
     /// In the sandbox a policy builds, ssh reads the operator's
-    /// configuration linked into place and the system's, and a command
+    /// configuration linked into place, and the root-owned files it
+    /// includes, as it does outside; and a command
     /// writes the cache and the temporary directory the environment names
     /// and a runtime directory of its own, with the host's out of sight.
     #[tokio::test]
@@ -2243,7 +2353,13 @@ mod tests {
         ] {
             std::fs::create_dir_all(directory).unwrap();
         }
-        std::fs::write(dotfiles.join("ssh_config"), "Host forge\n  Port 2222\n").unwrap();
+        // The system's configuration is root-owned, and includes its
+        // drop-ins: an include the sandbox must show as the user's.
+        std::fs::write(
+            dotfiles.join("ssh_config"),
+            format!("Host forge\n  Port 2222\nInclude {SYSTEM_SSH_CONFIGURATION}\n"),
+        )
+        .unwrap();
         std::os::unix::fs::symlink(dotfiles.join("ssh_config"), home.join(".ssh/config")).unwrap();
         std::fs::write(runtime.join("session.sock"), "").unwrap();
         let roots = PolicyRoots {
@@ -2265,8 +2381,23 @@ mod tests {
             &swage_config::ResolvedConfig::default(),
         )
         .unwrap();
+        // `.host` is a name the systemd drop-in, where installed, matches.
+        let hosts = ["forge", ".host"];
+        let mut outside = Vec::new();
+        for host in hosts {
+            let output = tokio::process::Command::new("ssh")
+                .arg("-F")
+                .arg(home.join(".ssh/config"))
+                .args(["-G", host])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await
+                .unwrap();
+            assert!(output.status.success());
+            outside.push(output.stdout);
+        }
         let script = format!(
-            "ssh -F {config} -G forge | grep -qx 'port 2222' \
+            "ssh -F {config} -G forge > {cache}/forge && ssh -F {config} -G .host > {cache}/.host \
              && touch {cache}/written && TMPDIR={temporary} mktemp >/dev/null \
              && mkdir \"$XDG_RUNTIME_DIR/pnpm\" && test ! -e {runtime}/session.sock",
             config = home.join(".ssh/config").display(),
@@ -2288,5 +2419,25 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(cache.join("written").is_file());
+        for (host, outside) in hosts.into_iter().zip(&outside) {
+            let inside = std::fs::read(cache.join(host)).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&inside),
+                String::from_utf8_lossy(outside),
+                "ssh resolves {host} in the sandbox as it does outside"
+            );
+        }
+        assert!(String::from_utf8_lossy(&outside[0]).contains("port 2222"));
+    }
+
+    #[test]
+    fn ssh_includes_are_read_from_every_include_directive() {
+        assert_eq!(
+            ssh_includes(
+                "# Include commented\nInclude /etc/ssh/ssh_config.d/*.conf\n\
+                 Host forge\n  include=\"config.d/a\" ~/b\nIncludeFoo x\n"
+            ),
+            vec!["/etc/ssh/ssh_config.d/*.conf", "config.d/a", "~/b"]
+        );
     }
 }

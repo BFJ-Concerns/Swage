@@ -54,6 +54,7 @@ rand = { workspace = true }
 tokio-util = "0.7"
 reqwest = { version = "0.13", features = ["json", "query"] }
 html2text = "0.17"
+glob = "0.3"
 rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 percent-encoding = { workspace = true }

@@ -1,7 +1,7 @@
 //! Sandbox policy projected from the shared wire contract.
 
 pub use swage_protocol::hosting::sandbox::{
-    SandboxPolicy as SandboxConfig, SandboxPolicyError as SandboxConfigError,
+    SandboxPolicy as SandboxConfig, SandboxPolicyError as SandboxConfigError, SubstitutedFile,
 };
 
 #[cfg(test)]
