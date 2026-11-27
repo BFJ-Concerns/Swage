@@ -6,7 +6,7 @@
 
 use uuid::Uuid;
 
-use swage_core::{Role, compact_tool_arguments_for_model, compact_tool_result_for_model};
+use swage_core::{Role, compact_tool_result_for_model};
 use swage_storage::model::NewTopic;
 use swage_storage::store::{
     MessageStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
@@ -95,9 +95,6 @@ async fn create_full_hierarchy(
             call_id: "toolu_int_01".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"cmd":"echo hi"}"#.to_string(),
-            model_arguments: compact_tool_arguments_for_model(
-                &serde_json::json!({"cmd": "echo hi"}),
-            ),
             result: Some("hi".to_string()),
             model_result: Some(compact_tool_result_for_model("hi", false)),
             status: Some("success".to_string()),

@@ -313,9 +313,6 @@ mod tests {
             call_id: call_id.into(),
             tool: "shell".into(),
             arguments: r#"{"cmd":"cat large.txt"}"#.into(),
-            model_arguments: swage_core::compact_tool_arguments_for_model(
-                &json!({"cmd": "cat large.txt"}),
-            ),
             result,
             model_result: None,
             status: Some("success".into()),

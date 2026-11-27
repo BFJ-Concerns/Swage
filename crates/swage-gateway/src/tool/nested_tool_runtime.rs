@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use swage_core::{compact_tool_arguments_for_model, extract_tool_result_metadata};
+use swage_core::extract_tool_result_metadata;
 use swage_python::worker_protocol::WorkerToolError;
 use swage_storage::model::NewToolCall;
 use swage_storage::store::Storage;
@@ -74,7 +74,6 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
             call_id: call_id.clone(),
             tool: tool_name.to_string(),
             arguments: serde_json::to_string(&arguments).unwrap_or_default(),
-            model_arguments: compact_tool_arguments_for_model(&arguments),
             result: None,
             model_result: None,
             status: None,
@@ -728,7 +727,6 @@ mod tests {
                 call_id: "nested-secret".into(),
                 tool: "secret_tool".into(),
                 arguments: "{}".into(),
-                model_arguments: "{}".into(),
                 result: None,
                 model_result: None,
                 status: None,

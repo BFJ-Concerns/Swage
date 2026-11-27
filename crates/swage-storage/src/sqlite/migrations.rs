@@ -1229,7 +1229,6 @@ const COMPLETE_SCHEMA: &str = "
     -- parent_call_id supports nested / sub-tool invocations (NULL = top-level).
     CREATE TABLE IF NOT EXISTS tool_calls (
         execution TEXT,
-        model_arguments TEXT,
         model_result TEXT,
         provider_round INTEGER NOT NULL DEFAULT 0,
         display_summary TEXT,
@@ -2698,7 +2697,7 @@ mod tests {
     #[test]
     fn tool_calls_replay_columns_exist() {
         let conn = open_migrated();
-        for column in &["model_arguments", "model_result", "provider_round"] {
+        for column in &["model_result", "provider_round"] {
             let col_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('tool_calls') WHERE name=?1",
@@ -2720,9 +2719,6 @@ mod tests {
         let turn_id = insert_turn(&conn, &thread_id, &now);
         let call_id = "recorded_call";
 
-        let arguments = swage_core::compact_tool_arguments_for_model(
-            &serde_json::json!({"cmd": "missing-command"}),
-        );
         let result = swage_core::compact_tool_result_for_model_with_reference(
             "command not found",
             true,
@@ -2731,9 +2727,9 @@ mod tests {
         conn.execute(
             "INSERT INTO tool_calls
              (id, turn_id, call_id, tool, arguments, agent_id, result, status,
-              duration_ms, truncated, total_bytes, position, created_at, model_arguments, model_result)
+              duration_ms, truncated, total_bytes, position, created_at, model_result)
              VALUES (?1, ?2, ?3, 'shell', ?4, 'agent-test', ?5, 'error',
-                     12, 0, 17, 0, ?6, ?7, ?8)",
+                     12, 0, 17, 0, ?6, ?7)",
             rusqlite::params![
                 uuid::Uuid::new_v4().to_string(),
                 &turn_id,
@@ -2741,25 +2737,18 @@ mod tests {
                 r#"{"cmd":"missing-command"}"#,
                 "command not found",
                 now,
-                arguments,
                 result,
             ],
         )
         .expect("insert tool call with model replay");
 
-        let (model_arguments, model_result): (String, String) = conn
+        let model_result: String = conn
             .query_row(
-                "SELECT model_arguments, model_result
-                 FROM tool_calls
-                 WHERE call_id = ?1",
+                "SELECT model_result FROM tool_calls WHERE call_id = ?1",
                 rusqlite::params![call_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
-            .expect("select recorded replay columns");
-
-        let arguments: serde_json::Value =
-            serde_json::from_str(&model_arguments).expect("native model arguments");
-        assert_eq!(arguments, serde_json::json!({"cmd": "missing-command"}));
+            .expect("select recorded replay column");
 
         let result: swage_core::CompactToolReplay =
             serde_json::from_str(&model_result).expect("result compact replay");

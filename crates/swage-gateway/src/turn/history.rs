@@ -176,7 +176,7 @@ fn compact_tool_replay_messages_with_retrieval(
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),
                 arguments: match secret_values {
-                    Some(values) => parse_redacted_model_arguments(record, values)?,
+                    Some(values) => replay_arguments(record, values),
                     None => serde_json::json!({}),
                 },
             });
@@ -309,39 +309,22 @@ fn verified_full_result(
     matches_replay(&scanned).then_some(scanned)
 }
 
-fn parse_redacted_model_arguments(
-    record: &ToolCallRecord,
-    secret_values: &[String],
-) -> Result<serde_json::Value, swage_core::StorageError> {
-    if !secret_values.is_empty() {
-        // A bounded argument can contain only the start of a registered
-        // value. Inspect the original before applying the replay bound.
-        let Ok(mut arguments) = serde_json::from_str(&record.arguments) else {
-            tracing::warn!(
-                turn_id = %record.turn_id,
-                call_id = %record.call_id,
-                "omitting replayed arguments because the original arguments could not be decoded"
-            );
-            return Ok(serde_json::json!({}));
-        };
-        if mask_json_strings(&mut arguments, secret_values) {
-            return Ok(bounded_arguments(&arguments));
-        }
-    }
-    parse_model_arguments(record)
-}
-
-fn parse_model_arguments(
-    record: &ToolCallRecord,
-) -> Result<serde_json::Value, swage_core::StorageError> {
-    serde_json::from_str(&record.model_arguments).map_err(|error| {
-        swage_core::StorageError::Corruption {
-            message: format!(
-                "tool call '{}' has unreadable model arguments: {error}",
-                record.call_id
-            ),
-        }
-    })
+/// A call's arguments as history replays them: decoded from the one form the
+/// store keeps, masked against the values registered since they were
+/// written, and with each long string value bounded. Masking comes first,
+/// since a bound could leave the start of a value in place. Arguments that do
+/// not decode replay as none, so the call's result still reaches the model.
+fn replay_arguments(record: &ToolCallRecord, secret_values: &[String]) -> serde_json::Value {
+    let Ok(mut arguments) = serde_json::from_str(&record.arguments) else {
+        tracing::warn!(
+            turn_id = %record.turn_id,
+            call_id = %record.call_id,
+            "replaying a call without its arguments because they could not be decoded"
+        );
+        return serde_json::json!({});
+    };
+    mask_json_strings(&mut arguments, secret_values);
+    bounded_arguments(&arguments)
 }
 
 fn bounded_arguments(arguments: &serde_json::Value) -> serde_json::Value {

@@ -1184,9 +1184,6 @@ mod tests {
                 call_id: "fetch-1".into(),
                 tool: "url_fetch".into(),
                 arguments: json!({"url": "https://example.test/borrowing"}).to_string(),
-                model_arguments: swage_core::compact_tool_arguments_for_model(
-                    &json!({"url": "https://example.test/borrowing"}),
-                ),
                 result: Some(
                     json!({
                         "output": "Borrowing The borrow checker was rewritten.",

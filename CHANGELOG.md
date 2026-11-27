@@ -111,6 +111,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- A tool call's record keeps its arguments in one form, as the call made them; history bounds them when it replays them. The store's schema changed with it, so an existing data root is refused and must be rebuilt.
 - The workflow-authoring and project-docs skills are rewritten for any installation. The workflow-authoring skill names no model in its examples (a worker with no `model` runs on the configured default), gives each function's error names, and no longer assumes two model families or the development-process skills are in reach.
 - The shipped default agent's description says what it gives a session: no instructions of its own, with the model and tools the installation's settings provide.
 - The descriptions of the tools an agent works with are rewritten to say what each tool does, what its result carries and what it refuses: the file tools, `shell`, `python_execute`, `url_fetch`, `web_search`, `docs_read`, the memory tools, the browser tools, `agent_definition`, `delegate` and the workflow tools. The compaction strategies' extraction and eviction prompts and the agent runtime's summary prompt are rewritten whole, and each puts the conversation it reads inside named tags. Tools of features not yet released keep their descriptions.

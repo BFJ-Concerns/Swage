@@ -243,7 +243,6 @@ mod tests {
                 call_id: "call-1".into(),
                 tool: "shell".into(),
                 arguments: json.to_string(),
-                model_arguments: json.to_string(),
                 result: None,
                 model_result: None,
                 status: None,

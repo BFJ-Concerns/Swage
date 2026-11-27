@@ -12,9 +12,8 @@ use uuid::Uuid;
 use serde_json::Value;
 use swage_core::{
     ChatMessage, CompletionRequest, Role, StreamChunk, ToolCall, ToolReplayReasoning, ToolResult,
-    build_tool_round_messages_with_reasoning, compact_tool_arguments_for_model,
-    compact_tool_result_for_model_with_reference, extract_tool_result_metadata,
-    tool_result_reference,
+    build_tool_round_messages_with_reasoning, compact_tool_result_for_model_with_reference,
+    extract_tool_result_metadata, tool_result_reference,
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_provider::LlmProvider;
@@ -2022,7 +2021,6 @@ impl Agent {
                             call_id: call.call_id.clone(),
                             tool: call.name.clone(),
                             arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
-                            model_arguments: compact_tool_arguments_for_model(&call.arguments),
                             result: None,
                             model_result: None,
                             status: None,

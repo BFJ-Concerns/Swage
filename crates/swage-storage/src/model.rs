@@ -1568,14 +1568,9 @@ pub struct ToolCallRecord {
     pub call_id: String,
     /// Name of the tool that was called.
     pub tool: String,
-    /// Tool arguments serialised as a JSON string.
+    /// Tool arguments serialised as a JSON string, as the call made them.
+    /// History replays them with each long string value bounded.
     pub arguments: String,
-    /// Compact provider-visible replay envelope for the tool arguments.
-    ///
-    /// Kept separate from `arguments`, which remains the raw debugger/storage
-    /// payload.
-    #[serde(default)]
-    pub model_arguments: String,
     /// Raw output returned by the tool, if it has completed.
     pub result: Option<String>,
     /// Compact provider-visible replay envelope for the tool result.
@@ -1623,7 +1618,6 @@ pub struct NewToolCall {
     pub call_id: String,
     pub tool: String,
     pub arguments: String,
-    pub model_arguments: String,
     pub result: Option<String>,
     pub model_result: Option<String>,
     pub status: Option<String>,
@@ -2766,7 +2760,6 @@ mod tests {
             call_id: "toolu_01".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"command":"ls"}"#.to_string(),
-            model_arguments: "compact arguments".to_string(),
             result: Some("file1\nfile2".to_string()),
             model_result: Some("compact result".to_string()),
             status: Some("success".to_string()),
@@ -2790,7 +2783,6 @@ mod tests {
         assert_eq!(back.call_id, "toolu_01");
         assert_eq!(back.tool, "shell");
         assert_eq!(back.arguments, r#"{"command":"ls"}"#);
-        assert_eq!(back.model_arguments, "compact arguments");
         assert_eq!(back.result, Some("file1\nfile2".to_string()));
         assert_eq!(back.model_result, Some("compact result".to_string()));
         assert_eq!(back.status, Some("success".to_string()));
@@ -2811,7 +2803,6 @@ mod tests {
             call_id: "toolu_02".to_string(),
             tool: "file_read".to_string(),
             arguments: r#"{"path":"/tmp/x"}"#.to_string(),
-            model_arguments: "compact arguments".to_string(),
             result: None,
             model_result: None,
             status: None,
@@ -2847,7 +2838,6 @@ mod tests {
             call_id: "toolu_03".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"command":"pwd"}"#.to_string(),
-            model_arguments: "compact arguments".to_string(),
             result: Some("ok".to_string()),
             model_result: Some("compact result".to_string()),
             status: Some("success".to_string()),
@@ -2876,7 +2866,6 @@ mod tests {
             call_id: "toolu_sub".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"cmd":"ls"}"#.to_string(),
-            model_arguments: "compact arguments".to_string(),
             result: None,
             model_result: None,
             status: None,
@@ -2906,7 +2895,6 @@ mod tests {
             call_id: "sub_01".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{}"#.to_string(),
-            model_arguments: "compact arguments".to_string(),
             result: None,
             model_result: None,
             status: None,

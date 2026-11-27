@@ -476,7 +476,6 @@ async fn an_interrupted_turn_keeps_its_tool_calls_after_restart() {
                 call_id: call_id.into(),
                 tool: tool.into(),
                 arguments: "{}".into(),
-                model_arguments: "{}".into(),
                 result: None,
                 model_result: None,
                 status: None,
