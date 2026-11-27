@@ -951,8 +951,12 @@ pub(crate) async fn build_gateway_dispatcher(
             &agent_config.agent_id,
         )
     });
-    let credentials =
-        crate::git_credential::CredentialServer::start(state.storage.clone(), session_id, turn_id)?;
+    let credentials = crate::git_credential::CredentialServer::start(
+        state.storage.clone(),
+        session_id,
+        turn_id,
+        Some(agent_config.working_directory.clone()),
+    )?;
     // The operator's commit signing, forwarded to the host: present when
     // the operator signs, as the workspace's git configuration says; a
     // configuration that signs nothing leaves sandboxed git signing nothing.

@@ -38,8 +38,9 @@ fn operator_helper_config(dir: &std::path::Path, host: &str, token: &str) -> std
 /// the planted helper would create if it ran.
 const PLANTED_HELPER_MARKER: &str = "SWAGE_TEST_PLANTED_HELPER_MARKER";
 
-/// A repository the gateway was started in, whose configuration a sandboxed
-/// command can write, never supplies a helper the host runs. The lookup runs
+/// A repository the gateway was started in, or the turn works in, whose
+/// configuration a sandboxed command can write, never supplies a helper the
+/// host runs. The lookup runs
 /// in a child test process whose current directory is that repository, since
 /// a test cannot change the shared process's directory.
 #[test]
@@ -99,9 +100,12 @@ async fn host_lookup_from_the_current_directory() {
     let mut env = ProcessEnvGuard::new();
     env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let server = CredentialServer::start(storage, None, None).unwrap();
+    let started_here = std::env::current_dir().unwrap();
+    // The repository is the turn's workspace as well: its own
+    // configuration is read neither as the gateway's nor as the turn's.
+    let server = CredentialServer::start(storage, None, None, Some(started_here.clone())).unwrap();
     let mut policy = SandboxConfig::builder()
-        .working_directory(std::env::current_dir().unwrap())
+        .working_directory(started_here)
         .build()
         .unwrap();
     server.configure(&mut policy).unwrap();
@@ -123,6 +127,66 @@ async fn host_lookup_from_the_current_directory() {
     .unwrap();
     assert!(answer.password.is_none());
     assert!(!std::path::Path::new(&marker).exists());
+}
+
+/// A helper the operator's global configuration selects for the workspace
+/// (`includeIf "gitdir:..."`) answers the turn's lookup, as it would answer
+/// their own git there, though the lookup itself runs outside any
+/// repository.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_helper_the_operator_selects_for_the_workspace_answers() {
+    let mut env = ProcessEnvGuard::new();
+    env.set_var("GIT_CONFIG_NOSYSTEM", "1");
+    env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let root = tempfile::tempdir().unwrap();
+    let projects = root.path().join("projects");
+    let workspace = projects.join("work");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&workspace)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .status()
+        .unwrap();
+    assert!(init.success());
+    let helper_config =
+        operator_helper_config(root.path(), "forge.example", "workspace-helper-token");
+    let global = root.path().join("global-gitconfig");
+    std::fs::write(
+        &global,
+        format!(
+            "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
+            projects.display(),
+            helper_config.display()
+        ),
+    )
+    .unwrap();
+    env.set_var("GIT_CONFIG_GLOBAL", &global);
+
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let server = CredentialServer::start(storage, None, None, Some(workspace.clone())).unwrap();
+    let mut policy = SandboxConfig::builder()
+        .working_directory(&workspace)
+        .build()
+        .unwrap();
+    server.configure(&mut policy).unwrap();
+    let socket = policy
+        .environment
+        .get(swage_gateway::git_credential::SOCKET_ENV)
+        .unwrap()
+        .clone();
+    let answer = swage_gateway::git_credential::lookup(
+        Path::new(&socket),
+        &swage_protocol::hosting::GitCredentialRequest {
+            protocol: "https".into(),
+            host: "forge.example".into(),
+            path: None,
+            username: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer.password.as_deref(), Some("workspace-helper-token"));
 }
 
 /// A sandboxed git asks the gateway, which answers from the operator's own
@@ -164,7 +228,7 @@ async fn git_get_answers_from_the_operators_helper_never_a_registered_secret() {
         "GIT_CONFIG_GLOBAL",
         operator_helper_config(root.path(), "scratch.example", "operator-helper-token"),
     );
-    let server = CredentialServer::start(storage.clone(), None, None).unwrap();
+    let server = CredentialServer::start(storage.clone(), None, None, None).unwrap();
     let mut policy = SandboxConfig::builder()
         .working_directory(root.path())
         .write_path(root.path())
@@ -322,7 +386,7 @@ async fn sandboxed_git_refuses_inherited_askpass_and_audits_each_lookup() {
     env.set_var("GIT_CONFIG_NOSYSTEM", "1");
     env.set_var("GIT_TERMINAL_PROMPT", "0");
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let server = CredentialServer::start(storage.clone(), None, None).unwrap();
+    let server = CredentialServer::start(storage.clone(), None, None, None).unwrap();
 
     for source in ["GIT_ASKPASS", "SSH_ASKPASS", "core.askPass"] {
         env.remove_var("GIT_ASKPASS");
@@ -730,7 +794,7 @@ finally:
     server.server_close()
 "#).unwrap();
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let server = CredentialServer::start(storage.clone(), None, None).unwrap();
+    let server = CredentialServer::start(storage.clone(), None, None, None).unwrap();
     let mut policy = SandboxConfig::builder()
         .working_directory(root.path())
         .write_path(root.path())
@@ -1121,7 +1185,7 @@ async fn sandboxed_git_commits_are_signed_on_the_host_with_the_operators_key() {
     let operator_pub = keys.join("operator.pub");
     let signing = SigningConfig::from_signing_key(operator_pub.to_str().unwrap(), true, false);
     assert!(signing.material.is_ok(), "{:?}", signing.material);
-    let credentials = CredentialServer::start(storage.clone(), None, None).unwrap();
+    let credentials = CredentialServer::start(storage.clone(), None, None, None).unwrap();
     let signer = SignerServer::start(storage.clone(), None, None, signing).unwrap();
     let mut policy = SandboxConfig::builder()
         .working_directory(root.path())
@@ -1637,7 +1701,7 @@ async fn a_path_scoped_operator_helper_answers_the_sandboxed_git() {
     env.set_var("GIT_CONFIG_GLOBAL", &config);
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let server = CredentialServer::start(storage, None, None).unwrap();
+    let server = CredentialServer::start(storage, None, None, None).unwrap();
     let mut policy = SandboxConfig::builder()
         .working_directory(root.path())
         .write_path(root.path())

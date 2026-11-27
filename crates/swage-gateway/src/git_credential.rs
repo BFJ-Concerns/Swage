@@ -36,10 +36,15 @@ impl Drop for CredentialServer {
 }
 
 impl CredentialServer {
+    /// Serve lookups for one turn. `workspace` is the turn's working
+    /// directory: the operator's configuration is read as it applies there,
+    /// so a helper their global configuration selects for that directory
+    /// (`includeIf "gitdir:..."`) answers, as it would on the host.
     pub fn start(
         storage: Arc<dyn swage_storage::Storage>,
         session_id: Option<uuid::Uuid>,
         turn_id: Option<uuid::Uuid>,
+        workspace: Option<std::path::PathBuf>,
     ) -> Result<Arc<Self>, swage_core::SandboxError> {
         let (socket, listener) = swage_sandbox::SocketManager::create("git")?;
         let task = tokio::spawn(async move {
@@ -59,7 +64,7 @@ impl CredentialServer {
                     (&mut stream).take(16 * 1024).read_line(&mut line).await?;
                     let request: GitCredentialRequest =
                         serde_json::from_str(&line).map_err(std::io::Error::other)?;
-                    let response = resolve(&request).await;
+                    let response = resolve(&request, workspace.as_deref()).await;
                     let outcome = if response.password.is_some() {
                         "resolved"
                     } else {
@@ -189,11 +194,58 @@ pub(crate) fn append_git_config(
 }
 
 /// The credential the operator's own helpers give for an HTTP(S) request.
-async fn resolve(request: &GitCredentialRequest) -> GitCredentialResponse {
+async fn resolve(
+    request: &GitCredentialRequest,
+    workspace: Option<&std::path::Path>,
+) -> GitCredentialResponse {
     if !matches!(request.protocol.as_str(), "https" | "http") || request.host.is_empty() {
         return empty_response();
     }
-    operator_helper(request).await
+    let entries = match workspace {
+        Some(workspace) => operator_credential_entries(workspace).await,
+        None => Vec::new(),
+    };
+    operator_helper(request, &entries).await
+}
+
+/// The `credential.*` settings of the operator's system and global
+/// configuration as they apply in `workspace`, conditional includes
+/// evaluated there, in the order git reads them. Only those two scopes are
+/// read, never the repository's own configuration, which the sandbox can
+/// write. Empty when git cannot read them there.
+async fn operator_credential_entries(workspace: &std::path::Path) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    for scope in ["--system", "--global"] {
+        let output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["config", scope, "--includes", "--list", "-z"])
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await;
+        let Ok(output) = output else { continue };
+        if !output.status.success() {
+            continue;
+        }
+        for entry in output.stdout.split(|byte| *byte == 0) {
+            let entry = String::from_utf8_lossy(entry);
+            let (key, value) = match entry.split_once('\n') {
+                Some((key, value)) => (key, value),
+                // A key with no value is a boolean set to true.
+                None => (entry.as_ref(), "true"),
+            };
+            if key.starts_with("credential.") {
+                entries.push((key.to_owned(), value.to_owned()));
+            }
+        }
+    }
+    entries
 }
 
 fn empty_response() -> GitCredentialResponse {
@@ -214,7 +266,10 @@ fn empty_response() -> GitCredentialResponse {
 /// have written. The repository path goes with the request, and the host's
 /// git keeps it for the operator's helpers only where their
 /// `credential.useHttpPath` asks for it.
-async fn operator_helper(request: &GitCredentialRequest) -> GitCredentialResponse {
+async fn operator_helper(
+    request: &GitCredentialRequest,
+    workspace_entries: &[(String, String)],
+) -> GitCredentialResponse {
     let fields = [
         ("protocol", Some(request.protocol.as_str())),
         ("host", Some(request.host.as_str())),
@@ -234,14 +289,37 @@ async fn operator_helper(request: &GitCredentialRequest) -> GitCredentialRespons
         }
     }
     input.push('\n');
-    let child = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    // Run from the root directory, git reads the operator's files without
+    // what they select for the workspace, so their settings as they apply
+    // there are given at command scope: an empty helper first clears the
+    // list the files gave, then the workspace's list follows whole.
+    if !workspace_entries.is_empty() {
+        let entries = std::iter::once(("credential.helper", ""))
+            .chain(
+                workspace_entries
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            )
+            .enumerate();
+        let mut count = 0;
+        for (index, (key, value)) in entries {
+            command
+                .env(format!("GIT_CONFIG_KEY_{index}"), key)
+                .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+            count = index + 1;
+        }
+        command.env("GIT_CONFIG_COUNT", count.to_string());
+    } else {
+        command.env_remove("GIT_CONFIG_COUNT");
+    }
+    let child = command
         .args(["credential", "fill"])
         .current_dir("/")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "/bin/false")
         .env("SSH_ASKPASS", "/bin/false")
         .env_remove("GIT_CONFIG_PARAMETERS")
-        .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
