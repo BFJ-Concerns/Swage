@@ -104,7 +104,9 @@ impl SigningConfig {
             .unwrap_or_else(|| "openpgp".to_owned());
         let material = match format.as_str() {
             "ssh" => match signing_key {
-                Some(signing_key) => key_material(&signing_key).map(SigningKey::Ssh),
+                Some(signing_key) => {
+                    key_material(&from_workspace(workspace, &signing_key)).map(SigningKey::Ssh)
+                }
                 None => Err("the operator's signing key comes from gpg.ssh.defaultKeyCommand, which sandboxed git cannot forward yet".to_owned()),
             },
             "openpgp" => openpgp_key(workspace, signing_key)
@@ -243,6 +245,20 @@ async fn host_committer_identity(workspace: &Path) -> Option<String> {
     // The identity is followed by a timestamp and a zone.
     let ident = ident.trim().rsplitn(3, ' ').nth(2)?.to_owned();
     (!ident.is_empty()).then_some(ident)
+}
+
+/// A `user.signingkey` file path as git in the workspace reads it: a
+/// relative path names a file beneath the workspace, not beneath the
+/// gateway's own directory. A literal, a path under `~` and an absolute path
+/// are kept as they are.
+fn from_workspace(workspace: &Path, signing_key: &str) -> String {
+    if signing_key.starts_with("key::")
+        || signing_key.starts_with('~')
+        || Path::new(signing_key).is_absolute()
+    {
+        return signing_key.to_owned();
+    }
+    workspace.join(signing_key).display().to_string()
 }
 
 /// The material a `user.signingkey` value names, or why it cannot be used.
@@ -973,6 +989,41 @@ mod tests {
         .await;
         assert_eq!(refused.signature, None);
         assert_eq!(refused.refusal.as_deref(), Some(reason.as_str()));
+    }
+
+    /// A signing key named by a path relative to the repository is the file
+    /// beneath the workspace, as git there reads it, whatever directory the
+    /// gateway runs in; the host signs with that file's absolute path.
+    #[tokio::test]
+    async fn a_relative_signing_key_is_read_beneath_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git runs");
+            assert!(output.status.success(), "{args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "gpg.format", "ssh"]);
+        git(&["config", "commit.gpgsign", "true"]);
+        git(&["config", "user.signingkey", ".keys/signing"]);
+        std::fs::create_dir(dir.path().join(".keys")).unwrap();
+        std::fs::write(
+            dir.path().join(".keys/signing.pub"),
+            "ssh-ed25519 AAAAC3 operator\n",
+        )
+        .unwrap();
+
+        let signing = SigningConfig::from_host_git(dir.path())
+            .await
+            .expect("the workspace signs");
+        let material = ssh(signing.material.expect("the key beneath the workspace"));
+        assert_eq!(material.public_key, "ssh-ed25519 AAAAC3 operator");
+        assert_eq!(material.key_file, Some(dir.path().join(".keys/signing")));
     }
 
     /// The host reads the operator's configuration as the workspace sees it,
