@@ -171,12 +171,12 @@ impl UrlFetchTool {
                     "Too many redirects at {url} (limit {MAX_REDIRECTS}); next address: {target}"
                 )));
             }
-            timeout_at(deadline, ensure_url_target_is_safe(&target, self.name()))
-                .await
-                .map_err(|_| self.fetch_error(self.timeout_message(&target)))?
-                .map_err(|error| {
-                    self.fetch_error(format!("Redirect from {url} to {target} refused: {error}"))
-                })?;
+            timeout_at(
+                deadline,
+                ensure_redirect_target_is_safe(&url, &target, self.name()),
+            )
+            .await
+            .map_err(|_| self.fetch_error(self.timeout_message(&target)))??;
             url = target;
             redirects += 1;
         }
@@ -375,9 +375,35 @@ fn redirect_target(
     let target = from
         .join(location)
         .map_err(|error| failure(format!("invalid redirect Location {location:?}: {error}")))?;
-    ensure_fetch_scheme(&target, tool_name)
-        .map_err(|error| failure(format!("redirect to {target} refused: {error}")))?;
+    ensure_fetch_scheme(&target, tool_name).map_err(|error| {
+        let reason = redirect_refusal_reason(error);
+        failure(format!("redirect to {target} refused: {reason}"))
+    })?;
     Ok(Some(target))
+}
+
+async fn ensure_redirect_target_is_safe(
+    from: &reqwest::Url,
+    target: &reqwest::Url,
+    tool_name: &str,
+) -> Result<(), ToolError> {
+    ensure_url_target_is_safe(target, tool_name)
+        .await
+        .map_err(|error| {
+            let reason = redirect_refusal_reason(error);
+            ToolError::ExecutionFailed {
+                name: tool_name.to_owned(),
+                message: format!("Redirect from {from} to {target} refused: {reason}"),
+            }
+        })
+}
+
+fn redirect_refusal_reason(error: ToolError) -> String {
+    match error {
+        ToolError::ExecutionFailed { message, .. }
+        | ToolError::InvalidParameters { message, .. } => message,
+        other => other.to_string(),
+    }
 }
 
 /// What a fetch result says about the body it kept: where the bytes are,
@@ -686,7 +712,26 @@ mod tests {
         assert_eq!(target.as_str(), "http://example.com/new/page");
 
         let error = redirect_target(&redirect("file:///index.html"), "url_fetch").unwrap_err();
-        assert!(error.to_string().contains("file:///index.html"), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("file:///index.html"), "{message}");
+        assert_eq!(message.matches("url_fetch").count(), 1, "{message}");
+    }
+
+    #[tokio::test]
+    async fn refused_redirect_to_private_address_names_the_tool_once() {
+        let from = "https://example.com/old/page".parse().unwrap();
+        let target = "http://127.0.0.1/".parse().unwrap();
+        let error = ensure_redirect_target_is_safe(&from, &target, "url_fetch")
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(from.as_str()), "{message}");
+        assert!(message.contains(target.as_str()), "{message}");
+        assert!(
+            message.contains("Blocked private or metadata destination"),
+            "{message}"
+        );
+        assert_eq!(message.matches("url_fetch").count(), 1, "{message}");
     }
 
     #[tokio::test]
