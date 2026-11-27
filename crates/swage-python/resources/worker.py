@@ -9,7 +9,6 @@ import types
 
 
 _SOCKET_ENV = "SWAGE_PYTHON_WORKER_SOCKET"
-_ORIGINAL_OPEN = _builtins.open
 _ORIGINAL_IMPORT = _builtins.__import__
 _STDLIB_MODULE_NAMES = set(getattr(sys, "stdlib_module_names", ()))
 _STDLIB_MODULE_NAMES.update(sys.builtin_module_names)
@@ -97,66 +96,10 @@ def _make_python_execute_module(connection, reader, request_id):
     module.fetch_url = lambda url: _dispatch_tool(
         connection, reader, request_id, "url_fetch", {"url": url}
     )
-    module.memory_read = lambda file=None: _dispatch_tool(
-        connection,
-        reader,
-        request_id,
-        "memory",
-        {"operation": "read", **({"file": file} if file is not None else {})},
-    )
-    module.memory_write = lambda file, content: _dispatch_tool(
-        connection,
-        reader,
-        request_id,
-        "memory",
-        {"operation": "write", "file": file, "content": content},
-    )
-    module.memory_list = lambda: _dispatch_tool(
-        connection, reader, request_id, "memory", {"operation": "list"}
-    )
     return module
 
 
-def _restricted_builtins(allowed_imports):
-    allowed = {
-        "None": None,
-        "True": True,
-        "False": False,
-        "abs": abs,
-        "all": all,
-        "any": any,
-        "AssertionError": AssertionError,
-        "bool": bool,
-        "__build_class__": _builtins.__build_class__,
-        "dict": dict,
-        "enumerate": enumerate,
-        "Exception": Exception,
-        "float": float,
-        "getattr": getattr,
-        "hasattr": hasattr,
-        "IndexError": IndexError,
-        "int": int,
-        "isinstance": isinstance,
-        "KeyError": KeyError,
-        "len": len,
-        "list": list,
-        "max": max,
-        "min": min,
-        "print": print,
-        "range": range,
-        "reversed": reversed,
-        "RuntimeError": RuntimeError,
-        "set": set,
-        "sorted": sorted,
-        "str": str,
-        "sum": sum,
-        "tuple": tuple,
-        "TypeError": TypeError,
-        "ValueError": ValueError,
-        "zip": zip,
-        "ZeroDivisionError": ZeroDivisionError,
-    }
-
+def _program_builtins(allowed_imports):
     def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
         if level != 0:
             raise ImportError("relative imports are not allowed")
@@ -168,9 +111,7 @@ def _restricted_builtins(allowed_imports):
             return _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
         raise ImportError(f"import of '{name}' is not allowed")
 
-    allowed["__import__"] = _safe_import
-
-    return allowed
+    return {**vars(_builtins), "__import__": _safe_import}
 
 
 def _execute_python(request_id, connection, reader, payload):
@@ -181,7 +122,7 @@ def _execute_python(request_id, connection, reader, payload):
     sys.stdout = stdout
 
     globals_dict = {
-        "__builtins__": _restricted_builtins({"swage": module}),
+        "__builtins__": _program_builtins({"swage": module}),
         "__name__": "__main__",
         "swage": module,
     }
@@ -211,6 +152,9 @@ def main():
     _send(connection, {"type": "ready"})
 
     message = _recv(reader)
+    if message["type"] == "shutdown":
+        _send(connection, {"type": "shutdown_ack"})
+        return
     if message["type"] != "execute":
         raise RuntimeError(f"expected execute message, got {message['type']}")
 

@@ -23,6 +23,7 @@ export const SETTINGS_LABELS: Readonly<Record<string, string>> = {
   "providers.*.api_key_env": "API key environment variable",
   "providers.*.api_key_secret_ref": "Stored credential",
   "providers.*.has_credential": "Credential",
+  "providers.*.plaintext_credentials": "Plaintext credentials",
   "models.*.default_effort": "Default effort",
   "models.*.generation_preset": "Model compatibility",
   "generation_presets.*.max_tokens": "Max tokens",

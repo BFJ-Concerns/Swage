@@ -811,6 +811,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(SurfaceReadTool),
         Arc::new(SurfaceWriteTool),
         Arc::new(SurfaceLibraryTool),
+        Arc::new(crate::tool::model_list::ModelListTool),
         Arc::new(crate::tool::workflow_list::WorkflowListTool),
         Arc::new(crate::tool::workflow_run::WorkflowRunTool),
         Arc::new(crate::tool::workflow_run_account::WorkflowRunAccountTool),
@@ -859,8 +860,20 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         warn!("{warning}");
     }
 
+    // A plugin's tool is not built in, so it enters through
+    // `ToolRegistry::register`, which refuses a built-in's name, whether or
+    // not this host registered that built-in, and a name already taken.
+    let mut names = swage_tool::registry::ToolRegistry::default();
+    for tool in &base_tools {
+        let _ = names.register_builtin(Arc::clone(tool));
+    }
     let mut non_python_tools = base_tools;
-    non_python_tools.extend(plugin_tools.0.iter().cloned());
+    for tool in plugin_tools.0 {
+        match names.register(Arc::clone(&tool)) {
+            Ok(()) => non_python_tools.push(tool),
+            Err(error) => warn!("plugin tool was not registered: {error}"),
+        }
+    }
 
     // Sub-dispatcher: all non-python tools, excluding python_execute to prevent
     // recursive invocation through the python_execute tool.
@@ -2938,6 +2951,50 @@ mod tests {
         );
 
         assert!(dispatcher.registry().get("echo_plugin").is_some());
+    }
+
+    /// A plugin that names its tool after a built-in is left out, on a host
+    /// that registers that built-in and on one that does not: `shell` is
+    /// registered here, and this dispatcher is built with no browser, so
+    /// `browser_click` is a reserved name with nothing registered under it.
+    #[tokio::test]
+    async fn a_plugin_tool_cannot_take_a_built_in_tools_name() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        for name in ["shell", "browser_click"] {
+            let plugin_dir = temp_dir.path().join("plugins").join(name);
+            std::fs::create_dir_all(&plugin_dir).unwrap();
+            std::fs::write(
+                plugin_dir.join("capability.json"),
+                serde_json::json!({
+                    "description": "Plugin under a built-in's name",
+                    "tool": {
+                        "name": name,
+                        "description": "A plugin's tool",
+                        "parameters": {"type": "object", "properties": {}},
+                        "executable": "run.py"
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::write(plugin_dir.join("run.py"), "#!/usr/bin/env python3\n").unwrap();
+        }
+
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.plugin_directory = Some("plugins".to_string());
+
+        let dispatcher = build_tool_dispatcher_with_browser(
+            &config,
+            storage as Arc<dyn swage_storage::store::Storage>,
+            None,
+            temp_dir.path(),
+        );
+
+        let shell = dispatcher.registry().get("shell").expect("built-in shell");
+        assert_ne!(shell.description(), "A plugin's tool");
+        assert!(dispatcher.registry().get("browser_click").is_none());
     }
 
     #[tokio::test]

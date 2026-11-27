@@ -974,7 +974,7 @@ mod approval_tests {
                 StreamChunk::ToolUse {
                     call_id: "call-worker".into(),
                     name: "delegate".into(),
-                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey", "context": []}),
+                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey"}),
                 },
                 StreamChunk::Done {
                     finish_reason: Some(swage_core::FinishReason::ToolUse),
@@ -1218,7 +1218,7 @@ mod approval_tests {
                 StreamChunk::ToolUse {
                     call_id: "call-worker".into(),
                     name: "delegate".into(),
-                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey", "context": []}),
+                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey"}),
                 },
                 StreamChunk::ToolUse {
                     call_id: "call-echo".into(),
@@ -1233,7 +1233,7 @@ mod approval_tests {
                 chunks.insert(1, StreamChunk::ToolUse {
                     call_id: "call-next-worker".into(),
                     name: "delegate".into(),
-                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey again", "context": []}),
+                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey again"}),
                 });
             }
             if self.separate_round {
@@ -3562,7 +3562,6 @@ impl Agent {
                     target_agent_id,
                     task,
                     task_definition,
-                    context,
                     cwd,
                     isolation,
                     skills,
@@ -3592,23 +3591,17 @@ impl Agent {
                         .into());
                 };
 
-                let transferred_context = match context {
-                    Some(context) => Some(context),
-                    None => {
-                        let transferred = crate::context_transfer::transfer_context_async(
-                            &self.context_transfer_config,
-                            &target_agent_id,
-                            current_context,
-                            Some(self.provider.as_ref()),
-                        )
-                        .await;
-
-                        if transferred.messages.is_empty() {
-                            None
-                        } else {
-                            serde_json::to_value(&transferred.messages).ok()
-                        }
-                    }
+                let transferred = crate::context_transfer::transfer_context_async(
+                    &self.context_transfer_config,
+                    &target_agent_id,
+                    current_context,
+                    Some(self.provider.as_ref()),
+                )
+                .await;
+                let transferred_context = if transferred.messages.is_empty() {
+                    None
+                } else {
+                    serde_json::to_value(&transferred.messages).ok()
                 };
 
                 // Suspend the parent turn — durable state so restart recovery

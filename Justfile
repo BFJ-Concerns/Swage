@@ -62,11 +62,10 @@ test-integration package target *filter: fetch-v8
 # CI runs this same recipe, so the local gate and CI cannot drift apart.
 # The full gate: check-gate, tests, projection freshness, and desktop smoke.
 verify: fetch-v8
-    cargo run -p xtask -- verify
+    env -u SWAGE_HOME cargo run -p xtask -- verify
 
 # Alias for `verify`, kept for muscle memory.
-ci: fetch-v8
-    cargo run -p xtask -- verify
+ci: verify
 
 sweep: fetch-v8
     cargo run -p xtask -- sweep

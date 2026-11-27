@@ -173,13 +173,8 @@ impl WorkerPool {
 
             if let Some(mut idle_worker) = idle_worker {
                 idle_worker.worker.terminate().await;
-                pool.ensure_warm_workers();
             }
         });
-    }
-
-    async fn release_spent_worker(self: &Arc<Self>) {
-        self.ensure_warm_workers();
     }
 }
 
@@ -196,7 +191,7 @@ impl WorkerLease {
                 worker.terminate().await;
             }
             self.permit.take();
-            pool.release_spent_worker().await;
+            pool.ensure_warm_workers();
         }
     }
 }
@@ -440,6 +435,58 @@ raise SystemExit(1)
         );
 
         lease.mark_spent().await;
+    }
+
+    #[tokio::test]
+    async fn idle_pool_stays_empty_until_another_execution() {
+        let runtime = Arc::new(
+            PythonWorkerRuntime::new(PythonExecuteToolConfig {
+                require_sandbox: false,
+                warm_target: 1,
+                max_workers: 1,
+                idle_ttl_secs: 1,
+                ..PythonExecuteToolConfig::default()
+            })
+            .unwrap(),
+        );
+        let pool = WorkerPool::new(runtime).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pool.state.lock().await.idle.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("initial warm worker");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pool.semaphore.available_permits() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("idle worker should expire and leave its slot available");
+
+        // Compare one entire idle period with no intervening request.
+        let stayed_empty = tokio::time::timeout(pool.idle_ttl, async {
+            loop {
+                if pool.semaphore.available_permits() == 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(stayed_empty.is_err(), "no new worker is needed while idle");
+
+        let lease = pool.acquire().await.expect("worker on demand");
+        lease.mark_spent().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pool.state.lock().await.idle.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("execution should resume warming");
     }
 
     #[tokio::test]

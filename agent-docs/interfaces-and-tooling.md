@@ -317,6 +317,18 @@ A provider entry in `config.toml` has two credential fields
 resolved secret must have `material_kind` `"provider_key"`. OAuth-token
 records are not provider-key secrets.
 
+For credentials sent over `http://` to a non-loopback address,
+`plaintext_credentials` applies to provider requests and model discovery.
+The provider form under **Settings → Providers** exposes the policy as
+**Plaintext credentials**.
+
+- `warn` (the default) records the warning once in the audit trail
+  (`provider_credential_exposure`) and sends the request. If the audit
+  record cannot be written, the gateway logs the warning and still sends
+  the request.
+- `refuse` blocks the request and records the refusal once.
+- `allow` sends the request without a warning.
+
 The built-in Codex app server (`protocol = "codex"`, the gateway spawning
 `codex app-server` and driving it over stdio) is temporarily disabled.
 `validate_resolved_catalog_references` in `swage-config/src/validation.rs`
@@ -869,11 +881,11 @@ tests), followed by a separate `cargo test --workspace --doc` stage for
 doctests (nextest cannot run doctests). When set to `cargo`, Rust tests run
 under `cargo test --workspace --no-fail-fast`.
 
-Gateway integration tests (`scratch_tempdir` in
-`crates/swage-gateway/tests/integration/support.rs`) and the browser E2E
-launchers (`frontend/e2e/scratch-root.mjs`) create their disposable roots
-under `SWAGE_TEST_SCRATCH_DIR` when it is set, otherwise under the system
-temporary directory.
+`just verify` clears any inherited `SWAGE_HOME`. Gateway test state owns a
+temporary data root, and tests of discovery set their own roots explicitly.
+Gateway integration tests, browser E2E runs and desktop smoke tests create
+disposable browser state under `SWAGE_TEST_SCRATCH_DIR` when it is set.
+Otherwise they use the system temporary directory.
 
 When both tests and projections fail, both errors surface in one message.
 The test suite aggregates Rust, frontend, and desktop-smoke failures rather
@@ -1076,6 +1088,7 @@ two sandbox-eligible tools.
 |---|---|
 | `workflow_run` | `workflow_run.rs` |
 | `workflow_list` | `workflow_list.rs` |
+| `model_list` | `model_list.rs` — the session's model catalogue: ids, aliases, provider model name, vendor family (`ModelFamily` in `swage-context`), and the effort levels each serves unclamped (`served_effort_capability`). |
 | `workflow_save` | `workflow_save.rs` |
 | `workflow_run_account` | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session topic; a run in another topic reads as absent. |
 | `workflow_run_status` | `workflow_run_status.rs` — lists the topic's runs that have not ended, each with its undelivered events (a pipeline's pending hold among them), or reads one named run in any state. Same topic scoping as `workflow_run_account`. |
@@ -1163,4 +1176,7 @@ Paired-device execution still stores artefacts in its working directory at
 `.swage/tool-output/` and reports relative paths.
 
 Plugin tools (`plugin.rs`) are dynamically registered from operator
-configuration; their names come from the plugin manifest.
+configuration; their names come from the plugin manifest. Each enters
+through `ToolRegistry::register`, so one named after a built-in
+(`PROTECTED_NAMES`) or after a tool already registered is left out with a
+startup warning.

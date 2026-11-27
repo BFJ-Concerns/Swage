@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tool Creator"
+  short_description: "Design, add or change a runtime tool the product's agents call"
+  default_prompt: "Use $tool-creator to design, add or change one of this product's runtime tools."

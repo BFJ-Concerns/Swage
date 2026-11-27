@@ -493,7 +493,7 @@ mod tests {
         use std::net::SocketAddr;
 
         let storage = Arc::new(crate::turn::tests::MockStorage::new());
-        let mut state = AppState::new(
+        let mut state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(MockProvider::new(vec![])),

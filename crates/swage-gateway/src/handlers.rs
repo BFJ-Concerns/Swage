@@ -2415,7 +2415,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let storage =
             Arc::new(swage_storage::SqliteStorage::open(&root.path().join("codes.db")).unwrap());
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(MockProvider::new(vec![])),
@@ -3237,7 +3237,7 @@ mod tests {
         config.sessions.max_delegation_depth = 1;
         config.tools.permissions.allow = vec!["delegate".into()];
         config.tools.permissions.require_approval = vec![];
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage.clone(),
             Arc::new(provider),
@@ -3337,7 +3337,7 @@ mod tests {
         let (provider, _) = CapturingMultiRoundProvider::new(vec![]);
         let mut config = swage_config::ResolvedConfig::default();
         config.sandbox.enabled = false;
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage.clone(),
             Arc::new(provider),
@@ -4258,15 +4258,15 @@ mod tests {
                     finish_reason: None,
                 },
             ]]);
-            let mut state = AppState::new(
+            let state = AppState::new_with_config_root(
                 storage.clone() as Arc<dyn Storage>,
                 storage.clone() as Arc<dyn TopicStore>,
                 Arc::new(provider),
                 swage_config::ResolvedConfig::default(),
                 crate::tool::ToolDispatcher::allow_all(vec![]),
                 None,
+                root.path().to_owned(),
             );
-            state.config_root = root.path().to_owned();
             let router = build_router(state);
             let url = if agent_override {
                 "ftp://example.test/a.png"

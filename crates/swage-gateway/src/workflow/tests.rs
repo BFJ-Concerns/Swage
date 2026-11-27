@@ -103,7 +103,7 @@ fn research_sweep_id(topic_id: Uuid) -> Uuid {
     crate::synthetic_id::synthetic_id(
         CARRIED_WORKFLOW_ID_DOMAIN,
         topic_id,
-        "research/research-sweep",
+        "shipped:research/research-sweep",
     )
 }
 
@@ -448,16 +448,8 @@ async fn a_run_terminated_at_the_buffer_limit_fails_with_the_reason_recorded() {
 }
 
 async fn assert_workflow_limit_is_recorded(source: String, reason: swage_workflow::Termination) {
-    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let (state, storage) = workflow_test_state();
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
-        Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn TopicStore>,
-        Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-        swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![]),
-        None,
-    );
     let Json(started) = start_inline_run(
         State(state.clone()),
         Path(topic.id),
@@ -1598,6 +1590,53 @@ async fn captured_sources_query_journals_the_run_scoped_store_read() {
     drop(tx);
     host.await.expect("host loop");
     assert_eq!(replayed, reading, "replay must use the journalled reading");
+}
+
+/// A skill a person authors under a shipped skill's name, carrying a
+/// workflow of the shipped one's name, is a different workflow: its id is not
+/// the shipped workflow's, so a run of it never resolves the shipped grants,
+/// even in a scope where the shipped skill is the one discovery finds.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_authored_carrier_of_a_shipped_name_never_takes_the_shipped_grants() {
+    let (state, storage) = workflow_test_state();
+    let topic = storage.general_scope().await.expect("topic");
+    let source = "return typeof capturedSources;";
+    let authored_skill = swage_config::skill::parse_skill_source(
+        "---\ndescription: A person's own research skill.\n---\n\nInstructions.\n",
+        std::path::Path::new("/agent/skills/research/SKILL.md"),
+        "research",
+        swage_config::HierarchyLevel::Global,
+    )
+    .expect("authored skill");
+    assert!(!authored_skill.shipped);
+    let authored = EffectiveWorkflow::from_carried(
+        topic.id,
+        &authored_skill,
+        "research-sweep".into(),
+        source.into(),
+        false,
+    )
+    .expect("authored carried workflow");
+    assert_ne!(authored.id, research_sweep_id(topic.id));
+
+    let run = storage
+        .create_workflow_run(NewWorkflowRun {
+            inline_workflow_id: Some(authored.id),
+            inline_workflow_name: Some("research-sweep".into()),
+            inline_workflow_version: Some(1),
+            carrying_skill: Some("research".into()),
+            source: Some(source.into()),
+            source_hash: source_hash(source),
+            ..swage_storage::fixtures::new_workflow_run(topic.id)
+        })
+        .await
+        .expect("authored carrier's run");
+    assert!(
+        !captured_sources_grant_for_run(&state, &run)
+            .await
+            .expect("resolve the authored carrier's grant"),
+        "the shipped research skill's grant must not reach a person's workflow of the same name"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -16588,6 +16627,108 @@ async fn run_declared_fallback(state: &AppState, topic_id: Uuid, model: &str) ->
     started.id
 }
 
+/// A call that declares the least effort it accepts is refused, before any
+/// worker exists and with the refusal journalled, where the model would serve
+/// it below that — a clamp, or no effort set — and served where it would not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_below_its_effort_floor_is_refused_and_journalled() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let mut config = fallback_test_config();
+    config
+        .models
+        .entries
+        .get_mut("pinned")
+        .expect("pinned model")
+        .capabilities
+        .effort = Some(swage_core::EffortCapability::Levels {
+        levels: vec![
+            swage_core::Effort::Low,
+            swage_core::Effort::Medium,
+            swage_core::Effort::High,
+        ],
+        can_disable: false,
+    });
+    let provider = Arc::new(ScriptedRecordingProvider {
+        outputs: std::sync::Mutex::new(vec![scripted_text_output("served")].into()),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let state = AppState::for_test(
+        Arc::clone(&storage) as Arc<dyn Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let source = r#"
+        const refusals = [];
+        for (const options of [{ effort: "max", minEffort: "xhigh" }, { minEffort: "low" }]) {
+            try {
+                await agent("answer", { agent: "default", model: "pinned", ...options });
+            } catch (error) {
+                refusals.push(`${error.name}: ${error.message}`);
+            }
+        }
+        const answer = await agent("answer", {
+            agent: "default", model: "pinned", effort: "high", minEffort: "medium",
+        });
+        return { refusals, answer };
+    "#;
+    let Json(started) = start_inline_run(
+        State(state.clone()),
+        Path(topic.id),
+        Json(StartInlineWorkflowRunRequest {
+            source: source.into(),
+            args: Value::Null,
+            budget: None,
+        }),
+    )
+    .await
+    .expect("start workflow");
+    wait_for_terminal(&state, started.id).await;
+    let run = storage
+        .get_workflow_run(started.id)
+        .await
+        .expect("run")
+        .expect("present");
+    assert_eq!(
+        run.final_output,
+        Some(serde_json::json!({
+            "refusals": [
+                "EffortFloorError: the call accepts no effort below xhigh (minEffort), but model 'pinned' would serve max as high",
+                "EffortFloorError: the call accepts no effort below low (minEffort), but no effort is set for the call and model 'pinned' has no default effort",
+            ],
+            "answer": "served",
+        }))
+    );
+    assert_eq!(
+        provider.requests.lock().expect("requests").len(),
+        1,
+        "a refused call must make no provider request"
+    );
+    let journal = storage
+        .list_workflow_journal(started.id)
+        .await
+        .expect("journal");
+    let refused = journal
+        .iter()
+        .filter(|entry| entry.kind == "agent_call")
+        .filter_map(|entry| entry.error_message.as_deref())
+        .filter(|error| error.contains("EffortFloorError"))
+        .count();
+    assert_eq!(refused, 2, "each refusal is journalled with its call");
+    assert_eq!(
+        storage
+            .list_sessions_by_agent_id("default")
+            .await
+            .expect("worker sessions")
+            .len(),
+        1,
+        "a refused call must leave no worker behind"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn successful_agent_calls_journal_the_effective_catalogue_model() {
     let (state, storage, provider, topic_id) = fallback_test_state(vec![
@@ -19770,7 +19911,7 @@ async fn run_accounts_inspection_reads_an_outstanding_provider_round() {
         .expect("session");
     let opened = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(GatedRoundProvider {
@@ -19838,7 +19979,7 @@ async fn run_accounts_api_cancellation_retains_source_and_time() {
         .await
         .expect("session");
     let opened = Arc::new(Notify::new());
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(GatedRoundProvider {
@@ -19944,7 +20085,7 @@ async fn review_fix_start_snapshot_time_precedes_a_concurrent_completion() {
         .create_session(swage_storage::fixtures::new_session(topic.id))
         .await
         .unwrap();
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(GatedRoundProvider {

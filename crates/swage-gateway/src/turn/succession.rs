@@ -2077,11 +2077,11 @@ mod tests {
                 ),
                 None => assert!(summary.failure_reason.is_none(), "{summary:?}"),
             }
-            // Recording truncation does not change the established policy
-            // of accepting non-empty summaries.
+            // Notes cut at the output limit are a failed pass, like blank
+            // ones: they are never used as though they were whole.
             assert_eq!(
                 record.actual_strategy,
-                if matches!(mode, "failed" | "blank") {
+                if matches!(mode, "failed" | "blank" | "truncated") {
                     "none"
                 } else {
                     THRESHOLD_STRATEGY
