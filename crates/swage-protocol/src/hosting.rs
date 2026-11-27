@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -100,6 +101,15 @@ pub struct OperatorGatewaySummary {
     pub active_connection_count: usize,
 }
 
+/// A terminal turn's standing on the operator surface.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorSessionEnding {
+    Cancelled,
+    Failed,
+    Interrupted,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct OperatorSessionSummary {
@@ -115,6 +125,15 @@ pub struct OperatorSessionSummary {
     pub has_interrupted_turn: bool,
     pub has_active_connection: bool,
     pub has_running_turn: bool,
+    /// The running turn is held on a request only the person can answer.
+    pub awaiting_approval: bool,
+    pub ending: Option<OperatorSessionEnding>,
+    pub agent_id: String,
+    pub parent_session_id: Option<Uuid>,
+    /// The schedule or workflow run that opened this session, when applicable.
+    pub source: Option<String>,
+    pub workflow_run_id: Option<Uuid>,
+    pub activity: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -133,9 +152,22 @@ pub struct OperatorDeviceSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
+pub struct OperatorWorkflowRunSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub state: String,
+    pub agent_id: Option<String>,
+    pub parent_session_id: Option<Uuid>,
+    pub parent_run_id: Option<Uuid>,
+    pub activity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct OperatorOverviewResponse {
     pub gateway: OperatorGatewaySummary,
     pub sessions: Vec<OperatorSessionSummary>,
+    pub workflow_runs: Vec<OperatorWorkflowRunSummary>,
     pub approvals: Vec<ApprovalSummary>,
     pub schedules: schedule::ScheduleListResponse,
     pub channels: ChannelStatusListResponse,
@@ -363,6 +395,7 @@ pub struct KnowledgeMirrorRegenerateResponse {
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct HostingSurface {
+    secrets: SecretListResponse,
     presence: PresenceSnapshotResponse,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
@@ -377,4 +410,39 @@ pub struct HostingSurface {
     agent_definition_mutation: AgentDefinitionMutationResponse,
     devices: device::DeviceListResponse,
     knowledge_mirror: KnowledgeMirrorRegenerateResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct SecretResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub material_kind: String,
+    pub owner_kind: String,
+    pub backend_kind: String,
+    pub scope_kind: String,
+    pub scope_id: Option<String>,
+    pub reference: String,
+    #[ts(type = "unknown")]
+    pub metadata: Value,
+    pub status: String,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub revoked_at: Option<chrono::DateTime<Utc>>,
+    pub revealed_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct SecretListResponse {
+    pub secrets: Vec<SecretResponse>,
+    pub managed_backend: ManagedSecretEncryptionDiagnostics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct ManagedSecretEncryptionDiagnostics {
+    pub status: String,
+    pub detail: String,
+    pub key_source: Option<String>,
 }

@@ -9,6 +9,8 @@ use serde_json::Value;
 /// Configuration for an agent instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
+    #[serde(default = "default_identical_failure_bound")]
+    pub max_identical_tool_failures: u32,
     /// Unique identifier for this agent — propagated to all storage records.
     pub agent_id: String,
     /// When to trigger context compaction.
@@ -27,6 +29,8 @@ pub struct AgentConfig {
     pub working_directory: PathBuf,
     /// Gateway-governed allowed path roots for tool execution.
     pub allowed_paths: Vec<PathBuf>,
+    /// Writable runtime storage for tool-output artefacts, separate from workspaces.
+    pub tool_output_directory: Option<PathBuf>,
     /// Optional generation controls loaded from the selected global preset.
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
@@ -53,10 +57,28 @@ pub struct AgentConfig {
     /// evaluation and call auditing.
     #[serde(default = "approval_prompts_enabled_by_default")]
     pub approval_prompts_enabled: bool,
+    /// The request put to the model when its final round after tool rounds
+    /// returns no text (`closing_account`). The authored text is the default;
+    /// a gateway serving another variant of the request sets it here.
+    #[serde(default = "default_closing_account_request")]
+    pub closing_account_request: String,
+    /// The frame around a tool result that is delivered material — a
+    /// delegated agent's result. The authored frame is the default; a
+    /// gateway serving another variant sets it here.
+    #[serde(default)]
+    pub delivered_material_frame: swage_core::DeliveredMaterialFrame,
+}
+
+const fn default_identical_failure_bound() -> u32 {
+    3
 }
 
 const fn approval_prompts_enabled_by_default() -> bool {
     true
+}
+
+fn default_closing_account_request() -> String {
+    crate::closing_account::CLOSING_ACCOUNT_REQUEST.to_owned()
 }
 
 impl AgentConfig {
@@ -66,6 +88,7 @@ impl AgentConfig {
     /// Call [`validate`][Self::validate] before using the config with an agent.
     pub fn new(agent_id: impl Into<String>) -> Self {
         Self {
+            max_identical_tool_failures: default_identical_failure_bound(),
             agent_id: agent_id.into(),
             compaction_threshold: CompactionThreshold::MessageCount(100),
             metadata: HashMap::new(),
@@ -74,6 +97,7 @@ impl AgentConfig {
             has_resolved_workspace: false,
             working_directory: PathBuf::new(),
             allowed_paths: Vec::new(),
+            tool_output_directory: None,
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
@@ -82,6 +106,8 @@ impl AgentConfig {
             model_id: None,
             skip_permissions: false,
             approval_prompts_enabled: true,
+            closing_account_request: default_closing_account_request(),
+            delivered_material_frame: swage_core::DeliveredMaterialFrame::authored(),
         }
     }
 

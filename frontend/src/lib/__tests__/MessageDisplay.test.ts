@@ -25,6 +25,7 @@ vi.mock("../api/turns", () => ({
 
 import { fetchTurnContext } from "../api/turns";
 import MessageDisplay from "../components/MessageDisplay.svelte";
+import { renderedStyles } from "./rendered-styles";
 import messageDisplaySource from "../components/MessageDisplay.svelte?raw";
 import type { ConversationStore } from "../stores/conversations";
 import {
@@ -84,6 +85,7 @@ function makeConversationStore(
   const detail: ConversationDetail = {
     id: "conv-1",
     agent_id: "gateway",
+    agent_display_name: "Swage default",
     topic_id: "proj-1",
     created_at: "2026-03-20T10:00:00Z",
     last_activity: "2026-03-20T10:00:00Z",
@@ -148,7 +150,8 @@ function makeStreamingStore(
     },
     handleServerEvent: () => {},
     startTurn: () => {},
-    cancelTurn: () => {},
+    cancelTurn: async () => {},
+    clearConnectionError: () => {},
     reconcileAfterReconnect: () => {},
   };
 }
@@ -169,6 +172,177 @@ afterEach(() => {
   }
   _msgSeq = 0;
   vi.resetAllMocks();
+});
+
+describe("fenced code rendering", () => {
+  it("keeps highlighted source exact across conversation remounts", async () => {
+    const yaml = "- first\n- second\n";
+    const xml = '<root name="example">&amp;<child /></root>\n';
+    const content = `\`\`\`yaml\n${yaml}\`\`\`\n\n\`\`\`xml\n${xml}\`\`\``;
+    const store = makeConversationStore([makeAssistantMessage(content)]);
+    let firstMarkup: string[] | undefined;
+
+    for (let view = 0; view < 5; view++) {
+      component = mount(MessageDisplay, {
+        target: document.body,
+        props: { store, streamingStore: makeStreamingStore() },
+      });
+      flushSync();
+
+      const blocks = [...document.querySelectorAll(".assistant-content pre code")];
+      expect(blocks.map((block) => block.textContent)).toEqual([yaml, xml]);
+      for (const block of blocks) {
+        expect(block.textContent).not.toContain("hljs-");
+        expect(block.textContent).not.toContain("&lt;");
+        expect(block.querySelector('span[class^="hljs-"]')).not.toBeNull();
+      }
+      const markup = blocks.map((block) => block.innerHTML);
+      if (firstMarkup) expect(markup).toEqual(firstMarkup);
+      else firstMarkup = markup;
+
+      await unmount(component);
+      component = undefined;
+    }
+  });
+});
+
+describe("provider failure notice", () => {
+  it("keeps diagnostics collapsed, names the selected route and offers recovery once", () => {
+    const raw = '{"error":{"message":"Rejected at https://Proxy.Example/v1","request_id":"Req-AbC"}}';
+    const request: MessageView = { role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z", turn_id: "failed-turn" };
+    const reply = { ...makeAssistantMessage("Partial answer", undefined, "MixedCase-Model", "failed", "failed-turn"), failure_message: raw };
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", { get: () => ({ code: "provider_error", message: raw }) });
+    streaming.startTurn = vi.fn();
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([request, reply]), streamingStore: streaming } });
+    flushSync();
+    expect(document.querySelectorAll(".turn-error")).toHaveLength(1);
+    const notice = document.querySelector<HTMLElement>(".turn-error")!;
+    expect(notice.querySelector("p")?.textContent).toContain("using model MixedCase-Model failed");
+    expect(notice.querySelector("details")?.open).toBe(false);
+    expect(notice.querySelector("pre")?.textContent).toBe(raw);
+    expect(notice.querySelector("a")?.getAttribute("href")).toBe("/settings/providers");
+    notice.querySelector<HTMLButtonElement>("button")!.click();
+    expect(streaming.startTurn).toHaveBeenCalledWith("Hello");
+    const compiled = compile(messageDisplaySource, { generate: "client", css: "external" });
+    expect(compiled.css?.code.match(/\.turn-error[^{}]*\{([^}]+)\}/)?.[1]).toMatch(/text-transform:\s*none/);
+    expect(compiled.css?.code).toMatch(/overflow-wrap:\s*anywhere/);
+  });
+
+  it("leaves the model unnamed when the error supplies no model", () => {
+    const request: MessageView = { role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" };
+    const store = makeConversationStore([request]);
+    Object.defineProperty(store.activeConversation!, "selected_model_id", { value: "sol" });
+    const raw = `provider 'cliproxy-openai' at https://Proxy.Example/v1: HTTP error 400: ${JSON.stringify({ error: { message: "Authentication rejected" } })}`;
+    const sendMessage = vi.fn();
+    const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage } });
+    streaming.startTurn("Hello", "cliproxy-openai:gpt-model-access-does-not-exist");
+    streaming.handleServerEvent({ type: "error", code: "provider_error", message: raw });
+    component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore: streaming } });
+    flushSync();
+    const summary = document.querySelector(".turn-error p")!.textContent!;
+    expect(summary).toContain("provider cliproxy-openai");
+    expect(summary).not.toContain("using model");
+    expect(document.querySelector(".turn-error pre")!.textContent).toBe(raw);
+  });
+
+  it("shows the model the gateway reports when a queued turn fails", () => {
+    const store = makeConversationStore([{ role: "user", content: "Queued", timestamp: "2026-10-15T12:00:00Z" }]);
+    Object.defineProperty(store.activeConversation!, "root_thread_id", { value: "main-thread" });
+    const sendMessage = vi.fn();
+    const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage } });
+    streaming.startTurn("First", "first-model");
+    streaming.startTurn("Queued", "Queued-Model");
+    const clientId = sendMessage.mock.calls[1][5] as string;
+    streaming.handleServerEvent({ type: "message_queued", session_id: "conv-1", queued: {
+      client_id: clientId, id: "q-1", origin: "user", content: "Queued", queued_at: "2026-10-15T12:00:00Z",
+    } });
+    streaming.handleServerEvent({ type: "turn_complete", turn_id: "first-turn" });
+    streaming.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-1", turn_id: "queued-turn", queued_ids: ["q-1"] });
+    streaming.handleServerEvent({ type: "error", code: "agent_error", message: "Model Routed-Model: Request rejected" });
+    component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore: streaming } });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toContain("using model Routed-Model failed");
+  });
+
+  it.each([
+    "rate limited by provider fallback",
+    "provider fallback overloaded: capacity exhausted",
+  ])("names the provider that reported %s", (cause) => {
+    const request: MessageView = {
+      role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z",
+    };
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", {
+      get: () => ({
+        code: "agent_error",
+        message: `Model routed-model: provider 'primary' at https://example.test: ${cause}`,
+      }),
+    });
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([request]), streamingStore: streaming },
+    });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toContain("to provider fallback");
+  });
+
+  it("shows the gateway's model for a failed turn with no reply", () => {
+    const request: MessageView = {
+      role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z",
+      turn_state: "failed",
+      failure_message: "Model routed-model:free: provider 'proxy' at https://example.test: connection reset",
+    };
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([request]) } });
+    flushSync();
+    const summary = document.querySelector(".turn-error p")!.textContent!;
+    expect(summary).toContain("provider proxy");
+    expect(summary).toContain("using model routed-model:free failed");
+  });
+
+  it.each([
+    ["gateway_shutdown", "The gateway shut down while the turn was running."],
+    ["approval_timeout", "approval timed out before tool execution; turn interrupted"],
+  ])("shows the cause of %s directly", (code, reason) => {
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", { get: () => ({ code, message: reason }) });
+    const request: MessageView = { role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" };
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([request]), streamingStore: streaming },
+    });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toBe(reason);
+  });
+
+  it.each([
+    ["assistant", "The gateway shut down while the turn was running."],
+    ["user", "approval timed out before tool execution; turn interrupted"],
+  ] as const)("shows the recorded interruption on a reloaded %s message", (role, reason) => {
+    const message: MessageView = {
+      role,
+      content: role === "assistant" ? "Partial reply" : "Write the file",
+      timestamp: "2026-10-15T12:00:00Z",
+      turn_state: "interrupted",
+      failure_message: reason,
+    };
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([message]) },
+    });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toBe(reason);
+  });
+
+  it("offers generic recovery without inventing a provider or error category", () => {
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", { get: () => ({ code: "provider_error", message: "opaque diagnostic" }) });
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([{ role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" }]), streamingStore: streaming } });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toBe("The request failed. See the details for the reported cause.");
+    expect(document.querySelector(".turn-error button")?.textContent).toBe("Retry");
+    expect(document.querySelector(".turn-error a")?.textContent).toBe("Provider settings");
+  });
 });
 
 describe("turn context inspector trigger", () => {
@@ -568,11 +742,12 @@ describe("turns that ended without a reply, as loaded", () => {
     expect(request?.textContent).toContain("Interrupted before a reply");
   });
 
-  it("shows a running call stopped live with an unknown outcome, before any reload", async () => {
+  it("shows a running call stopped live as cancelled before any reload", async () => {
     const api = await import("../api/conversations");
     vi.spyOn(api, "createConversation").mockResolvedValue({
       id: "conv-live",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "proj-1",
       created_at: "2026-03-20T10:00:00Z",
       last_activity: "2026-03-20T10:00:00Z",
@@ -594,13 +769,12 @@ describe("turns that ended without a reply, as loaded", () => {
       arguments: { command: "sleep 30" },
     });
     // On Stop the gateway ends the running call as cancelled with no result
-    // before it reports the turn cancelled. The wire carries that missing
-    // result as JSON null, which the generated event type does not admit.
+    // before it reports the turn cancelled. The absent result is JSON null.
     streamingStore.handleServerEvent({
       type: "tool_end",
       call_id: "call-sleep",
       tool: "shell",
-      result: null as unknown as string,
+      result: null,
       status: "cancelled",
       duration_ms: 6200,
       truncated: false,
@@ -610,9 +784,9 @@ describe("turns that ended without a reply, as loaded", () => {
 
     const request = document.body.querySelector('[aria-label="Your message"]');
     expect(request?.querySelector(".tool-call")?.textContent).toContain(
-      "its outcome is unknown",
+      "cancelled",
     );
-    expect(request?.textContent).toContain("Interrupted before a reply");
+    expect(request?.textContent).toContain("Cancelled before a reply");
   });
 
   it("leaves a request whose turn replied without a failure account", () => {
@@ -1134,11 +1308,29 @@ describe("assistant message width", () => {
       css: "external",
       cssHash: () => scope,
     });
-    const style = document.createElement("style");
-    style.textContent = css!.code;
-    document.head.append(style);
+    const style = renderedStyles(css!.code);
     onTestFinished(() => style.remove());
   }
+
+  it.each([false, true])("caps plain reply prose while streaming=%s", (live) => {
+    const text = "A long plain reply. ".repeat(100);
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore(live ? [] : [makeAssistantMessage(text)]),
+        streamingStore: { ...makeStreamingStore([], live), streamedContent: live ? text : "" },
+        displayPreferences: {
+          theme: "system", density: "compact", message_model_display: "off",
+          conversation_rendering: "plain", print_marks: "full",
+        },
+      },
+    });
+    applyComponentStyles();
+    const body = document.querySelector<HTMLElement>(".plain-body")!;
+    expect(body.textContent).toBe(text);
+    expect(getComputedStyle(body).maxWidth).toBe("80ch");
+    expect(getComputedStyle(body).whiteSpace).toBe("pre-wrap");
+  });
 
   const wideReply = [
     "Here is the comparison.",
@@ -1255,5 +1447,133 @@ describe("authorship of platform-written messages", () => {
       document.body.querySelectorAll('[aria-label="Your message"]'),
     ).toHaveLength(1);
     expect(document.body.querySelectorAll(".message.platform")).toHaveLength(3);
+  });
+});
+
+
+describe("message link navigation", () => {
+  afterEach(() => { document.body.replaceChildren(); });
+
+  const childId = "18315217-1234-4567-89ab-0123456789ab";
+
+  it.each([
+    `/sessions/${childId}`,
+    `swage://session/${childId}`,
+    `/sessions/${childId}?view=reply`,
+    `swage://session/${childId}?view=reply`,
+    `${window.location.origin}/sessions/${childId}?view=reply`,
+  ])(
+    "opens a child conversation from a reply: %s", (href) => {
+      const onNavigate = vi.fn();
+      const component = mount(MessageDisplay, {
+        target: document.body,
+        props: { store: makeConversationStore([makeAssistantMessage(`[Open child session](${href})`)]), onNavigate },
+      });
+      onTestFinished(() => unmount(component));
+      flushSync();
+      const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+      const expectedPath = `/conversations/${childId}${new URL(href, window.location.origin).search}`;
+      expect(link.getAttribute("href")).toBe(expectedPath);
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+      let intercepted: boolean | undefined;
+      // Observe the handler before suppressing jsdom's unsupported navigation.
+      document.addEventListener("click", (event) => {
+        intercepted = event.defaultPrevented;
+        event.preventDefault();
+      }, { once: true });
+      link.dispatchEvent(click);
+      expect(onNavigate).toHaveBeenCalledExactlyOnceWith(expectedPath);
+      expect(intercepted).toBe(true);
+    },
+  );
+
+  it.each([
+    "swage://settings/providers",
+    "swage://session/not-a-conversation-id",
+    `swage://session/${childId}/extra`,
+    `swage://session/${childId}#extra`,
+    ` swage://session/${childId}`,
+    `swage://session/${childId} `,
+    `swage://session/${childId}\n`,
+  ])("strips an unsupported swage href: %s", (href) => {
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([makeAssistantMessage(`<a href="${href}">link</a>`)]) },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    expect(document.querySelector(".markdown-body a")!.hasAttribute("href")).toBe(false);
+  });
+
+  it("keeps external and javascript links out of app navigation", () => {
+    const onNavigate = vi.fn();
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore([makeAssistantMessage(
+          '<a href="https://elsewhere.example/page">external</a> <a href="javascript:alert(1)">unsafe</a>',
+        )]),
+        onNavigate,
+      },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    const links = document.querySelectorAll<HTMLAnchorElement>(".markdown-body a");
+    expect(links[0].getAttribute("href")).toBe("https://elsewhere.example/page");
+    expect(links[1].hasAttribute("href")).toBe(false);
+    for (const link of links) {
+      document.addEventListener("click", (event) => event.preventDefault(), { once: true });
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+    }
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it.each(["/settings/memory?scope=general&reference=general%2Fprofile", `${window.location.origin}/settings/memory?scope=general&reference=general%2Fprofile`])("routes a memory notice inside the app: %s", (href) => {
+    const onNavigate = vi.fn();
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore([makeAssistantMessage(`Memory updated from this conversation: [page](${href})`)]),
+        onNavigate,
+      },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    const location = window.location.href;
+    const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    link.dispatchEvent(click);
+    expect(onNavigate).toHaveBeenCalledExactlyOnceWith("/settings/memory?scope=general&reference=general%2Fprofile");
+    expect(click.defaultPrevented).toBe(true);
+    expect(window.location.href).toBe(location);
+  });
+
+  it.each([
+    { href: "https://elsewhere.example/page", ctrlKey: false },
+    { href: `https://elsewhere.example/sessions/${childId}`, ctrlKey: false },
+    { href: `/sessions/${childId}#details`, ctrlKey: false },
+    { href: `/sessions/${childId}?view=reply`, ctrlKey: true },
+    { href: `swage://session/${childId}`, ctrlKey: true },
+    { href: "/settings/memory", ctrlKey: true },
+    { href: "/api/memory/pages", ctrlKey: false },
+  ])("leaves ordinary browser navigation intact: $href ($ctrlKey)", ({ href, ctrlKey }) => {
+    const onNavigate = vi.fn();
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([makeAssistantMessage(`[page](${href})`)]), onNavigate },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+    if (href.includes("#") || href.startsWith("https://elsewhere.example")) {
+      expect(link.getAttribute("href")).toBe(href);
+    }
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ctrlKey });
+    let intercepted: boolean | undefined;
+    // Observe the component's decision, then suppress jsdom's unsupported document navigation.
+    document.addEventListener("click", (event) => { intercepted = event.defaultPrevented; event.preventDefault(); }, { once: true });
+    link.dispatchEvent(click);
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(intercepted).toBe(false);
   });
 });

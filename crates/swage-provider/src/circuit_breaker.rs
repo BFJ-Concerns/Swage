@@ -242,6 +242,10 @@ impl LlmProvider for CircuitBreakerProvider {
         self.inner.effort_capability(model)
     }
 
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        self.inner.output_limit(model)
+    }
+
     async fn count_tokens(
         &self,
         request: &CompletionRequest,
@@ -372,6 +376,7 @@ impl LlmProvider for CircuitBreakerProvider {
                                 | StreamChunk::ProviderResponseWitness(_)
                                 | StreamChunk::ProviderRetryStarted { .. }
                                 | StreamChunk::ProviderRetrySettled { .. }
+                                | StreamChunk::ProviderAttempt(_)
                                 | StreamChunk::ToolUse { .. } => {}
                             }
                         }
@@ -954,6 +959,10 @@ mod tests {
             })
         }
 
+        fn output_limit(&self, _: &str) -> Option<u32> {
+            Some(4321)
+        }
+
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
             Ok(Some(42))
         }
@@ -1004,6 +1013,13 @@ mod tests {
         let provider =
             CircuitBreakerProvider::new(Box::new(CountingProbe), CircuitBreakerConfig::default());
         assert!(provider.effort_capability("any").is_some());
+    }
+
+    #[test]
+    fn output_limit_delegates_to_the_wrapped_provider() {
+        let provider =
+            CircuitBreakerProvider::new(Box::new(CountingProbe), CircuitBreakerConfig::default());
+        assert_eq!(provider.output_limit("any"), Some(4321));
     }
 
     #[test]

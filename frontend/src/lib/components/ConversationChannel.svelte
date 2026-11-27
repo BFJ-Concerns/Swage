@@ -53,6 +53,7 @@
   }: Props = $props();
 
   const activeConversation = $derived(conversationStore.activeConversation);
+  const sessionAgentLabel = $derived(activeConversation?.agent_display_name);
   const activeStream = $derived(
     streamingStore.streamFor?.(activeConversation?.id ?? null),
   );
@@ -116,6 +117,12 @@
     });
   }
 
+  const activeAgentModel = $derived(agentDefinitions.find(
+    (definition) => definition.id === activeConversation?.agent_id,
+  )?.model_id);
+  const composerModel = $derived(activeConversation?.selected_model_id ??
+    (activeAgentModel && modelOptions.includes(activeAgentModel) ? activeAgentModel : defaultModelId));
+
   function abandonBranch(): void {
     conversationStore.abandonActiveBranch?.().catch((error: unknown) => {
       console.error("Failed to abandon branch:", error);
@@ -141,9 +148,14 @@
       {/each}
     </select>
     {#if activeConversation}
-      <AgentPicker definitions={agentDefinitions} bind:selectedAgentId />
+      <span class="agent-label">Agent: <span aria-label="Session agent">{sessionAgentLabel}</span></span>
     {/if}
-    <button class="new-session" aria-label="New conversation" onclick={() => onNewConversation?.(selectedAgentId || undefined)}>+ New</button>
+    <div class="creation-controls" role="group" aria-label="New conversation">
+      {#if activeConversation}
+        <AgentPicker definitions={agentDefinitions} bind:selectedAgentId />
+      {/if}
+      <button class="new-session" aria-label="New conversation" onclick={() => onNewConversation?.(selectedAgentId || undefined)}>+ New</button>
+    </div>
   </header>
   {#if activeConversation && branches.length > 0}
     <!-- Which thread the history and composer show. The root is always
@@ -173,7 +185,7 @@
     </div>
   {/if}
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
-  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
+  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} {onNavigate} />
   <!-- Pinned to the foot of the channel's scroll, so a turn waiting on the
        user's decision shows its approval card in view however long the
        history above it is. -->
@@ -183,7 +195,7 @@
     {:else if activeStream?.pendingApproval ?? streamingStore.pendingApproval}
       <ApprovalCard approval={activeStream?.pendingApproval ?? streamingStore.pendingApproval!} />
     {:else}
-      <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
+      <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={composerModel} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
     {/if}
   </div>
 </section>
@@ -226,6 +238,20 @@
     line-height: 1.4;
     letter-spacing: 0.08em;
     padding: 3px 6px;
+  }
+
+  .creation-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-left: 1px solid var(--rule-soft);
+    padding-left: 8px;
+  }
+
+  .agent-label {
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-size: .72rem;
   }
 
   .new-session {

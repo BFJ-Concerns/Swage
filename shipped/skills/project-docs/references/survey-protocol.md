@@ -1,92 +1,67 @@
-# Survey Protocol
+# Survey protocol
 
-How to ground documentation in the code: what counts as evidence, where to look,
-and what the working fact inventory records. The survey produces evidence for the
-writer; it produces no committed artefact.
+The survey gathers the evidence the writer works from. It produces working
+notes and nothing that is committed.
 
-## Surface Discovery
+## What grounds a claim
 
-Before reading deeply, enumerate what the project exposes. Typical places:
-
-- **Existing docs** — `README*`, `docs/**`, any stray `*.md`, existing
-  agent-guidance files (`AGENTS.md`, `CLAUDE.md` and pointers).
-- **Manifests** — `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`,
-  `Makefile`, `justfile`: names, entry points, scripts, dependency intent.
-- **CI configs** — workflow files reveal the real build and test commands.
-- **Interfaces** — arg parsers and CLI definitions; config structs, schemas, and
-  env handling; route definitions or OpenAPI specs; error enums and constants.
-- **Examples and tests** — working usage the prose can be checked against.
-
-## Evidence Classes
-
-Each claim class has sources that can ground it:
+A claim is grounded by the thing that makes it true:
 
 | Claim about | Grounded by |
 |---|---|
-| Behaviour | The implementation, and tests that exercise it |
-| Commands (build/test/run) | Manifests, CI configs, scripts actually present |
-| Configuration | The config schema, parser, defaults, env handling |
-| CLI surface | The arg parser; `--help` output from a safe run |
-| API surface | Route definitions, OpenAPI specs, controllers |
-| Errors | Error enums, constants, handling paths |
+| Behaviour | The implementation, and the tests that exercise it |
+| Build, test and run commands | Manifests, CI configuration, and scripts that are present |
+| Configuration | The config schema or parser, its defaults, and the environment handling |
+| The command line | The argument parser, or `--help` output from a run |
+| An API | Route definitions, an OpenAPI document, the handlers |
+| Errors | Error enums, constants, and the paths that raise them |
 
-Not evidence on their own: TODOs, roadmap comments, dead code,
-feature-flagged-off paths, and existing docs (they are the thing under audit).
+CI configuration is worth reading early: it shows the build and test
+commands the project really runs, which the README may not.
 
-When sources conflict, precedence is: code > tests > CI configs > examples >
-existing docs. A conflict worth resolving in the docs is usually also worth
-mentioning in the report.
+Where sources disagree, the code decides, then the tests, then CI
+configuration, then examples, and existing documentation last. A
+disagreement worth resolving in the documentation is usually worth a line in
+the report too.
 
-## The Fact Inventory
+## The fact inventory
 
-Working material, kept in the session's scratch topic and never committed. One
-row per substantive claim:
+One row for each claim that matters:
 
 ```
-claim | source (file:line or command run) | audience | canonical home | authority | uncertainty
+claim | source (file:line, or the command run) | reader | home | checked against | what is unsure
 ```
 
-The authority column names what the accuracy review checks the claim against:
-`code`, or the mirrored agent counterpart's path for a claim that restates one
-(`parallel-sets.md`, The verification chain). The writer fills it when
-assembling the inventory — survey workers do not report it.
+- **Reader** is who acts on the fact: an agent, a person getting oriented, a
+  person going deep, or a person operating a running instance. It decides
+  the home.
+- **Checked against** is what the accuracy review compares the claim with:
+  `code`, or the path of the agent page that a human page's claim restates
+  (`parallel-sets.md`, *The order of the accuracy review*). The writer fills
+  this in. Survey workers do not report it.
+- A fact true only on one machine or deployment says so in its row, so that
+  the writer names that scope in the sentence.
+- A row marked unsure is one the accuracy review must settle or the
+  documentation must leave out.
 
-Audience is who acts on the fact — executing agent, orienting user, deep-diving
-user, operating user (running a deployed instance; their facts route to the
-runbook) — and drives the canonical-home choice. A fact true only on a
-particular machine or deployment records that condition in its row (doctrine
-gate 6), so the writer scopes it rather than generalising it. Record uncertainty
-honestly; an unverified row is a row the accuracy review must resolve or the
-docs must omit.
+Workers sent to survey an area return rows in this shape without the
+checked-against column (`../prompts/survey-worker.md`).
 
-Delegated survey workers return rows in this shape (see
-`../prompts/survey-worker.md`); they never return prose for pasting.
+A job on one README needs no formal inventory; notes are enough. A set of
+several files needs the rows, because the accuracy review is run from them.
 
-## Safe-Command Policy
+## Running commands
 
-Documented commands are worth sanity-checking, within limits: read-only
-invocations (`--help`, `--version`, list subcommands) are fine by default;
-builds, test suites, and anything that mutates state run only when they are
-already part of the session's work or the user asks. Never run a command just to
-document it if its effects are unclear.
+A command the documentation will quote is worth trying, within limits.
+Read-only invocations, such as `--help`, `--version` or listing subcommands,
+are fine. A build, a test suite or anything that changes state runs only
+when it is already part of this session's work or the person asks for it. Do
+not run a command whose effects are unclear in order to document it.
 
-## Generated Content
+## A repository with several packages
 
-Documentation produced by a generator (API references, coverage tables, managed
-sections between markers) is never hand-edited: update the generator's input, or
-report the blocker. Hand edits are overwritten on the next generation and hide
-the real fix.
-
-## Privacy
-
-Config files, env handling, and CI secrets sections get read during a survey.
-Never publish secrets, credentials, tokens, private hostnames, or machine-local
-paths into documentation — describe the shape of the configuration ("an API key
-in `API_KEY`") without the values.
-
-## Monorepos
-
-Survey per package, and document at the level readers land: the root README
-orients across packages; a package that is independently consumed carries its own
-README and reference detail. One agent-guidance hand-off at repo level unless
-packages already keep their own guidance files.
+Survey each package, and document at the level a reader arrives at. The root
+README orients across the packages. A package that is used on its own
+carries its own README and reference detail. Changes proposed for the
+agent-guidance file are reported for the repository's one file, or per
+package where packages already keep their own.

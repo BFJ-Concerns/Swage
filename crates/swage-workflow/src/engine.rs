@@ -10,8 +10,9 @@ use crate::WorkflowHost;
 use crate::host_calls::WorkflowHostCalls;
 
 pub(crate) fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 19] = [
+    const NAMES: [(&str, &str); 20] = [
         ("AgentCallError", "AgentCallError"),
+        ("EffortFloorError", "EffortFloorError"),
         ("AgentCallTimeoutError", "AgentCallTimeoutError"),
         ("BudgetExceededError", "BudgetExceededError"),
         ("BudgetWindDownError", "BudgetWindDownError"),
@@ -696,8 +697,8 @@ const HOST_SHIM: &str = r#"
                         const buildAgentRequest = (options) => {
                             const merged = mergeDefaults(options);
                             const knownOptions = new Set([
-                                "agent", "task", "tools", "skills", "model", "fallbackModel", "effort", "timeoutMs",
-                                "cwd", "isolation", "schema", "maxAttempts", "label", "phase", "identity",
+                                "agent", "task", "tools", "skills", "model", "fallbackModel", "effort", "minEffort",
+                                "timeoutMs", "cwd", "isolation", "schema", "maxAttempts", "label", "phase", "identity",
                                 "session", "worker", "elements", "variables", "assembly",
                             ]);
                             for (const key of Object.keys(merged)) {
@@ -754,6 +755,9 @@ const HOST_SHIM: &str = r#"
                                 ...(merged.effort === undefined || merged.effort === null
                                     ? {}
                                     : { effort: String(merged.effort) }),
+                                ...(merged.minEffort === undefined || merged.minEffort === null
+                                    ? {}
+                                    : { min_effort: String(merged.minEffort) }),
                                 ...(merged.timeoutMs === undefined || merged.timeoutMs === null
                                     ? {}
                                     : { timeout_ms: merged.timeoutMs }),
@@ -2281,6 +2285,61 @@ mod tests {
         );
     }
 
+    /// The guide presents its independent-check script as one that runs as
+    /// written, with the checker's model optional. Both hold only while the
+    /// script and the surface agree.
+    #[tokio::test(flavor = "current_thread")]
+    async fn workflow_authoring_guide_check_example_runs_with_and_without_a_checker_model() {
+        let guide = include_str!("../../../shipped/skills/workflow-authoring/SKILL.md");
+        let example = guide
+            .split_once("## An independent check")
+            .expect("independent check section")
+            .1
+            .split_once("```js\n")
+            .expect("JavaScript example")
+            .1
+            .split_once("\n```")
+            .expect("complete JavaScript example")
+            .0;
+
+        for (args, checker_model) in [
+            (r#"{"cwd":"/work","area":"request validation"}"#, None),
+            (
+                r#"{"cwd":"/work","area":"request validation","checkerModel":"second"}"#,
+                Some("second"),
+            ),
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let finding = json!({"file": "src/lib.rs", "line": 7, "claim": "length unchecked"});
+            let verdict = json!({"holds": true, "evidence": "read line 7", "otherConcerns": ""});
+            host.agent_outputs
+                .lock()
+                .unwrap()
+                .extend([Ok(finding.clone()), Ok(verdict.clone())]);
+            let output = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    example,
+                    args,
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect("the documented script runs as written");
+
+            assert_eq!(
+                serde_json::from_str::<Value>(&output).expect("workflow output"),
+                json!({"finding": finding, "verdict": verdict, "confirmed": true})
+            );
+            let requests = host.agent_requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].model, None);
+            assert_eq!(requests[1].model.as_deref(), checker_model);
+            assert_eq!(requests[1].cwd.as_deref(), Some("/work"));
+            assert!(requests[1].prompt.contains("length unchecked"));
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn agent_call_without_a_definition_omits_agent_from_the_host_request() {
         let host = Arc::new(SurfaceHost::new());
@@ -3062,7 +3121,7 @@ mod tests {
         let host = Arc::new(SurfaceHost::new());
         WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
-                r#"await agent("bounded work", { effort: "high", timeoutMs: 75, tools: ["web_search", "url_fetch"] }); return null;"#,
+                r#"await agent("bounded work", { effort: "high", minEffort: "medium", timeoutMs: 75, tools: ["web_search", "url_fetch"] }); return null;"#,
                 "null",
                 CancellationToken::new(),
                 Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
@@ -3073,6 +3132,7 @@ mod tests {
         let requests = host.agent_requests.lock().unwrap();
         let serialised = serde_json::to_value(&requests[0]).expect("serialise request");
         assert_eq!(serialised["effort"], "high");
+        assert_eq!(serialised["min_effort"], "medium");
         assert_eq!(serialised["timeout_ms"], 75);
         assert_eq!(
             serialised["tools"],
@@ -4138,6 +4198,50 @@ return review.content;
             serde_json::from_str::<Value>(&output).unwrap(),
             "EmptyAgentOutputError"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_calls_refuse_text_sliced_through_an_emoji() {
+        let host = Arc::new(FakeHost {
+            outputs: Mutex::new(VecDeque::from([json!("unused agent output")])),
+            deliveries: Mutex::new(Vec::new()),
+            records: Mutex::new(Vec::new()),
+            spent: 0,
+            remaining: None,
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const half = "😀".slice(0, 1);
+                const errors = {};
+                try { log(half); }
+                catch (error) { errors.log = [error.name, error.message]; }
+                try { await agent(half); }
+                catch (error) { errors.agent = [error.name, error.message]; }
+                log("😀");
+                return errors;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("the script can catch the two refusals");
+        let errors: Value = serde_json::from_str(&output).unwrap();
+        for call in ["log", "agent"] {
+            let error = errors.get(call).expect("the call was refused");
+            assert_eq!(error[0], "HostArgumentsError");
+            assert!(
+                error[1]
+                    .as_str()
+                    .is_some_and(|message| message
+                        .contains(&format!("could not read arguments for '{call}'"))),
+                "{errors}"
+            );
+        }
+        assert_eq!(*host.records.lock().unwrap(), [("log".into(), "😀".into())]);
+        assert_eq!(host.outputs.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

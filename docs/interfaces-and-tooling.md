@@ -1,8 +1,11 @@
 ---
-description: Network binding, the Settings memory view, operator history, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration and pairing procedure, the dial-in connection, cancellation, and presence), tool-call recording and replay, turn completion states (incomplete, failed, interrupted, cancelled), hosted documentation, voice capabilities, gateway lifecycle (status and start recovery), the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, the gateway's built-in tool inventory, and workspace tool output
+description: Provider setup and credentials, protocol selection, network access, Settings, turn inspection, conversations, surfaces, devices, gateway lifecycle, API reference, voice and tools
 ---
 
 # Interfaces and tooling
+
+For a source build, follow the [README quick start](../README.md#quick-start),
+including its `PATH` step, before running the CLI examples on this page.
 
 ## Network binding
 
@@ -45,13 +48,55 @@ is already in use, the gateway exits with a diagnostic. The runtime-metadata
 file written for CLI discovery records the actual bound address, which may
 differ from the configured one when port `0` (OS-assigned) is used.
 
-### Security boundary
+### Pairing beyond loopback
 
-The gateway has no authentication layer. Binding to any address other than
-loopback exposes the full API — including every configured provider key — to
-every host that can reach the port. The intended use is trusted
-private-network addresses (a LAN segment, a tailnet, or similar).
-Public-internet binding is not supported until authentication exists.
+Bound to loopback, the gateway asks nothing of a request. Bound to any other
+address, it serves a request from another machine only when the request
+carries the gateway's token; requests from the gateway's own machine —
+over loopback, or from the one address it is bound to — never need it.
+Liveness (`/api/health`), the access status (`/api/access`) and pairing
+itself (`/api/pair`) answer anyone, and the web UI's own files load
+unpaired so the page can ask to pair. A device's link
+(`/api/devices/connect`) needs no gateway token either: the device proves
+itself with its registered shared token, and the gateway refuses the link
+without it.
+
+The gateway generates the token on its first start, in `gateway-token` in
+the data root, readable only by its owner. A client gets it by pairing
+once:
+
+1. On the gateway's machine, run `swage gateway pair`. It prints a one-time
+   code that expires after ten minutes; codes are issued only to requests
+   from that machine.
+2. Enter the code on the other device:
+   - **Web UI** — the page shows a pairing prompt when the gateway refuses
+     it. Pairing sets a cookie the browser keeps for 400 days.
+   - **Command line** — `swage run --url http://<gateway>:<port>` asks for
+     the code on its terminal, or takes it as `--pairing-code <code>`.
+   - **Desktop app** — it shows the web UI's pairing prompt when it opens a
+     network gateway unpaired.
+
+Each client remembers the token for that gateway and sends it with every
+request, HTTP and WebSocket alike: the command line in `client-pairings.json`
+in its own data root (`SWAGE_HOME`, by default `~/.swage`), the desktop app
+in `gateway-pairings.json` in its profile directory, and the browser as its
+cookie. Nothing is asked again.
+
+The gate is one setting for the whole install, `[server] access`, set under
+**Settings → Security**:
+
+| Value | A request from another machine without the token |
+|---|---|
+| `token` (default) | is refused with `401` |
+| `warn` | is admitted and logged as a warning |
+| `off` | is admitted |
+
+A change applies at once, without a restart, and is recorded in the audit
+trail when it is saved. A client given a pairing code while the gate warns
+still pairs, so it stays admitted when the gate goes back to `token`.
+
+The gate is not authentication for the public internet: bind only to a
+trusted private network, such as a LAN segment or a tailnet.
 
 The host machine's own firewall must also permit inbound connections on the
 chosen port — a correctly bound gateway is unreachable from the LAN if the
@@ -78,7 +123,13 @@ is no direct page-editing interface — every change runs through the curator.
 
 The operator history pane shows a timeline of configuration changes,
 variant selections, and assembly decisions, all read from the gateway's
-local audit trail.
+local audit trail, above the audit record itself: every event the trail
+holds, filterable by session, entity and event kind. Among them is each
+tool call that ran (`tool_call`), with its arguments and result, and each
+completion the gateway asked a model provider for (`completion`), with the
+model, why it stopped — a response cut off at its length limit included —
+the tokens used and what it returned. Both name the session they ran in, and
+an entry that returned something shows it as text under "What it returned".
 
 Each configuration change entry names the changed fields with their prior
 and new values. Nested settings appear by their path — for example,
@@ -179,30 +230,133 @@ or `fileData` for Google. Text-only messages keep the plain string form.
 Stored messages carry their attachments as records that survive round-trips
 through the API.
 
+## Provider setup
+
+Start the gateway and web UI as shown in the [README](../README.md#quick-start).
+The gateway can run before a provider is configured, but cannot answer messages
+until you add a provider and model.
+
+In **Settings → Providers**, choose **Add provider** and select the kind that
+matches your endpoint:
+
+| Settings kind | Configuration protocol | Use it for |
+|---|---|---|
+| OpenAI Responses | `openai-responses` | GPT-family models through the Responses API |
+| OpenAI | `openai` | OpenAI Chat Completions |
+| OpenAI compatible | `openai` | Proxies and other Chat-Completions-shaped endpoints |
+| Anthropic | `anthropic` | Anthropic Messages |
+| Google | `google` | Google's generative language API |
+| OpenRouter | `openrouter` | OpenRouter's Chat Completions endpoint |
+
+For **OpenAI compatible**, enter **Provider name** and **Base URL** in the
+creation form, then choose **Connect** to open the provider fields.
+
+For GPT-family models over Responses, choose **OpenAI Responses**. The
+**OpenAI compatible** kind selects Chat Completions, even when the endpoint
+also serves Responses. For an OpenAI-family proxy, set **Base URL** to its API root,
+including any prefix such as `/v1`; Swage appends `/responses` or
+`/chat/completions` according to the protocol. The native OpenAI kinds use
+`https://api.openai.com/v1` unless overridden. Anthropic and Google base URLs
+come before the `/v1/messages` and `/v1beta/models/...` paths their adapters
+append; do not copy an OpenAI `/v1` suffix into those routes.
+
+Paste your key into **API key** and wait for the saved notice and stored
+credential indicator. Settings autosaves the key into an encrypted managed
+secret and puts its reference in `api_key_secret_ref`; no shell export is
+needed. Once it is stored, choose **Refresh** under **Discover** and add a
+model, or enter an upstream model ID beside **Add model**. OpenAI-family
+discovery with a custom base URL reads the saved credential. Other kinds may
+show a built-in list or a public catalogue, so discovery does not prove your
+key works. Choose **Use** beside the model you want (or select it
+under **Default model**), then wait for autosave confirmation. These changes
+apply to new turns without restarting the gateway.
+
+For an interactive turn, the selected model's `provider_id` determines its
+route. An unreachable or
+invalid endpoint produces an error naming that provider and endpoint;
+Swage does not silently answer from another configured provider. Setting
+`[providers] default` does not redirect a selected model.
+
+### Configure by file
+
+Register a governed secret through the [secret API](#registering-a-file-backed-secret)
+first. Copy the returned `reference` into the provider entry and bind a model
+to it. For example, the placeholders below describe a GPT-family Responses
+route; replace the secret reference and upstream model ID with your own:
+
+```toml
+[providers.entries.gpt]
+protocol = "openai-responses"
+api_key_secret_ref = "secret://file/<returned-id>"
+# base_url = "https://api.example.com/v1" # only for a Responses-serving proxy
+
+[models]
+default = "gpt"
+
+[models.entries.gpt]
+provider_id = "gpt"
+model_id = "<upstream-model-id>"
+```
+
+Use the reference exactly as returned, including its backend and ID.
+`models.default` names your catalogue entry; `model_id` is the ID the
+provider accepts. Restart the gateway after hand-editing `config.toml`.
+Complete provider setup before starting the [first session](first-session.md).
+Handle any sandbox or tool approvals during its turns.
+
 ## Provider credentials
 
 A provider entry has two credential fields, checked in order:
 
 1. **`api_key_secret_ref`** — a `secret://` reference resolved through the
-   gateway's secret manager. Every access is audited and the resolved value
-   is registered for redaction. This is the governed path.
+   gateway's secret manager. Successful access is audited; active secret
+   values redact captured provider requests and provider-attempt errors.
+   This is the governed path.
 2. **`api_key_env`** — a direct environment-variable read (`std::env::var`)
-   at startup. This is the legacy path; the gateway logs a warning when it is
-   used. It does not go through the secret manager and is neither audited nor
-   redacted.
+   when the provider runtime is built. This is the legacy path; the gateway
+   logs a warning when it is used. It bypasses secret-access auditing and
+   redaction based on active secret values. Pattern-based safety filtering
+   of tool results still applies.
 
 When both are set, `api_key_secret_ref` wins.
 
+A credential travels in plaintext when the provider's `base_url` is
+`http://` and names an address other than this machine's loopback: anyone
+on the path can read it. A local model server on `localhost` or `127.0.0.1`
+is never plaintext in this sense, and needs no setting. For a remote
+`http://` endpoint, **Plaintext credentials** in the provider's form under
+**Settings → Providers** sets `plaintext_credentials`. The policy applies
+when the provider is built and when model discovery sends a credential.
+
+- `warn` (the default) — requests are sent, after one warning for the
+  provider in the audit record (event kind `provider_credential_exposure`).
+  A rebuild of the same provider finds the warning and adds none. If the
+  audit record cannot be written, the gateway logs the warning and still
+  sends the request.
+- `refuse` — nothing is sent: every request fails with the reason, and the
+  refusal is recorded once.
+- `allow` — requests are sent and nothing is recorded.
+
+A provider with no credential is never judged. The voice provider shares
+the default provider's route and follows the same setting.
+
 The built-in Codex app server (`protocol = "codex"`) is temporarily
 disabled: a configuration naming it does not load, until Swage can ask you
-to approve the commands and file changes it makes. Codex models stay
-reachable through any OpenAI-protocol provider.
+to approve the commands and file changes it makes. Settings offers no Codex
+provider kind. Codex models stay
+reachable through a supported API provider: use `openai-responses` for a
+GPT/Codex-family model served over Responses, or `openai` for an endpoint
+that serves it over Chat Completions. Add the upstream model ID to that
+provider and choose **Use**. An existing CLI sign-in does not enable the
+disabled app-server route or automatically supply an API credential for
+these routes.
 
 ### Secret manager and backends
 
-The secret manager resolves `secret://` references with an audit event on
-every access and automatic redaction of resolved values. Three backends
-determine where a secret's value lives:
+The secret manager resolves `secret://` references and audits successful
+access. Provider request captures and provider-attempt errors use active
+secret values for redaction; this does not promise general log redaction.
+Three backends determine where a secret's value lives:
 
 - **Managed** — encrypted at rest in the gateway's own SQLite store. Used by
   the generate-secret path; the create-secret path takes `backend_kind` from
@@ -214,6 +368,12 @@ determine where a secret's value lives:
   (RFC 6901) can optionally select a single field from a JSON file rather
   than using the whole file's content.
 
+For managed secrets, startup normally keeps the encryption key in
+`secrets/managed-secret.key` under your data root; `SWAGE_MANAGED_SECRET_KEY`
+can supply it instead. Keep the encryption key with the database in backups.
+Losing or changing the key makes stored credentials unreadable; do not put
+its contents in logs or documentation.
+
 ### Registering a file-backed secret
 
 Create the secret through the API (`POST /api/secrets`), specifying the file
@@ -222,36 +382,62 @@ path, the JSON pointer if the file is a JSON document, and
 
 ```json
 {
-  "name": "my-service-token",
+  "name": "my-provider-key",
   "material_kind": "provider_key",
   "owner_kind": "operator",
   "backend_kind": "file",
   "scope_kind": "provider",
   "scope_id": "my-provider",
-  "external_reference": "/path/to/token-file.json",
-  "metadata": { "json_pointer": "/tokens/access_token" }
+  "external_reference": "/path/to/provider-key.json",
+  "metadata": { "json_pointer": "/api_key" }
 }
 ```
 
-The response includes a `reference` field (e.g.
-`secret://file/a1b2c3d4-e5f6-7890-abcd-ef1234567890`). Point the provider
-entry's `api_key_secret_ref` at it to bring the credential under the
-governed path:
+The JSON file must contain your provider API key in its `api_key` field.
+
+The response includes a `reference` field (`secret://file/<returned-id>`).
+Point the provider entry's `api_key_secret_ref` at it to bring the credential
+under the governed path:
 
 ```toml
 [providers.entries.my-provider]
 protocol = "openai"
-api_key_secret_ref = "secret://file/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+api_key_secret_ref = "secret://file/<returned-id>"
 ```
+
+### Registering a managed secret
+
+For a key that is not already in a file, **Settings → Providers** stores it
+as a managed secret. An API client can also send `POST /api/secrets` with
+the key inline in the JSON body:
+
+```json
+{
+  "name": "my-provider-key",
+  "material_kind": "provider_key",
+  "owner_kind": "operator",
+  "backend_kind": "managed",
+  "scope_kind": "provider",
+  "scope_id": "my-provider",
+  "value": "<provider-api-key>"
+}
+```
+
+Replace the placeholder with the key. Use the returned `reference` verbatim
+in `api_key_secret_ref`. The create response includes the submitted value
+in `revealed_value`; keep the response out of logs and reports.
 
 ### Codex auth store
 
 The file backend is how the gateway governs credentials that a companion
 tool manages itself. The Codex CLI keeps its ChatGPT OAuth tokens in an
-`auth.json` file and refreshes them on its own schedule. At startup, the
-gateway registers the Codex access and refresh tokens as file-backed secrets
-pointing into that document, so they resolve, audit, and redact through the
-governed system without being copied out of the CLI's own store.
+`auth.json` file. Swage's retained integration uses
+`~/.swage/codex/auth.json`, or `$SWAGE_HOME/codex/auth.json` when that data
+root is set; it does not read `~/.codex/auth.json`. At startup, the gateway
+registers file-backed access-token and refresh-token records pointing into
+that document, even while the integration is disabled. Registration enables
+neither sign-in nor Codex turns. These OAuth-token records cannot be used as
+`provider_key` secrets for API providers.
 
 ## Surfaces
 
@@ -259,7 +445,12 @@ Surfaces are a session's work surfaces, assembled from ordered module
 instances. A surface belongs to the session that created it and stays with
 that session's record: another session in the same topic does not see it. An
 agent or workflow can write to a surface's modules, and users can annotate
-individual modules with notes.
+individual modules with notes. A module a run delivers records what
+delivered it — the schedule and its run, the workflow run, or the turn
+whose response was routed there — and when; the surface shows that line
+above the module, so repeated deliveries read apart, and a module written
+by hand carries none. A run that refreshes a standing module records the
+new delivery; an edit by hand keeps the one the module has.
 
 ### The shared library
 
@@ -545,6 +736,14 @@ successfully. A tool call stopped with its turn settles as cancelled. When a
 tool-call result cannot be recorded (the settlement write fails), the turn
 ends as failed — the result is not silently dropped.
 
+Later turns receive long completed results as an opening preview with a hash
+and a reference to the stored result. A note explains that the earlier turn
+received the whole result. When `tool_result_read` is offered, the note tells
+the model to pass the exact `full_result_ref` as `reference` to read it again;
+otherwise it explains that the current record omits the remaining content.
+Short results need no note. These notes describe the reading turn's available
+tools and are never stored with the result.
+
 Stopping a turn ends a shell command running inside the sandbox — in both
 bubblewrap and fallback modes — and its tool-call record settles as
 cancelled.
@@ -587,6 +786,19 @@ its metadata (for example after a metadata directory was cleaned), the
 start command probes the configured address, recovers the metadata, and
 reports the gateway as already running rather than starting a duplicate.
 
+Turns the previous gateway left in flight are interrupted at startup. A
+turn that was waiting on a delegated agent resumes from the record: each
+child's fate — its result if it finished before the restart, its failure,
+or a note that it was cut off with its session and thread named — goes to
+the parent agent's mailbox under the delegation that started it, and a
+continuation is queued on the parent's conversation saying the gateway
+restarted while the turn waited and what became of each child. The
+startup drain starts that turn, the child's result enters the thread
+first (labelled as a delegation notice), and the parent carries on or
+returns to a cut-off child's thread. A child whose delegation record
+cannot be found is noted as a degraded turn record in the audit trail;
+the continuation still names it.
+
 ## API error contract
 
 Every failed HTTP response from a client-surface route carries the same
@@ -626,79 +838,14 @@ The Rust client parses the body into a typed error variant; the frontend has
 an `ApiError` class that extracts the code. The generated TypeScript client
 raises `ApiError` on any non-ok response.
 
-## Wire-contract architecture
+## API reference
 
-The architecture's rule is that all types crossing a process boundary — HTTP
-request and response bodies, WebSocket events, device commands — are defined
-once in the `swage-protocol` crate as plain serde types. Every consumer is a
-derived projection: Rust crates depend on the protocol crate directly, the
-frontend's TypeScript is generated from it via ts-rs, and the canonical
-published artefact is the JSON Schema generated via schemars and committed
-under `crates/swage-protocol/schema/`.
-
-The report's `provider_visible` object also records the resolved effort for
-the turn — what was requested, what the adapter sent, and any clamp or
-substitution — so an operator can see how effort was resolved for any past
-turn through the `GET /api/turns/{id}/context` endpoint (the web UI's
-inspector panel does not yet render this field). See
-[Agents and permissions — Effort](agents-and-permissions.md#effort)
-for the full resolution rules.
-
-The assembly report used by the context inspector is part of the client
-surface. Both the stored-context response and the `context_assembled`
-WebSocket event use that protocol type, and the frontend imports its generated
-TypeScript projection.
-
-The crate is organised into four surfaces, each emitting its own schema
-document:
-
-- **Client** — conversations, streaming, approvals, schedules, knowledge,
-  voice, workflows, channels, delivery, topics, settings, materials, recovery,
-  context reports, and provider sign-in.
-- **Hosting** — presence, operator overview, agent definitions, approvals,
-  and configuration. The contract between the gateway and its hosting
-  operator.
-- **Device** — device registration and remote tool execution. The contract
-  between the gateway and execution clients that dial in to run tool calls.
-- **Channel** — inbound messages (direct and threaded), delivery log, and
-  channel status. The contract external integrators speak.
-
-Each surface module has a manually maintained anchor struct whose fields
-reference every wire type on that surface. A schema-generation call walks the
-type graph reachable from that anchor. A new top-level wire type must therefore
-be added to the surface anchor (unless an existing anchor field already reaches
-it) and to the explicit `ts-rs` export list in
-`crates/swage-protocol/tests/projections.rs` (unless an existing export already
-reaches it).
-
-### Route manifest
-
-The client surface is gaining a route manifest — a single table that names
-each covered HTTP route once, with its method, path template, request and
-response schema names. The manifest does not yet cover the full client
-surface: the topic CRUD routes are the first entries, and routes not yet in
-the manifest are registered directly on the router without appearing in the
-projections below. Two projections are generated from the manifest:
-
-- An **OpenAPI 3.1 document** at `crates/swage-protocol/schema/client-openapi.json`,
-  whose `components/schemas` are the client surface's own JSON Schema — so
-  the OpenAPI document and the schema never disagree.
-- A **generated TypeScript client** at `frontend/src/lib/protocol/client.ts`,
-  with one typed function per manifested route over a shared request helper
-  that raises the API error contract on failure.
-
-Adding a manifested route is one entry in the manifest. A router test
-verifies that every manifest route is actually registered on the gateway's
-HTTP router — a manifest entry with no handler fails the test.
-
-### Projections
-
-Running `cargo test -p swage-protocol` regenerates all projections in place:
-TypeScript type bindings, JSON Schemas, the OpenAPI document, and the
-generated client. Any drift shows up as uncommitted changes and is caught by
-the verification gate, but the freshness check cannot detect an omitted type
-that was never made reachable, or a route that was never added to the
-manifest.
+The [OpenAPI document](../crates/swage-protocol/schema/client-openapi.json)
+describes a subset of the client API. It does not include secret operations;
+use the [credential reference](#provider-credentials) for those requests. The
+[JSON Schemas](../crates/swage-protocol/schema/) describe the client,
+hosting, device and channel contracts. HTTP failures follow the
+[API error contract](#api-error-contract).
 
 ## Verification gate
 
@@ -708,22 +855,24 @@ a workspace crate that orchestrates the gate. Most logic is Rust, but `xtask`
 shells out for some checks — for example, the tracked-local-state check runs
 `scripts/check-tracked-local-state.sh`.
 
-The gate runs eight stages in order. The first six abort immediately on
+The gate runs nine stages in order. The first seven abort immediately on
 failure — a formatting problem or a type error is not worth running the
 full test suite against. The last two always run, and their results are
 combined:
 
 1. **Tracked-local-state check** — catches runtime state directories that were
    accidentally committed.
-2. **Format check** — Rust formatting and Justfile formatting.
-3. **Type check** — `cargo check` across the workspace plus the frontend's
+2. **Tracker-tag check** — rejects bracketed tracker tags in tracked text files,
+   excluding paths covered by the repository’s ignore rules.
+3. **Format check** — Rust formatting and Justfile formatting.
+4. **Type check** — `cargo check` across the workspace plus the frontend's
    type checker.
-4. **Frontend design-token check** — rejects literal visual values in
+5. **Frontend design-token check** — rejects literal visual values in
    components where a semantic design token is required.
-5. **Shipped-workflow parse check** — verifies that every shipped workflow
+6. **Shipped-workflow parse check** — verifies that every shipped workflow
    script parses without error.
-6. **Clippy** — with warnings treated as errors.
-7. **Test suite** — Rust tests, frontend tests, and the desktop smoke test.
+7. **Clippy** — with warnings treated as errors.
+8. **Test suite** — Rust tests, frontend tests, and the desktop smoke test.
    Individual failures are collected rather than aborting on the first. The
    Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
    variable, which the Justfile defaults to `nextest`. Under `nextest`
@@ -731,7 +880,7 @@ combined:
    (which retries flaky tests) plus a separate doctest stage; setting
    `SWAGE_TEST_RUNNER=cargo` runs `cargo test --workspace --no-fail-fast`
    instead.
-8. **Projection freshness** — a `git diff` that verifies the committed
+9. **Projection freshness** — a `git diff` that verifies the committed
    TypeScript bindings and JSON Schemas match what the tests just regenerated.
 
 When both the test suite and the projection check fail, the gate reports both
@@ -749,24 +898,33 @@ links and verifies it against the version and checksum pinned in
 `v8-archive.toml` before placing it where `.cargo/config.toml` points the
 `v8` crate's build script. The pin must match the `v8` package Cargo.lock
 resolves, so a dependency upgrade that moves V8 fails the fetch until the
-pin is updated on purpose.
+pin is updated on purpose. The prebuilt archive is pinned for x86-64 Linux
+with glibc.
 
 Other useful recipes:
 
 - `just fetch-v8` — the V8 archive fetch and check alone.
-- `just check-gate` — the first six static stages above, before any tests.
+- `just check-gate` — the static stages above, before any tests.
 - `just check` — the narrower Rust and frontend type check only.
 - `just test` — the test suite alone, with the same failure-aggregation
   behaviour as the verify gate.
 - `just build-dev-embedded` — a debug build with the current frontend baked
   into the gateway binary.
 
+### Building V8 from source
+
+The experimental source build uses Cargo directly. After installing the
+[rusty_v8 build prerequisites](https://github.com/denoland/rusty_v8#building-from-source),
+run `V8_FROM_SOURCE=1 cargo build --locked --bin swage`. On x86-64 Linux
+with glibc, the locked V8 crate's source build stops because Ninja cannot
+find its ICU data file (`icudtl.dat`). Support for other targets remains
+unverified.
+
 ## Client-side route handling
 
-The web UI uses a minimal, framework-free SPA router. It pattern-matches the
-browser's URL path against the application's routes (the front door,
-conversations and their surfaces, the surface library, workflow runs,
-settings) and keeps the active conversation stable across browser navigation.
+The web UI keeps the active conversation stable across browser navigation
+between the front door, conversations and their surfaces, the surface
+library, workflow runs and settings.
 
 When the browser navigates to a conversation URL that is already the active
 conversation — the common case for back/forward navigation — the router skips
@@ -780,12 +938,6 @@ For a conversation URL that is not the currently active one, the router loads
 it normally. A 404 falls back to the root with a notice; other errors
 propagate. When a scope was in view, the composer stays open in it so the
 next message starts a fresh session there; otherwise the front door serves.
-
-The router's dependency on the conversation store is a narrow injected
-interface — four members rather than a coupling to the store's internals.
-Disconnecting the WebSocket is part of clearing the active conversation, so
-browser navigation to a deleted conversation does not leave an orphaned
-connection.
 
 ## Hosted documentation
 
@@ -815,11 +967,11 @@ audio. `GET /api/voice/capabilities` returns:
 
 - **`transcription`** and **`synthesis`** — booleans for whether speech-to-text
   and text-to-speech are available.
-- **`unavailable_reason`** — when either capability is off, the reason and
-  what to address: the default provider may be absent, its credentials
-  unavailable, its protocol incompatible (only OpenAI-protocol providers
-  serve audio), or a `[voice]` model id may be unset. Absent when both
-  capabilities are available.
+- **`unavailable_reason`** — why either capability is unavailable. It can
+  identify a missing default provider, unavailable credentials, an
+  incompatible provider protocol, an unset `[voice]` model id or a speech
+  model that has yet to be checked. After a speech request fails, it reports
+  the provider error. The field is absent when both capabilities are available.
 - **`default_voice`** and **`supported_voices`** — the default synthesis
   voice and the available voice list. The OpenAI provider reports both
   regardless of whether synthesis is configured.
@@ -827,8 +979,11 @@ audio. `GET /api/voice/capabilities` returns:
 The two audio routes — `POST /api/voice/transcriptions` and
 `POST /api/voice/speech` — send requests to the default provider's
 OpenAI-protocol audio endpoints using the model ids configured in `[voice]`.
-A request to an unavailable capability returns a 422 validation error. See
-[Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
+The transcription route returns a 422 validation error when transcription
+is unavailable. The speech route accepts requests before synthesis is
+advertised, so a caller can check the model or retry after a failure.
+A successful speech request makes synthesis available.
+See [Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
 for the configuration keys.
 
 ## Gateway tools
@@ -842,6 +997,11 @@ one is available.
 **Filesystem and shell** — `file_read`, `file_write`, `file_edit`, `file_list`,
 `file_search`, `shell`, and `python_execute`. Of these, `shell` is one of the
 two sandbox-eligible tools.
+
+`python_execute` runs each program in a fresh interpreter with Python's standard
+built-ins and standard-library imports. The default Python sandbox starts it in
+a private working directory with no network access. The supplied `swage` module
+can call the file, shell and web tools available to the turn.
 
 **Browser** — `browser_navigate`, `browser_snapshot`, `browser_click`,
 `browser_type`, `browser_select`, and `browser_scroll`.
@@ -857,13 +1017,25 @@ account — see
 [Workflow engine — Terminal account](workflow-engine.md#terminal-account)).
 `workflow_run_status` and `workflow_run_account` are scoped to the caller's
 session topic: a run in another topic reads as absent rather than forbidden.
+`model_list` lists the models the catalogue serves to the session — each id,
+its aliases, the provider's name for it, its vendor family where the name
+shows one, and the effort levels it serves as asked — for a workflow call's
+`model` and `minEffort` or an agent definition's model.
 
 **Surfaces and delivery** — `surface_read`, `surface_write`, `surface_library`, and `run_event_post`.
 
 **Scheduling** — `schedule` and `wake_me_later`.
 
+**Definition authoring** — `agent_definition` creates, edits, lists and deletes
+named agents you can choose for future sessions. `task_definition` manages
+reusable work contracts for delegated children, which do not appear in the
+new-session picker; saving one replaces its whole definition, so omitted fields
+are cleared. See [Creating and editing
+definitions](agents-and-permissions.md#creating-and-editing-definitions) for
+the conversational route and its grant.
+
 **Session and memory** — `session_values`, `agent_memory`, `tool_result_read`,
-`task_definition`, and `memory`. The `memory` tool reads and writes the
+and `memory`. The `memory` tool reads and writes the
 shared memory files of the session's scope — the topic's memory when a
 topic is selected, the general memory otherwise. It is one of the two
 sandbox-eligible tools.
@@ -877,16 +1049,19 @@ documentation (see [Hosted documentation](#hosted-documentation)).
 
 ### Workspace tool output
 
-Several tools produce file artefacts as a side effect of their work. When a
-session has an attached workspace, these artefacts land at:
+Several tools produce file artefacts as a side effect of their work. Local gateway
+sessions store these in the session's managed scratch directory, independently
+of the attached workspace's write permission:
 
 ```
-.swage/tool-output/<turn_id>/<call_id>/<filename>
+<session scratch directory>/.swage/tool-output/<turn_id>/<call_id>/<filename>
 ```
 
-`shell` writes stdout and stderr artefacts only when the output stream was
+`shell` retains stdout and stderr artefacts only when the output stream was
 truncated — a stream that fits in the tool result is reported inline and the
-artefact file is removed. Three browser action tools — `browser_click`,
+artefact file is removed. The two streams share the output limit: a short
+stream is reported whole beside a long one, and two long streams take half
+the limit each. Three browser action tools — `browser_click`,
 `browser_select`, and `browser_scroll` — write a post-action screenshot when
 the browser screenshot policy is not Off; `browser_type` never captures.
 `browser_snapshot` writes a full
@@ -895,8 +1070,8 @@ otherwise the result is inline with no artefact file. `url_fetch` writes
 `raw-body.html` only when the HTML body exceeds its capture limit; a body
 that fits is reported inline and the artefact file is removed.
 
-The path the tool result reports is relative to the workspace root (e.g.
-`.swage/tool-output/turn/call/stdout.txt`). `file_read` can open text
+The tool result reports the full path to an artefact in managed scratch.
+`file_read` can open text
 artefacts directly, but it refuses binary content — so a screenshot written
 by a browser action tool is not readable through `file_read`. The
 `<turn_id>/<call_id>` structure keeps repeated calls from overwriting each
@@ -904,11 +1079,9 @@ other.
 
 The first time a tool writes output, the gateway creates
 `.swage/tool-output/` and places a `.gitignore` containing `*` inside it.
-This keeps every file under that directory out of `git status`, so tool
-artefacts never appear as untracked files in the workspace's repository.
-
-Sessions without an attached workspace write their tool output into the
-session's scratch directory instead.
+Local gateway tool output does not create files or directories in an attached
+workspace. Paired-device execution still stores artefacts relative to its
+working directory at `.swage/tool-output/` and reports relative paths.
 
 ### Plugins
 
@@ -985,10 +1158,11 @@ enablement choice already made stands, and a revision you install over a
 shipped one stays the one serving. A shipped plugin is governed,
 presented and invoked exactly as an installed one; its `provenance`
 (`shipped` rather than `installed`, on the plugin and on each revision) is
-the one thing that tells them apart in Settings → Plugins. The first is
-`succession-summariser`, which fills the succession step on the shipped
-turn graph: it sends the step's request to the model under its `model`
-grant and answers the model's summary.
+the one thing that tells them apart in Settings → Plugins. Two ship now:
+`context-program`, which composes the turn's context on the shipped turn
+graph under its `context` grant, and `succession-summariser`, which fills
+the succession step: it sends the step's request to the model under its
+`model` grant and answers the model's summary.
 
 A plugin that declares `variant_of = "slot.<slot>"` is a candidate for that
 step wherever it is enabled: at the step, the gateway draws between the
@@ -1044,7 +1218,8 @@ drawn per session through the experimentation location
 `turn_graph.<branch>`, so experimentation off for that location keeps the
 path single.
 
-Revision 0 is the shipped graph: the succession step filled by the shipped
+Revision 0 is the shipped graph: the context-program step filled by the
+shipped `context-program` plugin and the succession step by the shipped
 `succession-summariser` plugin, every other slot the kernel's own. `POST
 /api/turn-graph/revisions` proposes
 a new one: it is validated against what is installed now — known slots,
@@ -1073,7 +1248,16 @@ the succession slot receives the summariser's request as those same fields. The 
 slot receives the turn's elements with their messages in the
 conversation's own shape and answers with messages handed back as given
 or composed afresh as `{ role, content }` text; a message in neither
-shape fails the slot and the kernel's assembly serves. A hook at
+shape fails the slot and the kernel's assembly serves. Under the `context`
+grant, `swage.context({ operation })` counts messages (`count_messages`),
+compacts history to a budget (`compact_history`) or runs the configured
+named assembly (`named_assembly`); the operations take messages in the
+same two shapes. What the turn's report records of the slot is the
+gateway's own account: each element as the gateway supplied it, a
+compaction only where the composition carries what the compaction
+answered, and the named assembly's account where the composition carries
+that assembly. A report the plugin returns chooses which supplied elements
+it carried and what it declared left out, and adds its warnings. A hook at
 `tool_call` sees the model's call before the dispatcher's gates, and a
 rewritten call meets them as if the model had raised it — an approval
 asked for is of the rewritten call, and the rewrite is recorded as

@@ -45,6 +45,9 @@ pub async fn archive_inactive_sessions(
         .storage
         .archive_inactive_sessions(inactive_before, &executing)
         .await?;
+    for &session_id in &archived {
+        crate::service::announce_session_updated(&state.broadcast, session_id);
+    }
     for session_id in &archived {
         state
             .storage
@@ -106,7 +109,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let mut config = swage_config::ResolvedConfig::default();
         config.sessions.archive_after_days = archive_after_days;
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -141,6 +144,7 @@ mod tests {
                 turn_id: None,
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "…".to_string(),
                 attachments: Vec::new(),
                 position: 0,
@@ -173,11 +177,17 @@ mod tests {
             .await
             .insert(busy, CancellationToken::new());
 
+        let mut signals = state.broadcast.subscribe();
         let archived = archive_inactive_sessions(&state, Utc::now())
             .await
             .expect("sweep");
 
         assert_eq!(archived, vec![stale]);
+        assert!(matches!(
+            signals.try_recv().unwrap(),
+            swage_protocol::client::websocket::ServerEvent::SessionUpdated { session_id }
+                if session_id == stale
+        ));
         let live: Vec<Uuid> = storage
             .list_recent_sessions(SessionListing::default())
             .await

@@ -1,4 +1,4 @@
-//! Parameter extraction and redaction utilities.
+//! Parameter extraction utilities.
 
 use serde_json::Value;
 use swage_core::ToolError;
@@ -44,40 +44,12 @@ pub fn require_param<'a>(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Redaction
-// ---------------------------------------------------------------------------
-
-/// Produce a copy of `params` with each key in `sensitive_keys` replaced by
-/// the literal string `"[REDACTED]"`.
-///
-/// Only top-level keys are redacted. Nested objects with the same key names
-/// are left untouched. Absent sensitive keys are silently skipped.
-///
-/// The redacted copy is used for logging and observability; the original
-/// `params` are passed through to the tool's `execute()` unchanged.
-pub fn redact_params(params: &Value, sensitive_keys: &[&str]) -> Value {
-    // If params is not an object there are no keys to redact — return as-is.
-    let Some(map) = params.as_object() else {
-        return params.clone();
-    };
-
-    let mut redacted = map.clone();
-    for key in sensitive_keys {
-        // Only redact keys that are actually present — absent keys are a no-op.
-        if redacted.contains_key(*key) {
-            redacted.insert((*key).to_string(), Value::String("[REDACTED]".into()));
-        }
-    }
-    Value::Object(redacted)
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::json;
     use swage_core::ToolError;
 
-    use super::{redact_params, require_param, require_str};
+    use super::{require_param, require_str};
 
     // -- require_str ----------------------------------------------------------
 
@@ -143,44 +115,5 @@ mod tests {
             }
             other => panic!("expected InvalidParameters, got: {other:?}"),
         }
-    }
-
-    // -- redact_params --------------------------------------------------------
-
-    #[test]
-    fn redact_params_replaces_sensitive_keys_with_placeholder() {
-        let params = json!({"api_key": "sk-secret", "query": "hello"});
-        let redacted = redact_params(&params, &["api_key"]);
-        assert_eq!(redacted["api_key"], Value::String("[REDACTED]".into()));
-        assert_eq!(redacted["query"], json!("hello"));
-    }
-
-    #[test]
-    fn redact_params_absent_key_produces_no_error() {
-        let params = json!({"query": "hello"});
-        // api_key is not present — redact should silently skip it.
-        let redacted = redact_params(&params, &["api_key"]);
-        assert_eq!(redacted["query"], json!("hello"));
-        assert!(redacted.get("api_key").is_none());
-    }
-
-    #[test]
-    fn redact_params_only_top_level_keys_redacted() {
-        // Nested keys with the same name must not be touched.
-        let params = json!({
-            "token": "top-level-secret",
-            "nested": {"token": "inner-value"}
-        });
-        let redacted = redact_params(&params, &["token"]);
-        assert_eq!(redacted["token"], Value::String("[REDACTED]".into()));
-        // Inner "token" must be untouched.
-        assert_eq!(redacted["nested"]["token"], json!("inner-value"));
-    }
-
-    #[test]
-    fn redact_params_non_sensitive_keys_intact() {
-        let params = json!({"a": 1, "b": "two", "c": [3]});
-        let redacted = redact_params(&params, &[]);
-        assert_eq!(redacted, params);
     }
 }

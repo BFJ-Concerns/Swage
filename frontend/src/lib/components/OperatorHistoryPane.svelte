@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { SETTINGS_LABELS } from "../settings-labels";
   import { fetchAuditEvents, fetchOperatorHistory } from "../api/operator";
   import type { OperatorHistoryResponse } from "../protocol/OperatorHistoryResponse";
   import type { AuditEventView } from "../protocol/AuditEventView";
@@ -26,7 +27,7 @@
     return JSON.stringify(state, null, 2);
   }
 
-  type ChangedField = { label: string; prior: string; next: string };
+  type ChangedField = { id: string; label: string; prior: string; next: string };
 
   function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -38,22 +39,57 @@
   }
 
   function formatValue(value: unknown): string {
-    if (value === undefined) return "unset";
-    return typeof value === "string" ? value : JSON.stringify(value);
+    if (value == null) return "unset";
+    return JSON.stringify(value);
   }
 
-  // The settings that differ between two recorded states, descending into
-  // nested objects so a nested change is named by its own path. Arrays and
-  // scalars compare whole; a redacted credential compares as its recorded
-  // marker, so it never reads as changed unless the record says it did.
-  function changedFields(prior: unknown, next: unknown, path: string[] = []): ChangedField[] {
-    if (isRecord(prior) && isRecord(next)) {
-      const keys = [...new Set([...Object.keys(prior), ...Object.keys(next)])].sort();
-      return keys.flatMap((key) => changedFields(prior[key], next[key], [...path, key]));
+  function fieldLabel(path: string[]): string {
+    // Dictionary keys are identities, even when they contain dots or underscores.
+    const named = ["providers", "models", "generation_presets"].includes(path[0]) && path.length > 1;
+    const lookup = path.map((segment, index) => named && index === 1 ? "*" : segment);
+    if (lookup[0] === "context" && lookup[1] === "assembly") lookup.splice(1, 1);
+    for (let length = lookup.length; length > 0; length--) {
+      const label = SETTINGS_LABELS[lookup.slice(0, length).join(".")];
+      if (label) {
+        const identity = named ? [labelSegment(path[0]), path[1]]
+          : lookup[0] === "tool_runtime" && lookup[1] === "search" && length > 2
+            ? [SETTINGS_LABELS["tool_runtime.search"]] : [];
+        return [...identity, label, ...lookup.slice(length).map(labelSegment)].join(" › ");
+      }
     }
-    if (path.length > 0 && JSON.stringify(prior) === JSON.stringify(next)) return [];
-    if (path.length === 0) return changedFields(isRecord(prior) ? prior : {}, isRecord(next) ? next : {}, path);
-    return [{ label: path.map(labelSegment).join(" › "), prior: formatValue(prior), next: formatValue(next) }];
+    return path.map((segment, index) => named && index === 1 ? segment : labelSegment(segment)).join(" › ") || "Value";
+  }
+
+  // Objects compare by field, including when the other snapshot is absent.
+  // Arrays and scalars compare whole; redacted values stay as recorded.
+  function changedFields(prior: unknown, next: unknown, path: string[] = []): ChangedField[] {
+    if (JSON.stringify(prior ?? null) === JSON.stringify(next ?? null)) return [];
+    if ((isRecord(prior) && (isRecord(next) || next == null)) ||
+        (isRecord(next) && prior == null)) {
+      const before = isRecord(prior) ? prior : {};
+      const after = isRecord(next) ? next : {};
+      const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+      if (keys.length > 0) {
+        return keys.flatMap((key) => changedFields(before[key], after[key], [...path, key]));
+      }
+    }
+    const priorValue = formatValue(prior);
+    const nextValue = formatValue(next);
+    return [{ id: JSON.stringify(path), label: fieldLabel(path), prior: priorValue, next: nextValue }];
+  }
+
+  // What a tool call or completion gave back, as the text it was, rather
+  // than escaped inside the event's JSON detail.
+  function returnedText(metadata: unknown): string | null {
+    if (!isRecord(metadata)) return null;
+    if (typeof metadata.result === "string") return metadata.result;
+    if (typeof metadata.error === "string" && metadata.error) return metadata.error;
+    const parts: string[] = [];
+    if (typeof metadata.content === "string" && metadata.content) parts.push(metadata.content);
+    if (Array.isArray(metadata.tool_calls) && metadata.tool_calls.length > 0) {
+      parts.push(formatState(metadata.tool_calls));
+    }
+    return parts.length > 0 ? parts.join("\n\n") : null;
   }
 
   function auditFilter(before?: AuditEventCursor) {
@@ -105,7 +141,7 @@
 <aside class="history-pane" aria-label="Operator history">
   <header>
     <p class="eyebrow">Recorded history</p>
-    <h2>Configuration and experiment activity</h2>
+    <h2>Audit events and saved turn context</h2>
     <p>Read-only records from the local audit trail and saved turn context.</p>
   </header>
 
@@ -134,12 +170,19 @@
     {:else}
       <div class="entries">
         {#each auditEvents as event (event.id)}
+          {@const returned = returnedText(event.metadata)}
           <article class="history-entry audit-entry">
             <div class="entry-heading">
               <strong>{event.event_kind} · {event.entity_kind} · {event.entity_id}</strong>
               <time datetime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time>
             </div>
             <p>{event.summary} · session <span class="mono">{event.session_id ?? "none"}</span></p>
+            {#if returned !== null}
+              <details class="returned">
+                <summary>What it returned</summary>
+                <pre>{returned}</pre>
+              </details>
+            {/if}
             <details>
               <summary>Recorded detail</summary>
               <pre>{formatState(event.metadata)}</pre>
@@ -182,7 +225,7 @@
                 <table class="changed-fields">
                   <thead><tr><th scope="col">Setting</th><th scope="col">Prior</th><th scope="col">New</th></tr></thead>
                   <tbody>
-                    {#each changes as change (change.label)}
+                    {#each changes as change (change.id)}
                       <tr><th scope="row">{change.label}</th><td>{change.prior}</td><td>{change.next}</td></tr>
                     {/each}
                   </tbody>

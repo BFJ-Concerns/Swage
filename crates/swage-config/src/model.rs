@@ -13,6 +13,10 @@ use swage_core::ApprovalTimeoutPolicy;
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// How requests from beyond loopback are gated: `token` (the shipped
+    /// default) admits paired clients only, `warn` admits and logs, `off`
+    /// admits. Loopback is never gated.
+    pub access: AccessGateMode,
 }
 
 impl Default for ServerConfig {
@@ -20,6 +24,7 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 3000,
+            access: AccessGateMode::Token,
         }
     }
 }
@@ -41,9 +46,27 @@ pub enum Protocol {
     Codex,
 }
 
+/// What a provider does with a request that would carry its credential over
+/// plain `http://` to an address that is not loopback. Loopback endpoints —
+/// a local model server on this machine — are never plaintext in this sense:
+/// the bytes do not leave the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaintextCredentialPolicy {
+    /// No request is sent: the provider refuses every call with the reason.
+    Refuse,
+    /// Requests are sent after one warning per provider in the audit record.
+    #[default]
+    Warn,
+    /// Requests are sent and nothing is recorded.
+    Allow,
+}
+
 /// Connection settings for one configured LLM provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderEndpointConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub protocol: Protocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_secret_ref: Option<String>,
@@ -63,11 +86,16 @@ pub struct ProviderEndpointConfig {
     /// unknown rather than guessing one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_staleness_threshold_ms: Option<u64>,
+    /// What happens when a request would carry this provider's credential in
+    /// plaintext to a remote address; `warn` unless the entry says otherwise.
+    #[serde(default)]
+    pub plaintext_credentials: PlaintextCredentialPolicy,
 }
 
 impl Default for ProviderEndpointConfig {
     fn default() -> Self {
         Self {
+            display_name: None,
             protocol: Protocol::OpenAi,
             api_key_secret_ref: None,
             api_key_env: None,
@@ -75,6 +103,7 @@ impl Default for ProviderEndpointConfig {
             command: None,
             state_dir: None,
             worker_staleness_threshold_ms: None,
+            plaintext_credentials: PlaintextCredentialPolicy::Warn,
         }
     }
 }
@@ -260,6 +289,16 @@ impl Default for ToolPermissionConfig {
             "session-authoring".to_string(),
             vec!["session_values".to_string()],
         );
+        // Authoring the durable definitions — the agents a person can pick
+        // and the task contracts a child runs under — as one grantable
+        // power, so an agent can be kept from reshaping who runs with what.
+        bundles.insert(
+            "definition-authoring".to_string(),
+            vec![
+                "agent_definition".to_string(),
+                "task_definition".to_string(),
+            ],
+        );
         // Knowledge-base access at registry grain: reading the topic's
         // gathered evidence and writing captures into it are separate powers,
         // so gathering workers can hold write without every reader gaining it.
@@ -306,23 +345,13 @@ impl Default for ToolPermissionConfig {
     }
 }
 
-/// Tools that act outside the conversation — running commands or code,
-/// writing files, operating a page — and so prompt before each call in an
-/// attended session. Unattended sessions run on their grants alone.
+/// Tools that run commands or code or write files, and so prompt before each
+/// call in an attended session. Unattended sessions run on their grants alone.
 fn default_high_risk_tool_approvals() -> Vec<RequireApprovalEntry> {
-    [
-        "shell",
-        "file_edit",
-        "file_write",
-        "python_execute",
-        "browser_click",
-        "browser_type",
-        "browser_select",
-        "browser_scroll",
-    ]
-    .into_iter()
-    .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
-    .collect()
+    ["shell", "file_edit", "file_write", "python_execute"]
+        .into_iter()
+        .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
+        .collect()
 }
 
 /// Settings for the gateway-hosted browser tools.
@@ -362,6 +391,8 @@ impl Default for BrowserToolConfig {
 /// Tool execution settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolConfig {
+    /// Identical failing calls permitted within one unattended turn.
+    pub max_identical_failures: u32,
     /// Maximum seconds a shell command may run before being killed.
     pub shell_timeout_secs: u64,
     /// Python execution settings shared by python-backed features.
@@ -383,6 +414,7 @@ pub struct ToolConfig {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
+            max_identical_failures: 3,
             shell_timeout_secs: 30,
             python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 100_000,
@@ -472,8 +504,12 @@ pub use swage_protocol::client::settings::ObservabilityConfig;
 pub struct ExperimentationConfig {
     /// Master switch for every experimental variant decision.
     ///
-    /// When false, variant selection helpers must return the default
-    /// implementation and record, at most, that experimentation was disabled.
+    /// Binds the selections made after it is read: when false, a location
+    /// reaching its selection point serves its default implementation and
+    /// records only that experimentation was disabled. A session or task
+    /// that has already recorded a variant keeps serving it for its whole
+    /// life — one draw serves that session or task — so turning the switch
+    /// off changes nothing already drawn.
     #[serde(default = "default_experimentation_enabled")]
     pub enabled: bool,
     /// Per-location controls keyed by stable runtime location id.
@@ -642,7 +678,9 @@ pub struct ContextTransferTargetConfig {
     /// For `Explicit` mode: which context element types to include.
     #[serde(default)]
     pub allowed_fields: Vec<ContextTransferField>,
-    /// For `Summary` mode: maximum token budget for the compacted summary.
+    /// For `Summary` mode: the length the summary is asked to keep to, in
+    /// tokens. The summariser is told it as a word count; nothing cuts a
+    /// summary that runs over.
     pub summary_budget: Option<u32>,
 }
 
@@ -664,7 +702,8 @@ pub struct ContextTransferConfig {
     /// For `Explicit` mode: default allowed fields.
     #[serde(default)]
     pub allowed_fields: Vec<ContextTransferField>,
-    /// For `Summary` mode: default token budget.
+    /// For `Summary` mode: the default length the summary is asked to keep
+    /// to, in tokens.
     pub summary_budget: Option<u32>,
     /// Per-target overrides keyed by recipient agent_id.
     #[serde(default)]
@@ -750,7 +789,8 @@ impl Default for SchedulingConfig {
 
 // Declared once in swage-protocol: the wire type and the resolved config
 // type are one definition, with the partial, schema and semantics beside it.
-pub use swage_protocol::client::settings::{MemoryConfig, SessionsConfig};
+pub use swage_protocol::client::access::AccessGateMode;
+pub use swage_protocol::client::settings::{AttachmentsConfig, MemoryConfig, SessionsConfig};
 
 /// Model routes for voice. Voice speaks only to the default provider's
 /// endpoint; each id is the model that endpoint serves for that audio API.
@@ -865,6 +905,8 @@ pub struct ResolvedConfig {
     pub sessions: SessionsConfig,
     /// `[memory]` — when the curator passes over an attended conversation.
     pub memory: MemoryConfig,
+    /// Image reference schemes admitted before provider capability checks.
+    pub attachments: AttachmentsConfig,
     /// Model routes for transcription and speech synthesis.
     pub voice: VoiceConfig,
     /// Named generation parameter presets available to model entries.
@@ -873,6 +915,10 @@ pub struct ResolvedConfig {
     pub channels: ChannelsConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
+    /// Source level of each instruction file or definition overlay.
+    /// Runtime metadata retained with the text, never reconstructed from it.
+    #[serde(skip)]
+    pub instruction_sources: Vec<HierarchyLevel>,
     /// When true, the entire permission and approval system is bypassed:
     /// tool allow/deny lists are ignored, `require_approval` gates do not
     /// fire, and out-of-workspace location prompts are auto-approved. The
@@ -1416,16 +1462,7 @@ timeout_policy = "reject"
                 .iter()
                 .map(RequireApprovalEntry::tool_name)
                 .collect::<Vec<_>>(),
-            vec![
-                "shell",
-                "file_edit",
-                "file_write",
-                "python_execute",
-                "browser_click",
-                "browser_type",
-                "browser_select",
-                "browser_scroll"
-            ]
+            vec!["shell", "file_edit", "file_write", "python_execute"]
         );
     }
 
@@ -1514,6 +1551,7 @@ timeout_policy = "reject"
         bundles.insert("safe".to_string(), vec!["echo".into()]);
 
         let original = ToolConfig {
+            max_identical_failures: 3,
             shell_timeout_secs: 60,
             python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 50_000,

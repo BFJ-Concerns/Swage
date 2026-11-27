@@ -35,9 +35,58 @@ pub const LOCATION_CONTEXT_ASSEMBLY: &str = "context.assembly";
 pub const LOCATION_WORKING_NORMS: &str = "context.working_norms";
 pub const LOCATION_TASK_PROMPT: &str = "task.prompt";
 
+/// The closing-account request: the text that asks the model for a final
+/// account when its last round after tool rounds returns none. The authored
+/// default (`swage_agent::closing_account::CLOSING_ACCOUNT_REQUEST`) is the
+/// first variant; a second sets `AgentConfig::closing_account_request`.
+pub const LOCATION_CLOSING_ACCOUNT_REQUEST: &str = "turn.closing_account_request";
+
 /// The memory curator's prompt: the instructions every curation pass runs
 /// under. The authored default is the first variant.
 pub const LOCATION_MEMORY_CURATOR_PROMPT: &str = "prompts.memory_curator";
+
+/// The succession summariser's instruction: the text the hand-over notes
+/// are written under when a session's history outgrows its room or keeps
+/// hitting walls. Drawn when a summary is first asked for, never before, so
+/// a session that never summarises holds no selection. The authored default
+/// is the first variant.
+pub const LOCATION_SUCCESSION_SUMMARY_PROMPT: &str = "prompts.succession_summary";
+
+/// The delivered-material frame: the wording around material nobody in the
+/// conversation wrote — a delegated agent's result, a platform notice — when
+/// it reaches the model. The authored frame is the first variant; a session
+/// draws once, and its history rebuild, its agent's immediate results and its
+/// result read-backs all serve the drawn frame.
+pub const LOCATION_DELIVERED_MATERIAL_FRAME: &str = "prompts.delivered_material_frame";
+
+/// The registered delivered-material frames, by variant name.
+fn delivered_material_frames() -> [(&'static str, swage_core::DeliveredMaterialFrame); 1] {
+    [("authored", swage_core::DeliveredMaterialFrame::authored())]
+}
+
+/// Select and record the delivered-material frame a session's turn serves.
+pub async fn select_delivered_material_frame(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Option<Uuid>,
+) -> Result<swage_core::DeliveredMaterialFrame, VariantSelectionError> {
+    let frames = delivered_material_frames();
+    let names = frames.each_ref().map(|(name, _)| *name);
+    let decision = select_session_variant(
+        state,
+        &state.active_config().experimentation,
+        LOCATION_DELIVERED_MATERIAL_FRAME,
+        &names,
+        frames[0].0,
+        session_id,
+        turn_id,
+    )
+    .await?;
+    Ok(frames
+        .into_iter()
+        .find_map(|(name, frame)| (name == decision.variant).then_some(frame))
+        .unwrap_or_default())
+}
 
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
@@ -59,7 +108,7 @@ pub enum SelectionReason {
 }
 
 /// The outcome of one variant selection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VariantDecision {
     pub variant: String,
     pub reason: SelectionReason,

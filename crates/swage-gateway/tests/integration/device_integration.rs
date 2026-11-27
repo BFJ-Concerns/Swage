@@ -113,7 +113,7 @@ async fn start_test_server(
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let config = swage_config::ResolvedConfig::default();
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
@@ -631,6 +631,64 @@ async fn a_device_with_the_wrong_token_is_rejected_and_never_listed_as_connected
     );
 }
 
+/// A gateway bound beyond loopback admits paired clients only, but a device
+/// authenticates its link with its own registered credential: it dials in
+/// from another machine without the gateway's token and is connected.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_dials_a_gated_lan_binding_with_its_own_credential() {
+    use axum::{extract::ConnectInfo, middleware};
+    use swage_gateway::access_gate::AccessGate;
+
+    let _guard = with_secret_env();
+    let workspace = tempfile::TempDir::new().unwrap();
+    let config_root = tempfile::TempDir::new().unwrap();
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let mut state = AppState::for_test(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(ChannelProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    state.access_gate = Arc::new(AccessGate::for_binding(config_root.path(), "0.0.0.0").unwrap());
+    // The operator registers and reads presence from the gateway's machine;
+    // the device's own link arrives from another address on the network.
+    let router = build_router(state.clone()).layer(middleware::from_fn(
+        |mut request: axum::extract::Request, next: middleware::Next| async move {
+            let peer = if request.uri().path() == swage_device::CONNECT_PATH {
+                "192.0.2.20:4567"
+            } else {
+                "127.0.0.1:4567"
+            };
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            next.run(request).await
+        },
+    ));
+    let (addr, _server) = start_live_server(router).await;
+    let shared_token_secret_ref = create_secret_ref(&state, "LAN device", "lan-secret").await;
+    DeviceConnection::register(
+        &format!("http://{addr}"),
+        &RegisterDeviceRequest {
+            device_id: "lan-device".to_string(),
+            label: None,
+            kind: "attached_device".to_string(),
+            shared_token_secret_ref,
+            workspace_root: workspace.path().to_string_lossy().into_owned(),
+            workspace_roots: vec![],
+        },
+    )
+    .await
+    .unwrap();
+
+    let (shutdown, task) = dial_device(addr, "lan-device", "lan-secret", vec![], workspace.path());
+    wait_for_device_state(addr, "lan-device", "connected").await;
+    shutdown.cancel();
+    task.await.unwrap().unwrap();
+}
+
 async fn run_transport_backend_round_trip(
     backend_kind: DeviceKind,
     backend_label: &str,
@@ -722,7 +780,7 @@ async fn a_registered_device_reconnects_to_a_restarted_gateway_and_serves_it() {
 
     // First life of the gateway: register, dial in, connected.
     let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(ChannelProvider::new(vec![])),
@@ -764,7 +822,7 @@ async fn a_registered_device_reconnects_to_a_restarted_gateway_and_serves_it() {
     // Second life on the same address, from the same store: the device's
     // redial finds it, advertises again, and serves it.
     let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
-    let restarted = AppState::new(
+    let restarted = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(ChannelProvider::new(vec![])),

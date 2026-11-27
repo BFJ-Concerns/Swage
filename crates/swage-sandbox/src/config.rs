@@ -13,6 +13,11 @@ use thiserror::Error;
 /// Errors that can occur when building a [`SandboxConfig`].
 #[derive(Debug, Error)]
 pub enum SandboxConfigError {
+    #[error("cannot create tool-output directory {path}: {source}")]
+    OutputDirectory {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// A required field was not provided.
     #[error("required field not set: {field}")]
     MissingField { field: &'static str },
@@ -30,6 +35,8 @@ pub enum SandboxConfigError {
 pub struct SandboxConfig {
     /// The agent's working directory — read-write inside the sandbox.
     pub working_directory: PathBuf,
+    /// Runtime output location carried to the child independently of its CWD.
+    pub tool_output_location: Option<swage_tool::context::ToolOutputLocation>,
     /// Additional read-only bind mounts (e.g., topic source, shared libraries).
     pub read_only_mounts: Vec<PathBuf>,
     /// Additional read-write bind mounts (e.g., output directory).
@@ -42,6 +49,8 @@ pub struct SandboxConfig {
     pub shutdown_grace_period: Duration,
     /// Per-tool-call IPC timeout.
     pub tool_call_timeout: Duration,
+    /// Session tool settings carried to the child through the sandbox configuration.
+    pub tool_runtime: Option<swage_protocol::client::settings::ToolRuntimeSettings>,
     /// Per-LLM-request IPC timeout.
     pub llm_request_timeout: Duration,
 }
@@ -63,6 +72,7 @@ impl SandboxConfig {
 /// must be set explicitly — there is no safe default for where the agent runs.
 pub struct SandboxConfigBuilder {
     working_directory: Option<PathBuf>,
+    tool_output_location: Option<swage_tool::context::ToolOutputLocation>,
     read_only_mounts: Vec<PathBuf>,
     read_write_mounts: Vec<PathBuf>,
     landlock_read_paths: Vec<PathBuf>,
@@ -72,6 +82,7 @@ pub struct SandboxConfigBuilder {
     shutdown_grace_period: Duration,
     // 30 second default — tools that run external commands need headroom.
     tool_call_timeout: Duration,
+    tool_runtime: Option<swage_protocol::client::settings::ToolRuntimeSettings>,
     // 60 second default — LLM requests can take a while for large completions.
     llm_request_timeout: Duration,
 }
@@ -81,14 +92,25 @@ impl SandboxConfigBuilder {
     pub fn new() -> Self {
         Self {
             working_directory: None,
+            tool_output_location: None,
             read_only_mounts: Vec::new(),
             read_write_mounts: Vec::new(),
             landlock_read_paths: Vec::new(),
             landlock_write_paths: Vec::new(),
             shutdown_grace_period: Duration::from_secs(5),
             tool_call_timeout: Duration::from_secs(30),
+            tool_runtime: None,
             llm_request_timeout: Duration::from_secs(60),
         }
+    }
+
+    /// Sets runtime-owned storage for tool-output artefacts.
+    pub fn tool_output_location(
+        mut self,
+        location: swage_tool::context::ToolOutputLocation,
+    ) -> Self {
+        self.tool_output_location = Some(location);
+        self
     }
 
     /// Sets the agent's working directory (required).
@@ -133,6 +155,15 @@ impl SandboxConfigBuilder {
         self
     }
 
+    /// Pass the session's existing tool settings to the child process.
+    pub fn tool_runtime(
+        mut self,
+        settings: swage_protocol::client::settings::ToolRuntimeSettings,
+    ) -> Self {
+        self.tool_runtime = Some(settings);
+        self
+    }
+
     /// Overrides the per-LLM-request IPC timeout (default: 60s).
     pub fn llm_request_timeout(mut self, duration: Duration) -> Self {
         self.llm_request_timeout = duration;
@@ -151,12 +182,24 @@ impl SandboxConfigBuilder {
 
         Ok(SandboxConfig {
             working_directory,
+            tool_output_location: self.tool_output_location,
             read_only_mounts: self.read_only_mounts,
             read_write_mounts: self.read_write_mounts,
             landlock_read_paths: self.landlock_read_paths,
             landlock_write_paths: self.landlock_write_paths,
             shutdown_grace_period: self.shutdown_grace_period,
-            tool_call_timeout: self.tool_call_timeout,
+            // The shell owns its deadline. Allow its process cleanup and reply
+            // to finish before treating silence as a broken IPC connection.
+            tool_call_timeout: self.tool_runtime.as_ref().map_or(
+                self.tool_call_timeout,
+                |settings| {
+                    self.tool_call_timeout.max(
+                        Duration::from_secs(settings.shell_timeout_secs)
+                            .saturating_add(self.shutdown_grace_period),
+                    )
+                },
+            ),
+            tool_runtime: self.tool_runtime,
             llm_request_timeout: self.llm_request_timeout,
         })
     }
@@ -297,6 +340,7 @@ mod tests {
             Err(SandboxConfigError::MissingField { field }) => {
                 assert_eq!(field, "working_directory");
             }
+            Err(error) => panic!("expected Err(MissingField), got {error}"),
             Ok(_) => panic!("expected Err(MissingField), but build succeeded"),
         }
     }

@@ -38,7 +38,8 @@ afterEach(async () => {
 it("installs a socket refusal account and renders its usable Retry control without refetching", async () => {
   vi.stubGlobal("WebSocket", Socket);
   vi.mocked(getConversation).mockResolvedValue({
-    id: "conv-1", agent_id: "gateway", topic_id: "topic-1", root_thread_id: "root-1",
+    id: "conv-1", agent_id: "gateway",
+    agent_display_name: "Swage default", topic_id: "topic-1", root_thread_id: "root-1",
     created_at: "2026-10-04T20:00:00Z", last_activity: "2026-10-04T20:00:00Z",
     messages: [{ role: "user", origin: "user", content: "Read a harmless file.",
       timestamp: "2026-10-04T20:00:00Z", turn_id: "turn-1", thread_id: "root-1" }],

@@ -30,10 +30,15 @@ impl Tool for DelegateTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a task to another agent. Use completion_mode=\"wait\" when \
-         the next parent step needs the delegate's answer. Use \
-         completion_mode=\"detach\" to start independent work and continue \
-         this turn with a durable reference to the delegated work. Name a \
+        "Hand one self-contained task to another agent, which works on it in a \
+         session of its own and answers when it is done. The child starts from \
+         `task`. Of this conversation it sees only what the installation is set \
+         to pass it, which may be nothing and which no argument here changes, so \
+         `task` carries everything the child needs, the background as well as \
+         the job. \
+         `completion_mode` decides whether this turn waits for the child's \
+         answer or carries on beside it. A job of many agent calls that has to \
+         survive an interruption belongs to `workflow_run`. Name a \
          child to come back to it later with its context intact."
     }
 
@@ -43,11 +48,11 @@ impl Tool for DelegateTool {
             "properties": {
                 "target_agent": {
                     "type": "string",
-                    "description": "The agent ID to delegate work to."
+                    "description": "The agent the child runs as, by its agent definition's `id`."
                 },
                 "task": {
                     "type": "string",
-                    "description": "Task description for the delegate agent."
+                    "description": "The whole brief for the child: what is wanted, how the result will be judged, what to send back, and the background it needs to do it. Whatever the child has to know of this conversation is written out here: it may see none of it, and a reference to something said earlier would then mean nothing to it."
                 },
                 "task_definition": {
                     "type": "string",
@@ -55,25 +60,18 @@ impl Tool for DelegateTool {
                 },
                 "skills": {
                     "type": "array",
-                    "description": "Named skills to activate for this delegated child.",
+                    "description": "Skills to activate for the child, by the names the skill catalogue lists.",
                     "items": { "type": "string" }
                 },
                 "child": {
                     "type": "string",
                     "description": "A name for this child. Give the same name in a later delegate call to continue with that child rather than starting a fresh one: it keeps everything it was told and did before. Its agent, skills, and working directory are fixed by the first call that names it."
                 },
-                "context": {
-                    "type": "array",
-                    "description": "Optional context messages to transfer to the delegate.",
-                    "items": {
-                        "type": "object"
-                    }
-                },
                 "completion_mode": {
                     "type": "string",
                     "enum": ["wait", "detach"],
                     "default": "wait",
-                    "description": "Choose \"wait\" when this turn needs the delegate's result before continuing. Choose \"detach\" for independent work; the tool returns a durable delegate_message_id and child session/thread references while the delegate continues."
+                    "description": "`wait`, the default, when the next step needs the child's answer: this turn stops until the child finishes, and the call returns what it answered, with an `incomplete_reason` where the child was cut short. `detach` for work that can go on beside this turn: the call returns at once with references to the child's work (`delegate_message_id`, `child_session_id`, `child_thread_id`), and the child's result reaches this conversation when it is ready."
                 },
                 "cwd": {
                     "type": "string",
@@ -108,7 +106,19 @@ impl Tool for DelegateTool {
         true
     }
 
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        if params.get("context").is_some() {
+            return Err(ToolError::InvalidParameters {
+                name: DELEGATE_TOOL_NAME.to_string(),
+                message: "Put background for the child in task. The context argument is no longer accepted."
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     async fn execute(&self, params: Value, _ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        self.validate_call(&params)?;
         // Parse required fields — the schema validator has already checked
         // these, but defensive parsing avoids panics if called directly.
         let target_agent_id = params
@@ -129,7 +139,6 @@ impl Tool for DelegateTool {
             })?
             .to_string();
 
-        let context = params.get("context").cloned();
         let task_definition = params
             .get("task_definition")
             .and_then(Value::as_str)
@@ -189,7 +198,6 @@ impl Tool for DelegateTool {
                 target_agent_id,
                 task,
                 task_definition,
-                context,
                 cwd,
                 isolation,
                 skills,
@@ -237,7 +245,6 @@ mod tests {
             ToolError::RequiresDelegation { request } => {
                 assert_eq!(request.target_agent_id, "reviewer");
                 assert_eq!(request.task, "Review this code for correctness");
-                assert!(request.context.is_none());
                 assert_eq!(request.completion_mode, DelegateCompletionMode::Wait);
             }
             other => panic!("expected RequiresDelegation, got: {other:?}"),
@@ -353,7 +360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegate_tool_with_context() {
+    async fn delegate_tool_sends_callers_with_context_to_task() {
         let tool = DelegateTool;
         let ctx = MockToolContext::new("test-agent", "session-1");
         let params = json!({
@@ -363,12 +370,10 @@ mod tests {
         });
 
         let result = tool.execute(params, &ctx).await;
-        match result.unwrap_err() {
-            ToolError::RequiresDelegation { request } => {
-                assert!(request.context.is_some());
-            }
-            other => panic!("expected RequiresDelegation, got: {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            Err(ToolError::InvalidParameters { message, .. }) if message.contains("task")
+        ));
     }
 
     #[tokio::test]

@@ -73,7 +73,6 @@ pub struct ContextProgramOutput {
     #[ts(type = "unknown[]")]
     pub messages: Vec<Value>,
     #[serde(default)]
-    #[ts(optional)]
     pub report: Option<crate::client::context::AssemblyReport>,
 }
 

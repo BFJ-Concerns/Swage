@@ -118,6 +118,44 @@ pub(crate) async fn session_topic(
     Ok((topic.id, topic.location(), capture_scope))
 }
 
+/// Write a knowledge-base write to the audit trail, attributed to the calling
+/// session: a recorded observation, a curation assertion, a citation. The
+/// write itself has landed when this runs, so a failed record is reported as
+/// exactly that — the knowledge is kept and the model is told the trail
+/// missed it — never as the write failing, which would invite a duplicate.
+async fn record_knowledge_event(
+    tool: &str,
+    state: &AppState,
+    ctx: &dyn ToolContext,
+    entity_kind: &str,
+    entity_id: Uuid,
+    event_kind: &str,
+    summary: String,
+    metadata: Value,
+) -> Result<(), ToolError> {
+    state
+        .storage
+        .create_audit_event(swage_storage::NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: ctx.session_id().parse::<Uuid>().ok(),
+            entity_kind: entity_kind.to_owned(),
+            entity_id: entity_id.to_string(),
+            event_kind: event_kind.to_owned(),
+            summary,
+            metadata,
+        })
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            failed(
+                tool,
+                format!(
+                    "{entity_kind} {entity_id} was written, but recording it in the audit trail failed: {error}"
+                ),
+            )
+        })
+}
+
 // ---------------------------------------------------------------------------
 // knowledge_search
 // ---------------------------------------------------------------------------
@@ -440,6 +478,34 @@ impl Tool for KnowledgeRecordTool {
             None => None,
         };
 
+        record_knowledge_event(
+            RECORD_TOOL,
+            state,
+            ctx,
+            "observation",
+            observation.id,
+            "knowledge_recorded",
+            format!(
+                "observation recorded from {}",
+                observation
+                    .origin
+                    .url
+                    .as_deref()
+                    .or(observation.origin.local_path.as_deref())
+                    .unwrap_or("an unnamed origin")
+            ),
+            json!({
+                "topic_id": topic_id,
+                "origin": observation.origin,
+                "body_sha256": observation.body_sha256,
+                "body_bytes": observation.body_bytes,
+                "media_type": observation.media_type,
+                "searchable": extraction.is_some(),
+                "agent_id": ctx.agent_id(),
+            }),
+        )
+        .await?;
+
         Ok(json!({
             "observation_id": observation.id,
             "version": extraction.as_ref().map(|e| e.version),
@@ -474,7 +540,7 @@ struct RetainedFetch {
 /// Read the body a url_fetch retained, through the stored call the
 /// reference names: the call must be a url_fetch in this conversation, its
 /// result must name the retained file, and the file is read only inside the
-/// working directory it was written under.
+/// current workspace or managed tool-output directory.
 async fn retained_fetch(
     ctx: &dyn ToolContext,
     reference: &str,
@@ -524,17 +590,17 @@ async fn retained_fetch(
         .ok_or_else(|| failed(RECORD_TOOL, "the referenced fetch recorded no URL"))?
         .to_owned();
     let path = validate_path(ctx.working_directory(), relative)
+        .or_else(|workspace_error| {
+            ctx.tool_output_directory()
+                .ok_or(workspace_error)
+                .and_then(|directory| validate_path(directory, relative))
+        })
         .map_err(|error| failed(RECORD_TOOL, error))?;
-    // The path is relative to the working directory the fetch ran under —
-    // the same directory for a session unless its workspace changed since —
-    // and its turn and call ids make a same-named file elsewhere impossible
-    // in practice; a body not found here was fetched under another
-    // directory and is fetched again, never guessed at.
     let bytes = tokio::fs::read(&path).await.map_err(|error| {
         failed(
             RECORD_TOOL,
             format!(
-                "the fetch's retained body is not under this session's current working directory \
+                "the fetch's retained body is not available in this session's workspace or output storage \
                  ({error}); if the workspace changed since the fetch, fetch the page again"
             ),
         )
@@ -647,6 +713,27 @@ impl Tool for KnowledgeCurateTool {
             .await
             .map_err(|error| failed(CURATE_TOOL, error))?;
 
+        record_knowledge_event(
+            CURATE_TOOL,
+            state,
+            ctx,
+            "curation_assertion",
+            assertion.id,
+            "knowledge_curated",
+            format!(
+                "observation {} judged {}",
+                assertion.observation_id, assertion.kind
+            ),
+            json!({
+                "topic_id": topic_id,
+                "observation_id": assertion.observation_id,
+                "kind": assertion.kind.to_string(),
+                "target_observation_id": assertion.target_observation_id,
+                "agent_id": ctx.agent_id(),
+            }),
+        )
+        .await?;
+
         Ok(json!({
             "assertion_id": assertion.id,
             "observation_id": assertion.observation_id,
@@ -726,6 +813,25 @@ impl Tool for KnowledgeCiteTool {
             })
             .await
             .map_err(|error| failed(CITE_TOOL, error))?;
+
+        record_knowledge_event(
+            CITE_TOOL,
+            state,
+            ctx,
+            "citation",
+            citation.id,
+            "knowledge_cited",
+            format!("observation {} cited", citation.observation_id),
+            json!({
+                "topic_id": topic_id,
+                "observation_id": citation.observation_id,
+                "version": citation.derivation_version,
+                "start_offset": citation.start_offset,
+                "end_offset": citation.end_offset,
+                "agent_id": ctx.agent_id(),
+            }),
+        )
+        .await?;
 
         Ok(json!({
             "citation_id": citation.id,
@@ -1115,7 +1221,7 @@ mod tests {
     /// and text the platform derived from them; what the model types in is
     /// searchable at most, and a quote lands only in platform-derived text.
     #[tokio::test(flavor = "multi_thread")]
-    async fn record_from_a_fetch_captures_the_retained_bytes_and_derives_the_citable_text() {
+    async fn regression_record_fetch_from_managed_output_with_attached_workspace() {
         use swage_storage::model::{NewThread, NewToolCall, NewTurn, TurnState};
         use swage_storage::{ThreadStore, ToolCallStore, TurnStore};
 
@@ -1152,16 +1258,33 @@ mod tests {
             .await
             .unwrap();
 
-        // The fetch the platform ran: its retained body on disk under the
-        // working directory, its stored call naming the file and the URL.
+        let output = tempfile::tempdir().unwrap();
+        let mut fetch_base =
+            swage_tool::context::MockToolContext::new("gateway", session.id.to_string());
+        fetch_base.working_directory = workspace.path().into();
+        fetch_base.turn_id = Some(fetch_turn.id);
+        fetch_base.call_id = Some("fetch-1".into());
+        let mut fetch_ctx = swage_tool::context::serialise_tool_context(&fetch_base);
+        fetch_ctx.tool_output_directory = Some(swage_tool::context::ToolOutputLocation {
+            directory: output.path().into(),
+        });
         let html =
             b"<html><body><h1>Borrowing</h1><p>The borrow checker was rewritten.</p></body></html>";
-        let relative = format!(".swage/tool-output/{}/fetch-1/raw-body.html", fetch_turn.id);
-        let absolute = workspace.path().join(&relative);
-        std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
-        std::fs::write(&absolute, html).unwrap();
+        let artifact =
+            crate::tool::workspace::tool_output_artifact_path(&fetch_ctx, "raw-body.html");
+        let mut writer =
+            crate::tool::workspace::create_tool_output_artifact(&fetch_ctx, &artifact.absolute)
+                .await
+                .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut writer, html)
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::flush(&mut writer).await.unwrap();
+        drop(writer);
+        let relative = artifact.reported;
         storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: fetch_turn.id,
                 agent_id: "gateway".into(),
                 call_id: "fetch-1".into(),
@@ -1204,6 +1327,8 @@ mod tests {
         let mut base = swage_tool::context::MockToolContext::new("gateway", session.id.to_string());
         base.turn_id = Some(current_turn.id);
         base.working_directory = workspace.path().to_path_buf();
+        let mut base = swage_tool::context::serialise_tool_context(&base);
+        base.tool_output_directory = fetch_ctx.tool_output_directory;
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let ctx = GatewayToolContext::new(
             &base,
@@ -1226,7 +1351,9 @@ mod tests {
         let captured = tool
             .execute(json!({"fetch_call": reference}), &ctx)
             .await
-            .expect("a fetch-bound capture");
+            .expect(
+                "a retained fetch in managed output must be capturable with an attached workspace",
+            );
         assert_eq!(captured["recorded"], true);
         assert_eq!(captured["searchable"], true);
         assert_eq!(captured["citable"], true);
@@ -1272,6 +1399,37 @@ mod tests {
         );
         assert!(!extraction.extracted_text.contains("<p>"));
         assert!(extraction.is_citable());
+
+        // General read approvals do not grant access to capture sources.
+        let mut approved_base = base.clone();
+        approved_base.tool_output_directory = None;
+        approved_base.allowed_paths.push(output.path().into());
+        let approved_ctx = GatewayToolContext::new(
+            &approved_base,
+            mpsc::unbounded_channel().0,
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        )
+        .with_app_state(Some(state.clone()));
+        let refused = tool
+            .execute(json!({"fetch_call": reference}), &approved_ctx)
+            .await;
+        assert!(
+            refused.is_err(),
+            "general approved paths must not widen capture access: {refused:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            let outside = root.path().join("outside.html");
+            std::fs::write(&outside, html).unwrap();
+            std::fs::remove_file(&artifact.absolute).unwrap();
+            std::os::unix::fs::symlink(&outside, &artifact.absolute).unwrap();
+            let refused = tool.execute(json!({"fetch_call": reference}), &ctx).await;
+            assert!(
+                refused.is_err(),
+                "a retained-body symlink must not escape capture roots: {refused:?}"
+            );
+        }
 
         // What the model types in is searchable at most: recorded as its
         // own words, and a quote cannot land in it.
@@ -1516,7 +1674,7 @@ mod tests {
             .unwrap();
 
         let provider = Arc::new(MockProvider::new(vec![]));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
@@ -1714,7 +1872,7 @@ mod tests {
             .await
             .unwrap();
         let provider = Arc::new(MockProvider::new(vec![]));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
@@ -1744,6 +1902,19 @@ mod tests {
         assert_eq!(result["start_offset"], json!("before ".len()));
         let citation_id = result["citation_id"].as_str().unwrap().parse().unwrap();
         assert!(storage.get_citation(citation_id).await.unwrap().is_some());
+        // The citation is an audit event of its own family, attributed to the
+        // session that cited and reachable by the citation's id.
+        let cited_events = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                entity_kind: Some("citation".into()),
+                entity_id: Some(citation_id.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(cited_events.len(), 1, "{cited_events:?}");
+        assert_eq!(cited_events[0].event_kind, "knowledge_cited");
+        assert!(cited_events[0].session_id.is_some());
 
         let fabricated = KnowledgeCiteTool
             .execute(
@@ -1824,7 +1995,7 @@ mod tests {
             .await
             .unwrap();
         let provider = Arc::new(MockProvider::new(vec![]));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
@@ -1873,5 +2044,94 @@ mod tests {
 
         let result = tool.execute(json!({"query": "anything"}), &ctx).await;
         assert!(matches!(result, Err(ToolError::ExecutionFailed { .. })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn knowledge_writes_are_audit_events_attributed_to_the_calling_session() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "researcher".into(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let base = swage_tool::context::MockToolContext::new("researcher", session.id.to_string());
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let ctx = GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        )
+        .with_app_state(Some(state));
+
+        let recorded = KnowledgeRecordTool
+            .execute(
+                json!({
+                    "content": "Prune apple trees in late winter while dormant.",
+                    "url": "https://example.test/pruning",
+                    "extracted_text": "Prune apple trees in late winter while dormant.",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let observation_id = recorded["observation_id"].as_str().unwrap().to_owned();
+        let curated = KnowledgeCurateTool
+            .execute(
+                json!({ "observation_id": observation_id, "kind": "stale" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let events = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(session.id),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let find = |kind: &str| {
+            events
+                .iter()
+                .find(|event| event.event_kind == kind)
+                .unwrap_or_else(|| panic!("no {kind} event attributed to the session: {events:?}"))
+        };
+        let recorded_event = find("knowledge_recorded");
+        assert_eq!(recorded_event.entity_kind, "observation");
+        assert_eq!(recorded_event.entity_id, observation_id);
+        assert_eq!(
+            recorded_event.metadata["origin"]["url"],
+            "https://example.test/pruning"
+        );
+        assert_eq!(recorded_event.metadata["searchable"], true);
+        let curated_event = find("knowledge_curated");
+        assert_eq!(curated_event.entity_kind, "curation_assertion");
+        assert_eq!(
+            curated_event.entity_id,
+            curated["assertion_id"].as_str().unwrap()
+        );
+        assert_eq!(curated_event.metadata["kind"], "stale");
+        // An observation is also reachable by its id as the entity.
+        let by_entity = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                entity_id: Some(observation_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_entity.len(), 1);
     }
 }

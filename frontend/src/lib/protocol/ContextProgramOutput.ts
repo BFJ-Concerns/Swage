@@ -4,4 +4,4 @@ import type { AssemblyReport } from "./AssemblyReport";
 /**
  * A context program's composition and optional account of that composition.
  */
-export type ContextProgramOutput = { messages: unknown[], report?: AssemblyReport, };
+export type ContextProgramOutput = { messages: unknown[], report?: AssemblyReport | null, };

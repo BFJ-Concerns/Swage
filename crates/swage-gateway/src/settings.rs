@@ -6,7 +6,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use crate::error::ApiError;
-use crate::secret::{CreateSecretRequest, RotateSecretRequest};
+use crate::secret::{CreateSecretRequest, PreparedCredentialWrites, parse_secret_reference};
 use crate::state::AppState;
 
 pub use swage_protocol::client::settings::{
@@ -47,6 +47,8 @@ async fn write_config_atomically(path: &std::path::Path, body: &str) -> Result<(
             "config path has no valid file name".to_string(),
         ));
     }
+    #[cfg(test)]
+    config_write_pause::wait(path).await;
     let path = path.to_path_buf();
     let body = body.as_bytes().to_vec();
     tokio::task::spawn_blocking(move || swage_client::runtime::write_atomically(&path, &body))
@@ -60,7 +62,7 @@ fn settings_audit_snapshot(settings: &SettingsResponse) -> Result<serde_json::Va
         .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))
 }
 
-fn tool_runtime_from_config(
+pub(crate) fn tool_runtime_from_config(
     config: &swage_config::ToolConfig,
 ) -> Result<ToolRuntimeSettings, ApiError> {
     Ok(ToolRuntimeSettings {
@@ -72,7 +74,18 @@ fn tool_runtime_from_config(
 }
 
 pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiError> {
-    let config = state.active_config();
+    settings_from_config(
+        state.active_config(),
+        state.restart_required(),
+        state.managed_gateway,
+    )
+}
+
+fn settings_from_config(
+    config: swage_config::ResolvedConfig,
+    restart_required: bool,
+    can_restart: bool,
+) -> Result<SettingsResponse, ApiError> {
     let providers = config
         .providers
         .entries
@@ -81,6 +94,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
             Ok((
                 id.clone(),
                 ProviderSettings {
+                    display_name: provider.display_name.clone(),
                     protocol: try_wire_from_config(provider.protocol.clone())?,
                     worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                     base_url: provider.base_url.clone(),
@@ -90,6 +104,9 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
                         || provider.api_key_env.is_some(),
                     command: provider.command.clone(),
                     state_dir: provider.state_dir.clone(),
+                    plaintext_credentials: Some(try_wire_from_config(
+                        provider.plaintext_credentials,
+                    )?),
                 },
             ))
         })
@@ -131,17 +148,82 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
         communication: try_wire_from_config(config.communication)?,
         sessions: config.sessions,
         memory: config.memory,
+        attachments: config.attachments,
         voice: try_wire_from_config(config.voice)?,
-        restart_required: state.restart_required(),
-        can_restart: state.managed_gateway,
+        restart_required,
+        can_restart,
     })
+}
+
+/// A global save can name an assembly used only in a topic or agent scope.
+/// Accept it when any known hierarchy resolves it; turn-time resolution still
+/// chooses the assembly for the particular session's scope and agent.
+async fn validate_context_assembly(state: &AppState, name: &str) -> Result<(), ApiError> {
+    let name = name.trim();
+    if name == "default" {
+        return Ok(());
+    }
+    let resolves = |scope: &ScopeLocation, agent: Option<&str>| {
+        let hierarchy = swage_config::configuration_hierarchy(&state.config_root, scope, agent);
+        let levels = hierarchy
+            .iter()
+            .map(|(level, path)| (level.clone(), path.as_path()))
+            .collect::<Vec<_>>();
+        swage_context::js_assembly::resolve_js_assembly(name, &levels).is_some()
+    };
+    if resolves(&ScopeLocation::General, None) {
+        return Ok(());
+    }
+    for topic in state
+        .topic_store
+        .list_scopes()
+        .await
+        .map_err(swage_core::GatewayError::from)?
+    {
+        let scope = topic.location();
+        if resolves(&scope, None) {
+            return Ok(());
+        }
+        let definitions =
+            crate::service::effective_agent_definitions(state.storage.as_ref(), topic.id).await?;
+        if definitions
+            .iter()
+            .any(|definition| resolves(&scope, Some(&definition.definition.id)))
+        {
+            return Ok(());
+        }
+    }
+    Err(ApiError::validation(format!(
+        "unknown context assembly '{name}': no assembly resolves in any known scope"
+    )))
 }
 
 pub async fn save_settings(
     state: &AppState,
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
+    save_settings_with_writer(state, request, |path, body| async move {
+        write_config_atomically(&path, &body).await
+    })
+    .await
+}
+
+async fn save_settings_with_writer<F, Fut>(
+    state: &AppState,
+    request: SaveSettingsRequest,
+    write_config: F,
+) -> Result<SettingsResponse, ApiError>
+where
+    F: FnOnce(PathBuf, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), ApiError>>,
+{
+    // Serialise file compensation with every other writer of the
+    // configuration: settings saves, security saves and permanent approvals.
+    let _config_update = state.config_updates.lock().await;
     validate_settings_request(&request)?;
+    if let Some(context) = &request.context {
+        validate_context_assembly(state, &context.assembly).await?;
+    }
     let prior_settings = settings_audit_snapshot(&load_settings(state).await?)?;
     let SaveSettingsRequest {
         default_provider,
@@ -152,27 +234,27 @@ pub async fn save_settings(
         tool_runtime,
         tool_permissions,
         hitl,
-        sandbox,
         context,
         pricing,
         observability,
         communication,
         sessions,
         memory,
+        attachments,
         voice,
     } = request;
 
-    let tool_permissions: Option<swage_config::ToolPermissionConfig> =
-        config_from_wire(tool_permissions)?;
     let hitl: Option<swage_config::HitlConfig> = config_from_wire(hitl)?;
     let communication: Option<swage_config::CommunicationConfig> = config_from_wire(communication)?;
     let voice: Option<swage_config::VoiceConfig> = config_from_wire(voice)?;
 
+    let previous_config = state.active_config();
     let mut providers = HashMap::new();
     for (provider_id, provider) in &requested_providers {
         providers.insert(
             provider_id.clone(),
             swage_config::ProviderEndpointConfig {
+                display_name: provider.display_name.clone(),
                 worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                 protocol: config_from_wire(provider.protocol.clone())?,
                 api_key_secret_ref: provider.api_key_secret_ref.clone(),
@@ -180,6 +262,17 @@ pub async fn save_settings(
                 base_url: provider.base_url.clone(),
                 command: provider.command.clone(),
                 state_dir: provider.state_dir.clone(),
+                // A save that does not speak of the policy leaves it as it
+                // stands; a new provider starts at the default.
+                plaintext_credentials: match provider.plaintext_credentials {
+                    Some(policy) => config_from_wire(policy)?,
+                    None => previous_config
+                        .providers
+                        .entries
+                        .get(provider_id)
+                        .map(|entry| entry.plaintext_credentials)
+                        .unwrap_or_default(),
+                },
             },
         );
     }
@@ -226,13 +319,13 @@ pub async fn save_settings(
             tool_runtime: tool_runtime.clone(),
             tool_permissions: tool_permissions.clone(),
             hitl: hitl.clone(),
-            sandbox: sandbox.clone(),
             context: context.clone(),
             pricing: pricing.clone(),
             observability: observability.clone(),
             communication: communication.clone(),
             sessions: sessions.clone(),
             memory: memory.clone(),
+            attachments: attachments.clone(),
             voice: voice.clone(),
         },
     )?;
@@ -254,9 +347,18 @@ pub async fn save_settings(
             ApiError::validation(format!("failed to create config directory: {error}"))
         })?;
     }
+    // Validate every pasted-key reference before writing any secret, so a
+    // later refusal cannot leave an earlier provider's credential rotated.
+    let mut provider_keys = Vec::with_capacity(requested_providers.len());
     for (provider_id, provider) in &requested_providers {
-        let secret_ref = persist_provider_key(state, provider_id, provider).await?;
-        if let Some(secret_ref) = secret_ref {
+        let secret_id = validate_provider_key_rotation(state, provider).await?;
+        provider_keys.push((provider_id, provider, secret_id));
+    }
+    let mut credentials = PreparedCredentialWrites::default();
+    for (provider_id, provider, secret_id) in provider_keys {
+        if let Some(reference) =
+            prepare_provider_key(&mut credentials, state, provider_id, provider, secret_id).await?
+        {
             partial
                 .providers
                 .as_mut()
@@ -264,19 +366,18 @@ pub async fn save_settings(
                 .expect("settings save always writes provider entries")
                 .get_mut(provider_id)
                 .expect("requested provider was collected")
-                .api_key_secret_ref = Some(secret_ref);
+                .api_key_secret_ref = Some(reference);
         }
     }
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
-    write_config_atomically(&path, &body).await?;
 
     let saved_providers = partial
         .providers
         .as_ref()
         .and_then(|providers| providers.entries.as_ref())
         .expect("settings save always writes provider entries");
-    let mut runtime_config = state.active_config();
+    let mut runtime_config = previous_config.clone();
     runtime_config.providers.default = default_provider;
     runtime_config.providers.entries = saved_providers.clone();
     runtime_config.models.default = default_model;
@@ -301,10 +402,12 @@ pub async fn save_settings(
     if let Some(tool_runtime) = tool_runtime {
         apply_tool_runtime_settings(&mut runtime_config.tools, tool_runtime)?;
     }
-    runtime_config.tools.permissions =
-        tool_permissions.unwrap_or_else(|| runtime_config.tools.permissions.clone());
+    if let Some(grants) = tool_permissions {
+        runtime_config.tools.permissions.allow = grants.allow;
+        runtime_config.tools.permissions.deny = grants.deny;
+        runtime_config.tools.permissions.bundles = grants.bundles.into_iter().collect();
+    }
     runtime_config.hitl = hitl.unwrap_or_else(|| runtime_config.hitl.clone());
-    runtime_config.sandbox = sandbox.unwrap_or_else(|| runtime_config.sandbox.clone());
     runtime_config.context = context.unwrap_or_else(|| runtime_config.context.clone());
     runtime_config.pricing = pricing.unwrap_or_else(|| runtime_config.pricing.clone());
     runtime_config.observability =
@@ -313,24 +416,13 @@ pub async fn save_settings(
         communication.unwrap_or_else(|| runtime_config.communication.clone());
     runtime_config.sessions = sessions.unwrap_or_else(|| runtime_config.sessions.clone());
     runtime_config.memory = memory.unwrap_or_else(|| runtime_config.memory.clone());
+    runtime_config.attachments = attachments.unwrap_or_else(|| runtime_config.attachments.clone());
     runtime_config.voice = voice.unwrap_or_else(|| runtime_config.voice.clone());
 
-    let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
-    let tool_dispatcher = crate::startup::build_tool_dispatcher(
-        &runtime_config,
-        state.storage.clone(),
-        &state.config_root,
-        state.plugins.tools(),
-    );
-    let voice_provider =
-        crate::startup::create_voice_provider(&runtime_config, &state.secret_manager).await;
-    state.replace_runtime(runtime_config, provider, tool_dispatcher);
-    state.replace_voice_provider(voice_provider);
-    let response = load_settings(state).await?;
+    let response = settings_from_config(runtime_config.clone(), false, state.managed_gateway)?;
     let new_settings = settings_audit_snapshot(&response)?;
-    crate::config_change::record_config_change(
-        state,
-        crate::config_change::ConfigChange {
+    let settings_event =
+        crate::config_change::config_change_event(crate::config_change::ConfigChange {
             entity_kind: "settings",
             entity_id: "global",
             action: "save_settings",
@@ -339,22 +431,83 @@ pub async fn save_settings(
             summary: "saved settings",
             prior_state: Some(prior_settings),
             new_state: Some(new_settings),
-        },
-    )
-    .await
-    .map_err(ApiError::from)?;
+        });
+    let previous_body = match tokio::fs::read_to_string(&path).await {
+        Ok(body) => Some(body),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(ApiError::validation(format!(
+                "failed to read config: {error}"
+            )));
+        }
+    };
+    // No credential is written until the config succeeds. All credentials
+    // and their records then commit together, before exposing the new runtime.
+    write_config(path.clone(), body).await?;
+    if let Err(error) = state
+        .secret_manager
+        .commit_credentials(credentials, settings_event)
+        .await
+    {
+        let restored = match previous_body {
+            Some(body) => write_config_atomically(&path, &body).await,
+            None => tokio::fs::remove_file(&path)
+                .await
+                .map_err(|error| ApiError::validation(format!("failed to remove config: {error}"))),
+        };
+        if let Err(restore_error) = restored {
+            return Err(ApiError::validation(format!(
+                "settings save failed ({error}); restoring config failed: {}",
+                restore_error.message()
+            )));
+        }
+        return Err(ApiError::from(swage_core::GatewayError::Storage(error)));
+    }
+    let provider =
+        crate::startup::create_provider(&runtime_config, &state.secret_manager, &state.storage)
+            .await;
+    let tool_dispatcher = crate::startup::build_tool_dispatcher(
+        &runtime_config,
+        state.storage.clone(),
+        &state.config_root,
+        &state.browser_host,
+        state.plugins.tools(),
+    );
+    // Keep observed speech failures until the voice configuration changes or a
+    // speech retry succeeds; an unrelated settings save is not a voice check.
+    let voice_provider = if runtime_config.voice == previous_config.voice
+        && runtime_config.providers == previous_config.providers
+        && runtime_config.models == previous_config.models
+        && requested_providers
+            .values()
+            .all(|provider| provider.api_key.as_deref().is_none_or(str::is_empty))
+    {
+        state.active_voice_provider()
+    } else {
+        crate::startup::create_voice_provider(
+            &runtime_config,
+            &state.secret_manager,
+            state.storage.as_ref(),
+        )
+        .await
+    };
+    state.replace_runtime(runtime_config, provider, tool_dispatcher);
+    state.replace_voice_provider(voice_provider);
 
     Ok(response)
 }
 
 pub(crate) async fn persist_permanent_tool_approval_for_topic(
-    config_root: &std::path::Path,
-    config: &swage_config::ResolvedConfig,
+    state: &AppState,
     topic: &swage_storage::model::Topic,
+    agent_id: &str,
     tool_name: &str,
 ) -> Result<(), ApiError> {
-    let path = scope_config_path(config_root, &topic.location());
-    persist_permanent_tool_approval_to_path(config, tool_name, path).await
+    let path = scope_config_path(&state.config_root, &topic.location());
+    persist_permanent_tool_approval_to_path(state, tool_name, path, || {
+        crate::turn::load_session_config(state, &topic.location(), agent_id).map_err(ApiError::from)
+    })
+    .await
 }
 
 pub(crate) async fn persist_permanent_tool_approval_globally(
@@ -362,14 +515,19 @@ pub(crate) async fn persist_permanent_tool_approval_globally(
     tool_name: &str,
 ) -> Result<(), ApiError> {
     let path = global_config_path(&state.config_root);
-    persist_permanent_tool_approval_to_path(&state.active_config(), tool_name, path).await
+    persist_permanent_tool_approval_to_path(state, tool_name, path, || Ok(state.active_config()))
+        .await
 }
 
 async fn persist_permanent_tool_approval_to_path(
-    config: &swage_config::ResolvedConfig,
+    state: &AppState,
     tool_name: &str,
     path: PathBuf,
+    resolve_config: impl FnOnce() -> Result<swage_config::ResolvedConfig, ApiError>,
 ) -> Result<(), ApiError> {
+    #[cfg(test)]
+    config_write_pause::wait(&path).await;
+    let _config_update = state.config_updates.lock().await;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|error| {
             ApiError::validation(format!("failed to create config directory: {error}"))
@@ -377,12 +535,29 @@ async fn persist_permanent_tool_approval_to_path(
     }
 
     let mut partial = read_partial_config(&path).await?;
+    // Resolve under the update lock and apply the scope's current file so
+    // a completed security save survives even if runtime state lags it.
+    let config = swage_config::apply_overlay(resolve_config()?, partial.clone());
     let tools = partial.tools.get_or_insert_with(Default::default);
-    tools.require_approval = Some(require_approval_entries_without_tool(config, tool_name));
+    let require_approval = require_approval_entries_without_tool(&config, tool_name);
+    tools.require_approval = Some(require_approval.clone());
 
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
     write_config_atomically(&path, &body).await?;
+
+    if path == global_config_path(&state.config_root) {
+        let mut runtime_config = state.active_config();
+        runtime_config.tools.permissions.require_approval = require_approval;
+        let tool_dispatcher = crate::startup::build_tool_dispatcher(
+            &runtime_config,
+            state.storage.clone(),
+            &state.config_root,
+            &state.browser_host,
+            state.plugins.tools(),
+        );
+        state.replace_runtime(runtime_config, state.active_provider(), tool_dispatcher);
+    }
 
     Ok(())
 }
@@ -478,7 +653,16 @@ pub async fn discover_models(
                 .api_key
                 .clone()
                 .filter(|value| !value.trim().is_empty());
-            (save_provider_into_endpoint_config(provider)?, key)
+            // A draft that does not speak of the policy is judged by the
+            // provider's running one, as a save would keep it.
+            let speaks_of_policy = provider.plaintext_credentials.is_some();
+            let mut endpoint = save_provider_into_endpoint_config(provider)?;
+            if !speaks_of_policy
+                && let Some(running) = state.active_config().providers.entries.get(&provider_id)
+            {
+                endpoint.plaintext_credentials = running.plaintext_credentials;
+            }
+            (endpoint, key)
         }
         None => (provider_for_discovery(state, &provider_id).await?, None),
     };
@@ -494,6 +678,17 @@ pub async fn discover_models(
                     Some(key) => Some(key),
                     None => discovery_credential(state, &provider).await,
                 };
+                let verdict = swage_provider::PlaintextCredentialVerdict::judge(
+                    swage_provider::PlaintextExposure::of_request(base_url, api_key.is_some()),
+                    provider.plaintext_credentials,
+                );
+                crate::provider_credential_exposure::judge(
+                    state.storage.as_ref(),
+                    &provider_id,
+                    verdict,
+                )
+                .await
+                .map_err(ApiError::validation)?;
                 discover_openai_compatible_models(base_url, api_key.as_deref()).await?
             } else {
                 known_models(&["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
@@ -564,6 +759,7 @@ fn save_provider_into_endpoint_config(
     provider: SaveProviderSettings,
 ) -> Result<swage_config::ProviderEndpointConfig, ApiError> {
     Ok(swage_config::ProviderEndpointConfig {
+        display_name: provider.display_name.clone(),
         worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
         protocol: config_from_wire(provider.protocol)?,
         base_url: provider.base_url,
@@ -571,6 +767,11 @@ fn save_provider_into_endpoint_config(
         api_key_env: provider.api_key_env,
         command: provider.command,
         state_dir: provider.state_dir,
+        plaintext_credentials: provider
+            .plaintext_credentials
+            .map(config_from_wire)
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
@@ -594,6 +795,7 @@ fn settings_response_from_saved_config(
             (
                 id.clone(),
                 ProviderSettings {
+                    display_name: provider.display_name.clone(),
                     protocol: wire_from_config(provider.protocol.clone()),
                     worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                     base_url: provider.base_url.clone(),
@@ -603,6 +805,7 @@ fn settings_response_from_saved_config(
                         || provider.api_key_env.is_some(),
                     command: provider.command.clone(),
                     state_dir: provider.state_dir.clone(),
+                    plaintext_credentials: Some(wire_from_config(provider.plaintext_credentials)),
                 },
             )
         })
@@ -611,7 +814,7 @@ fn settings_response_from_saved_config(
     SettingsResponse {
         providers,
         default_provider,
-        models,
+        models: models.into_iter().collect(),
         default_model,
         generation_presets: wire_from_config(generation_presets),
         tool_runtime: tool_runtime_from_config(&active_config.tools)
@@ -625,6 +828,7 @@ fn settings_response_from_saved_config(
         communication: wire_from_config(active_config.communication),
         sessions: active_config.sessions,
         memory: active_config.memory,
+        attachments: active_config.attachments,
         voice: wire_from_config(active_config.voice),
         restart_required: true,
         can_restart: state.managed_gateway,
@@ -735,9 +939,9 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
                 "context assembly must not be empty".to_string(),
             ));
         }
-        if !(1..=60).contains(&context.timeout) {
+        if context.timeout == 0 {
             return Err(ApiError::validation(
-                "context timeout must be between 1 and 60".to_string(),
+                "context timeout must be positive".to_string(),
             ));
         }
         if matches!(context.budget, Some(0)) {
@@ -803,6 +1007,7 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
     // refuse.
     refuse_declared_section_problems(request.sessions.as_ref())?;
     refuse_declared_section_problems(request.memory.as_ref())?;
+    refuse_declared_section_problems(request.attachments.as_ref())?;
     if let Some(voice) = &request.voice
         && [&voice.transcription_model, &voice.speech_model]
             .into_iter()
@@ -844,15 +1049,15 @@ where
 #[derive(Debug, Clone, Default)]
 struct RuntimeSectionUpdates {
     tool_runtime: Option<ToolRuntimeSettings>,
-    tool_permissions: Option<swage_config::ToolPermissionConfig>,
+    tool_permissions: Option<swage_protocol::client::settings::ToolGrantSettings>,
     hitl: Option<swage_config::HitlConfig>,
-    sandbox: Option<swage_config::SandboxConfig>,
     context: Option<swage_config::ContextConfig>,
     pricing: Option<swage_config::PricingConfig>,
     observability: Option<swage_config::ObservabilityConfig>,
     communication: Option<swage_config::CommunicationConfig>,
     sessions: Option<swage_config::SessionsConfig>,
     memory: Option<swage_config::MemoryConfig>,
+    attachments: Option<swage_config::AttachmentsConfig>,
     voice: Option<swage_config::VoiceConfig>,
 }
 
@@ -864,18 +1069,21 @@ fn apply_runtime_settings_to_partial(
         tool_runtime,
         tool_permissions,
         hitl,
-        sandbox,
         context,
         pricing,
         observability,
         communication,
         sessions,
         memory,
+        attachments,
         voice,
     } = updates;
     // A declared section's partial is its own `From`: no field is restated.
     if let Some(sessions) = sessions {
         partial.sessions = Some(sessions.into());
+    }
+    if let Some(attachments) = attachments {
+        partial.attachments = Some(attachments.into());
     }
     if let Some(memory) = memory {
         partial.memory = Some(memory.into());
@@ -909,19 +1117,12 @@ fn apply_runtime_settings_to_partial(
         let tools = partial.tools.get_or_insert_with(Default::default);
         tools.allow = Some(tool_permissions.allow);
         tools.deny = Some(tool_permissions.deny);
-        tools.bundles = Some(tool_permissions.bundles);
-        tools.require_approval = Some(tool_permissions.require_approval);
+        tools.bundles = Some(tool_permissions.bundles.into_iter().collect());
     }
     if let Some(hitl) = hitl {
         partial.hitl = Some(swage_config::merge::PartialHitlConfig {
             timeout: Some(hitl.timeout),
             timeout_policy: Some(hitl.timeout_policy),
-        });
-    }
-    if let Some(sandbox) = sandbox {
-        partial.sandbox = Some(swage_config::merge::PartialSandboxConfig {
-            enabled: Some(sandbox.enabled),
-            allow_degraded_execution: Some(sandbox.allow_degraded_execution),
         });
     }
     if let Some(context) = context {
@@ -1044,7 +1245,7 @@ fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), A
 }
 
 fn validate_tool_permissions(
-    permissions: &swage_protocol::client::settings::ToolPermissionConfig,
+    permissions: &swage_protocol::client::settings::ToolGrantSettings,
 ) -> Result<(), ApiError> {
     validate_named_list("tool allow rules", &permissions.allow)?;
     validate_named_list("tool deny rules", &permissions.deny)?;
@@ -1055,13 +1256,6 @@ fn validate_tool_permissions(
             ));
         }
         validate_named_list("tool bundle entries", tools)?;
-    }
-    for entry in &permissions.require_approval {
-        if entry.tool_name().trim().is_empty() {
-            return Err(ApiError::validation(
-                "approval-gated tool names must not be empty".to_string(),
-            ));
-        }
     }
     Ok(())
 }
@@ -1075,53 +1269,77 @@ fn validate_named_list(label: &str, values: &[String]) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn persist_provider_key(
+async fn validate_provider_key_rotation(
+    state: &AppState,
+    provider: &SaveProviderSettings,
+) -> Result<Option<uuid::Uuid>, ApiError> {
+    if provider.api_key.as_deref().is_none_or(str::is_empty) {
+        return Ok(None);
+    }
+    let Some(reference) = provider.api_key_secret_ref.as_deref() else {
+        return Ok(None);
+    };
+    let id = parse_secret_reference(reference)?;
+    let existing = state.secret_manager.get_secret(id).await?;
+    if existing.backend_kind != crate::secret::MANAGED_BACKEND {
+        let source = match existing.backend_kind.as_str() {
+            crate::secret::ENV_BACKEND => "environment variable",
+            crate::secret::FILE_BACKEND => "file",
+            _ => "external source",
+        };
+        return Err(ApiError::validation(format!(
+            "This credential is read from its {source}. Update it there instead of pasting a replacement key."
+        )));
+    }
+    Ok(Some(id))
+}
+
+async fn prepare_provider_key(
+    credentials: &mut PreparedCredentialWrites,
     state: &AppState,
     provider_id: &str,
     provider: &SaveProviderSettings,
+    secret_id: Option<uuid::Uuid>,
 ) -> Result<Option<String>, ApiError> {
-    let Some(api_key) = provider
+    let Some(value) = provider
         .api_key
         .as_deref()
         .filter(|value| !value.is_empty())
     else {
         return Ok(None);
     };
-
-    if let Some(reference) = provider.api_key_secret_ref.as_deref() {
-        let id = reference
-            .strip_prefix("secret:")
-            .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
-            .ok_or_else(|| ApiError::validation("invalid provider secret reference".to_string()))?;
-        let secret = state
-            .secret_manager
-            .rotate_secret(
-                id,
-                RotateSecretRequest {
-                    value: Some(api_key.to_string()),
-                    external_reference: None,
-                    metadata: None,
-                },
-            )
-            .await?;
-        return Ok(Some(secret.reference));
+    if let Some(id) = secret_id
+        && let Some(pending) = credentials.pending_rotation(id)
+    {
+        if pending != value {
+            return Err(ApiError::validation(
+                "Providers sharing a credential must use the same replacement key.".into(),
+            ));
+        }
+        return Ok(provider.api_key_secret_ref.clone());
     }
-
-    let secret = state
-        .secret_manager
-        .create_secret(CreateSecretRequest {
-            name: format!("provider:{provider_id}:api-key"),
-            material_kind: "provider_key".to_string(),
-            owner_kind: "provider".to_string(),
-            backend_kind: "managed".to_string(),
-            scope_kind: "global".to_string(),
-            scope_id: None,
-            metadata: Some(json!({ "provider_id": provider_id })),
-            value: Some(api_key.to_string()),
-            external_reference: None,
-        })
-        .await?;
-    Ok(Some(secret.reference))
+    let reference = if let Some(id) = secret_id {
+        state
+            .secret_manager
+            .prepare_rotation(credentials, id, value.to_string())
+            .await?
+    } else {
+        state.secret_manager.prepare_creation(
+            credentials,
+            CreateSecretRequest {
+                name: format!("provider:{provider_id}:api-key"),
+                material_kind: "provider_key".into(),
+                owner_kind: "provider".into(),
+                backend_kind: "managed".into(),
+                scope_kind: "global".into(),
+                scope_id: None,
+                metadata: Some(json!({ "provider_id": provider_id })),
+                value: Some(value.to_string()),
+                external_reference: None,
+            },
+        )?
+    };
+    Ok(Some(reference))
 }
 
 fn global_config_path(config_root: &std::path::Path) -> PathBuf {
@@ -1300,7 +1518,534 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 
 #[cfg(test)]
 mod tests {
+    use crate::secret::CreateSecretRequest;
     use crate::test_support::SwageHomeGuard;
+    use swage_storage::store::SecretStore;
+
+    /// Model discovery sends the provider's credential to its base URL, so
+    /// it answers to the same plaintext policy as the provider itself: under
+    /// refuse no connection is made, under warn the probe is sent and the
+    /// warning recorded once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn model_discovery_follows_the_plaintext_credential_policy() {
+        use swage_storage::store::AuditStore;
+
+        let Some(address) =
+            crate::handlers::local_interface_addresses()
+                .ok()
+                .and_then(|addresses| {
+                    addresses.into_iter().find(
+                        |address| matches!(address, std::net::IpAddr::V4(v4) if !v4.is_loopback()),
+                    )
+                })
+        else {
+            eprintln!("no non-loopback interface: discovery under the policy not exercised");
+            return;
+        };
+        let listener = tokio::net::TcpListener::bind((address, 0)).await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted = std::sync::Arc::clone(&connections);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let draft = |policy| SaveProviderSettings {
+            display_name: None,
+            protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
+            worker_staleness_threshold_ms: None,
+            base_url: Some(base_url.clone()),
+            api_key_secret_ref: None,
+            api_key_env: None,
+            api_key: Some("discovery-fixture-key".into()),
+            command: None,
+            state_dir: None,
+            plaintext_credentials: Some(policy),
+        };
+        let events = || async {
+            storage
+                .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                    event_kind: Some(crate::provider_credential_exposure::EVENT_KIND.into()),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        };
+
+        let refused = super::discover_models(
+            &state,
+            "lan".into(),
+            None,
+            Some(draft(
+                swage_protocol::client::settings::PlaintextCredentialPolicy::Refuse,
+            )),
+        )
+        .await
+        .expect_err("the refuse policy sends nothing");
+        assert!(
+            refused.message().contains("plaintext"),
+            "{}",
+            refused.message()
+        );
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let recorded = events().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].metadata["decision"], "refused");
+
+        // Credentials in the base URL travel as basic authentication.
+        let mut url_credentials =
+            draft(swage_protocol::client::settings::PlaintextCredentialPolicy::Refuse);
+        url_credentials.api_key = None;
+        url_credentials.base_url = Some(base_url.replacen("http://", "http://user:url-pw@", 1));
+        let refused =
+            super::discover_models(&state, "url-auth".into(), None, Some(url_credentials))
+                .await
+                .expect_err("credentials in the URL are refused too");
+        assert!(
+            refused.message().contains("plaintext"),
+            "{}",
+            refused.message()
+        );
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(events().await.len(), 2);
+
+        let _ = super::discover_models(
+            &state,
+            "lan".into(),
+            None,
+            Some(draft(
+                swage_protocol::client::settings::PlaintextCredentialPolicy::Warn,
+            )),
+        )
+        .await;
+        assert!(connections.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        let recorded = events().await;
+        assert_eq!(recorded.len(), 3);
+        assert!(
+            recorded
+                .iter()
+                .any(|event| event.metadata["decision"] == "warned")
+        );
+        assert!(recorded.iter().all(|event| {
+            let kept = format!("{} {}", event.summary, event.metadata);
+            !kept.contains("discovery-fixture-key") && !kept.contains("url-pw")
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_config_write_failure_keeps_managed_key_and_runtime_until_success() {
+        use swage_storage::store::AuditStore;
+
+        let home = SwageHomeGuard::new();
+        let _key = crate::secret::tests::with_secret_env();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let mut request = succession_settings_request(None);
+        request.providers.get_mut("local").unwrap().api_key = Some("original-fixture-key".into());
+        let first = super::save_settings(&state, request).await.unwrap();
+        let reference = first.providers["local"].api_key_secret_ref.clone().unwrap();
+        let before = serde_json::to_value(state.active_config()).unwrap();
+        let config_before = tokio::fs::read(home.path().join("config.toml"))
+            .await
+            .unwrap();
+        let mut request = succession_settings_request(None);
+        let provider = request.providers.get_mut("local").unwrap();
+        provider.api_key_secret_ref = Some(reference.clone());
+        provider.api_key = Some("replacement-fixture-key".into());
+        provider.display_name = Some("Changed provider".into());
+        let failed = super::save_settings_with_writer(&state, request.clone(), |_, _| {
+            std::future::ready(Err(crate::error::ApiError::validation(
+                "injected config write failure".into(),
+            )))
+        })
+        .await;
+        assert!(
+            failed
+                .unwrap_err()
+                .message()
+                .contains("injected config write failure")
+        );
+        assert_eq!(
+            state
+                .secret_manager
+                .resolve(&reference)
+                .await
+                .unwrap()
+                .value,
+            "original-fixture-key",
+            "failed config write must not rotate the existing credential"
+        );
+        assert_eq!(serde_json::to_value(state.active_config()).unwrap(), before);
+        assert_eq!(
+            tokio::fs::read(home.path().join("config.toml"))
+                .await
+                .unwrap(),
+            config_before
+        );
+
+        let saved = super::save_settings(&state, request).await.unwrap();
+        assert_eq!(
+            saved.providers["local"].api_key_secret_ref.as_deref(),
+            Some(reference.as_str())
+        );
+        assert_eq!(
+            state
+                .secret_manager
+                .resolve(&reference)
+                .await
+                .unwrap()
+                .value,
+            "replacement-fixture-key"
+        );
+        assert_eq!(
+            state.active_config().providers.entries["local"]
+                .display_name
+                .as_deref(),
+            Some("Changed provider")
+        );
+        let rotations = storage
+            .list_audit_events()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind == "rotated")
+            .count();
+        assert_eq!(
+            rotations, 1,
+            "only the successful save rotates the credential, exactly once"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_rotation_failure_keeps_config_managed_key_runtime_and_audit() {
+        use swage_storage::store::AuditStore;
+
+        let home = SwageHomeGuard::new();
+        let _key = crate::secret::tests::with_secret_env();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let mut request = succession_settings_request(None);
+        request.providers.get_mut("local").unwrap().api_key = Some("original-fixture-key".into());
+        let first = super::save_settings(&state, request).await.unwrap();
+        let reference = first.providers["local"].api_key_secret_ref.clone().unwrap();
+        let before = serde_json::to_value(state.active_config()).unwrap();
+        let config_before = tokio::fs::read(home.path().join("config.toml"))
+            .await
+            .unwrap();
+        let mut request = succession_settings_request(None);
+        let provider = request.providers.get_mut("local").unwrap();
+        provider.api_key_secret_ref = Some(reference.clone());
+        provider.api_key = Some("replacement-fixture-key".into());
+        provider.display_name = Some("Changed provider".into());
+        let shared_provider = provider.clone();
+        let mut new_provider = provider.clone();
+        new_provider.api_key_secret_ref = None;
+        request.providers.insert("new".into(), new_provider);
+        request.providers.insert("shared".into(), shared_provider);
+        let audit_before =
+            serde_json::to_value(storage.list_audit_events().await.unwrap()).unwrap();
+        let secrets_before = serde_json::to_value(storage.list_secrets().await.unwrap()).unwrap();
+        for trigger in [
+            "CREATE TEMP TRIGGER fail_save BEFORE INSERT ON audit_events WHEN NEW.event_kind = 'rotated' BEGIN SELECT RAISE(ABORT, 'injected rotation audit failure'); END;",
+            "CREATE TEMP TRIGGER fail_save BEFORE UPDATE ON managed_secret_values BEGIN SELECT RAISE(ABORT, 'injected credential update failure'); END;",
+            "CREATE TEMP TRIGGER fail_save BEFORE INSERT ON audit_events WHEN NEW.event_kind = 'configuration_change' BEGIN SELECT RAISE(ABORT, 'injected settings audit failure'); END;",
+        ] {
+            storage
+                .with_conn(|conn| conn.execute_batch(trigger))
+                .await
+                .unwrap();
+            let writes = std::sync::atomic::AtomicUsize::new(0);
+            let write_count = &writes;
+            let failed = super::save_settings_with_writer(
+                &state,
+                request.clone(),
+                |path, body| async move {
+                    write_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    super::write_config_atomically(&path, &body).await
+                },
+            )
+            .await;
+            assert!(failed.unwrap_err().message().contains("injected"));
+            assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(
+                tokio::fs::read(home.path().join("config.toml"))
+                    .await
+                    .unwrap(),
+                config_before,
+                "failed rotation must restore the config file"
+            );
+            assert_eq!(
+                storage
+                    .get_managed_secret_value(
+                        crate::secret::parse_secret_reference(&reference).unwrap()
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                "original-fixture-key",
+                "failed rotation must restore credential material"
+            );
+            assert_eq!(serde_json::to_value(state.active_config()).unwrap(), before);
+            assert_eq!(
+                serde_json::to_value(storage.list_secrets().await.unwrap()).unwrap(),
+                secrets_before
+            );
+            assert_eq!(
+                serde_json::to_value(storage.list_audit_events().await.unwrap()).unwrap(),
+                audit_before
+            );
+            storage
+                .with_conn(|conn| conn.execute_batch("DROP TRIGGER fail_save"))
+                .await
+                .unwrap();
+        }
+        let writes = std::sync::atomic::AtomicUsize::new(0);
+        let write_count = &writes;
+        super::save_settings_with_writer(&state, request, |path, body| async move {
+            write_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            super::write_config_atomically(&path, &body).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let events = storage.list_audit_events().await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_kind == "rotated")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_kind == "configuration_change")
+                .count(),
+            2
+        );
+        assert_eq!(storage.list_secrets().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_initial_save_failure_leaves_no_config_or_credentials() {
+        use swage_storage::store::AuditStore;
+
+        let home = SwageHomeGuard::new();
+        let _key = crate::secret::tests::with_secret_env();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let before = serde_json::to_value(state.active_config()).unwrap();
+        storage.with_conn(|conn| conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_save BEFORE INSERT ON audit_events WHEN NEW.event_kind = 'created' BEGIN SELECT RAISE(ABORT, 'injected creation audit failure'); END;"
+        )).await.unwrap();
+        let mut request = succession_settings_request(None);
+        request.providers.get_mut("local").unwrap().api_key = Some("fixture-key".into());
+        let failed = super::save_settings_with_writer(&state, request, |path, body| async move {
+            super::write_config_atomically(&path, &body).await?;
+            assert!(
+                path.exists(),
+                "config must be written before the injected failure"
+            );
+            Ok(())
+        })
+        .await;
+        assert!(
+            failed
+                .unwrap_err()
+                .message()
+                .contains("injected creation audit failure")
+        );
+        assert!(!home.path().join("config.toml").exists());
+        assert!(storage.list_secrets().await.unwrap().is_empty());
+        assert!(storage.list_audit_events().await.unwrap().is_empty());
+        assert_eq!(serde_json::to_value(state.active_config()).unwrap(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_context_assembly_validation_checks_known_hierarchies_before_writing() {
+        use swage_storage::store::{AgentDefinitionStore, AuditStore, TopicStore};
+
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let topic = storage
+            .create(swage_storage::NewTopic {
+                name: "Assembly topic".into(),
+                slug: "assembly-topic".into(),
+            })
+            .await
+            .unwrap();
+        for (id, topic_id) in [("global-agent", None), ("topic-agent", Some(topic.id))] {
+            storage
+                .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                    id: id.into(),
+                    topic_id,
+                    display_name: id.into(),
+                    description: String::new(),
+                    instructions: String::new(),
+                    model_id: None,
+                    tool_permissions: None,
+                    skills: vec![],
+                    output_schema: None,
+                    output_max_retries: None,
+                })
+                .await
+                .unwrap();
+        }
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        save_settings(&state, succession_settings_request(None))
+            .await
+            .unwrap();
+        let path = home.path().join("config.toml");
+        let prior_config = std::fs::read_to_string(&path).unwrap();
+        let prior_events = storage.list_audit_events().await.unwrap().len();
+        let request = succession_settings_request(Some(json!({
+            "assembly": "missing-assembly", "timeout": 5
+        })));
+        let error = save_settings(&state, request.clone())
+            .await
+            .expect_err("an unknown context assembly must be refused before writing");
+        assert_eq!(
+            error.code(),
+            swage_protocol::client::error::ErrorCode::ValidationError
+        );
+        assert!(error.message().contains("missing-assembly"), "{error:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), prior_config);
+        assert_eq!(state.active_config().context.assembly, "default");
+        assert_eq!(
+            storage.list_audit_events().await.unwrap().len(),
+            prior_events
+        );
+
+        // The same name becomes valid through each real hierarchy in turn.
+        // No case relies on a previous case's assembly file remaining behind.
+        for directory in [
+            home.path().to_path_buf(),
+            topic.location().data_dir(home.path()),
+            ScopeLocation::General.agent_dir(home.path(), "global-agent"),
+            topic.location().agent_dir(home.path(), "topic-agent"),
+            topic.location().agent_dir(home.path(), "global-agent"),
+            ScopeLocation::General.agent_dir(home.path(), "gateway"),
+        ] {
+            let assemblies = directory.join("assemblies");
+            std::fs::create_dir_all(&assemblies).unwrap();
+            let assembly = assemblies.join("missing-assembly.js");
+            std::fs::write(&assembly, "export default function () { return []; }").unwrap();
+            let saved = save_settings(&state, request.clone())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("assembly under {}: {error:?}", directory.display())
+                });
+            assert_eq!(saved.context.assembly, "missing-assembly");
+            assert!(!saved.restart_required);
+            std::fs::remove_file(assembly).unwrap();
+        }
+        // Once the file disappears, even a previously saved name is refused.
+        let error = save_settings(&state, request)
+            .await
+            .expect_err("removed assembly");
+        assert!(error.message().contains("missing-assembly"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn global_permanent_approval_updates_install_security_reading() {
+        use std::sync::Arc;
+        use swage_storage::SqliteStorage;
+
+        let root = tempfile::tempdir().expect("config root");
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.permissions.require_approval = vec![
+            swage_config::model::RequireApprovalEntry::Simple("shell".into()),
+            swage_config::model::RequireApprovalEntry::Simple("file_write".into()),
+        ];
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let before = crate::security_settings::read_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Install,
+        )
+        .await
+        .expect("initial install reading");
+        assert_eq!(before.effective.require_approval.len(), 2);
+
+        persist_permanent_tool_approval_globally(&state, "shell")
+            .await
+            .expect("global permanent approval");
+        let saved = read_partial_config(&global_config_path(root.path()))
+            .await
+            .unwrap();
+        assert_eq!(
+            saved.tools.unwrap().require_approval.unwrap(),
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "file_write".into()
+            )]
+        );
+        let after = crate::security_settings::read_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Install,
+        )
+        .await
+        .expect("install reading after approval");
+        assert_eq!(
+            serde_json::to_value(after.effective.require_approval).unwrap(),
+            serde_json::json!(["file_write"]),
+            "the install must stop requiring approval for the globally approved tool"
+        );
+    }
 
     fn succession_settings_request(context: Option<serde_json::Value>) -> SaveSettingsRequest {
         let mut value = serde_json::json!({
@@ -1319,6 +2064,354 @@ mod tests {
             value["context"] = context;
         }
         serde_json::from_value(value).expect("settings request")
+    }
+
+    /// A save that names the policy sets it; one that leaves it out keeps
+    /// what stands, so a page without the control cannot reset it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_providers_plaintext_policy_is_saved_when_spoken_of_and_kept_when_not() {
+        use swage_protocol::client::settings::PlaintextCredentialPolicy as Wire;
+
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+
+        let first = save_settings(&state, succession_settings_request(None))
+            .await
+            .unwrap();
+        assert_eq!(
+            first.providers["local"].plaintext_credentials,
+            Some(Wire::Warn)
+        );
+
+        let mut request = succession_settings_request(None);
+        request
+            .providers
+            .get_mut("local")
+            .unwrap()
+            .plaintext_credentials = Some(Wire::Allow);
+        let allowed = save_settings(&state, request).await.unwrap();
+        assert_eq!(
+            allowed.providers["local"].plaintext_credentials,
+            Some(Wire::Allow)
+        );
+        assert_eq!(
+            state.active_config().providers.entries["local"].plaintext_credentials,
+            swage_config::PlaintextCredentialPolicy::Allow
+        );
+
+        let kept = save_settings(&state, succession_settings_request(None))
+            .await
+            .unwrap();
+        assert_eq!(
+            kept.providers["local"].plaintext_credentials,
+            Some(Wire::Allow)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn provider_settings_rotate_the_reference_created_by_the_first_save() {
+        let home = SwageHomeGuard::new();
+        let _key = crate::secret::tests::with_secret_env();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let mut request = succession_settings_request(None);
+        request.providers.get_mut("local").unwrap().api_key = Some("first-fixture-key".into());
+        let first = save_settings(&state, request).await.unwrap();
+        let reference = first.providers["local"].api_key_secret_ref.clone().unwrap();
+        assert!(reference.starts_with("secret://managed/"));
+        let before = state
+            .secret_manager
+            .list_secrets()
+            .await
+            .unwrap()
+            .secrets
+            .remove(0);
+        let mut request = succession_settings_request(None);
+        let provider = request.providers.get_mut("local").unwrap();
+        provider.api_key_secret_ref = Some(reference.clone());
+        provider.api_key = Some("rotated-fixture-key".into());
+        let result = save_settings(&state, request).await;
+        assert!(
+            result.is_ok(),
+            "rotation of the saved reference failed: {result:?}"
+        );
+        assert_eq!(
+            result.unwrap().providers["local"]
+                .api_key_secret_ref
+                .as_deref(),
+            Some(reference.as_str())
+        );
+        let after = state
+            .secret_manager
+            .list_secrets()
+            .await
+            .unwrap()
+            .secrets
+            .remove(0);
+        assert!(
+            after.updated_at > before.updated_at,
+            "rotation must advance the stored timestamp"
+        );
+        assert_eq!(
+            state
+                .secret_manager
+                .resolve(&reference)
+                .await
+                .unwrap()
+                .value,
+            "rotated-fixture-key"
+        );
+        assert!(after.revealed_value.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn provider_settings_refuse_mixed_key_pastes_without_rotating_any_credential() {
+        let home = tempfile::tempdir().unwrap();
+        let _key = crate::secret::tests::with_secret_env();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let managed = state
+            .secret_manager
+            .create_secret(CreateSecretRequest {
+                name: "managed-provider-key".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "provider".into(),
+                backend_kind: "managed".into(),
+                scope_kind: "global".into(),
+                scope_id: None,
+                metadata: None,
+                value: Some("original-managed-key".into()),
+                external_reference: None,
+            })
+            .await
+            .unwrap();
+        let external = state
+            .secret_manager
+            .create_secret(CreateSecretRequest {
+                name: "environment-provider-key".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "provider".into(),
+                backend_kind: "env".into(),
+                scope_kind: "global".into(),
+                scope_id: None,
+                metadata: None,
+                value: None,
+                external_reference: Some("SWAGE_MIXED_PASTE_PROVIDER_KEY".into()),
+            })
+            .await
+            .unwrap();
+        let mut request = succession_settings_request(None);
+        let other = request.providers["local"].clone();
+        request.providers.insert("other".into(), other);
+        // Assign the managed reference to the first visited entry so the
+        // regression exercises partial rotation regardless of HashMap order.
+        for (provider, secret) in request.providers.values_mut().zip([&managed, &external]) {
+            provider.api_key_secret_ref = Some(secret.reference.clone());
+            provider.api_key = Some("replacement-key".into());
+        }
+        let before = storage.get_secret(managed.id).await.unwrap().unwrap();
+        let result = save_settings(&state, request).await;
+        assert!(
+            result
+                .unwrap_err()
+                .message()
+                .contains("read from its environment variable")
+        );
+        assert_eq!(
+            state
+                .secret_manager
+                .resolve(&managed.reference)
+                .await
+                .unwrap()
+                .value,
+            "original-managed-key",
+            "a refused multi-provider save must not rotate the earlier managed credential"
+        );
+        let after = storage.get_secret(managed.id).await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        assert!(!home.path().join("config.toml").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn provider_settings_refuse_pasted_rotation_of_external_credentials() {
+        let home = SwageHomeGuard::new();
+        let _key = crate::secret::tests::with_secret_env();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let path = home.path().join("provider-key");
+        std::fs::write(&path, "file-fixture-key").unwrap();
+        for (backend, external, message) in [
+            (
+                "file",
+                path.to_string_lossy().into_owned(),
+                "read from its file",
+            ),
+            (
+                "env",
+                "SWAGE_EXTERNAL_PROVIDER_KEY".into(),
+                "read from its environment variable",
+            ),
+        ] {
+            let secret = state
+                .secret_manager
+                .create_secret(CreateSecretRequest {
+                    name: format!("external-{backend}"),
+                    material_kind: "provider_key".into(),
+                    owner_kind: "provider".into(),
+                    backend_kind: backend.into(),
+                    scope_kind: "global".into(),
+                    scope_id: None,
+                    metadata: None,
+                    value: None,
+                    external_reference: Some(external),
+                })
+                .await
+                .unwrap();
+            let before = storage.get_secret(secret.id).await.unwrap().unwrap();
+            let mut request = succession_settings_request(None);
+            let provider = request.providers.get_mut("local").unwrap();
+            provider.api_key_secret_ref = Some(secret.reference.clone());
+            provider.api_key = Some("ignored-pasted-key".into());
+            let result = save_settings(&state, request).await;
+            assert!(
+                result.is_err(),
+                "pasted rotation of {backend}-backed credential must be refused"
+            );
+            assert!(result.unwrap_err().message().contains(message));
+            let after = storage.get_secret(secret.id).await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(after).unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
+            if backend == "file" {
+                assert_eq!(
+                    state
+                        .secret_manager
+                        .resolve(&secret.reference)
+                        .await
+                        .unwrap()
+                        .value,
+                    "file-fixture-key"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_settings_preserve_display_names_across_save_and_reload() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let mut value = serde_json::to_value(succession_settings_request(None)).unwrap();
+        value["providers"]["local"]["display_name"] = json!("Homelab proxy");
+        value["providers"]["local"]["api_key_env"] = json!("PROXY_KEY");
+        let request = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_value(save_settings(&state, request).await.unwrap()).unwrap();
+        assert_eq!(saved["providers"]["local"]["display_name"], "Homelab proxy");
+        let loaded = serde_json::to_value(load_settings(&state).await.unwrap()).unwrap();
+        assert_eq!(
+            loaded["providers"]["local"]["display_name"],
+            "Homelab proxy"
+        );
+        assert_eq!(loaded["providers"]["local"]["api_key_env"], "PROXY_KEY");
+        assert!(loaded["providers"]["local"]["api_key_secret_ref"].is_null());
+        let file = tokio::fs::read_to_string(home.path().join("config.toml"))
+            .await
+            .unwrap();
+        let config: swage_config::PartialConfig = toml::from_str(&file).unwrap();
+        let encoded = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            encoded["providers"]["entries"]["local"]["display_name"],
+            "Homelab proxy"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_settings_serialise_catalogues_in_key_order() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let mut config = swage_config::ResolvedConfig::default();
+        // Many reversed keys make iteration order observable independently of
+        // whichever random seed each HashMap receives.
+        for id in (0..24).rev().map(|n| format!("provider-{n:02}")) {
+            config
+                .providers
+                .entries
+                .insert(id, swage_config::ProviderEndpointConfig::default());
+        }
+        for id in (0..24).rev().map(|n| format!("model-{n:02}")) {
+            config.models.entries.insert(
+                id.clone(),
+                swage_config::ModelEndpointConfig {
+                    provider_id: "provider-00".into(),
+                    model_id: id,
+                    ..Default::default()
+                },
+            );
+        }
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let text = serde_json::to_string(&load_settings(&state).await.unwrap()).unwrap();
+        for catalogue in ["provider", "model"] {
+            let positions: Vec<_> = (0..24)
+                .map(|n| text.find(&format!("\"{catalogue}-{n:02}\":")).unwrap())
+                .collect();
+            assert!(
+                positions.windows(2).all(|pair| pair[0] < pair[1]),
+                "{catalogue} keys are not sorted: {text}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1778,7 +2871,7 @@ mod tests {
     #[test]
     fn settings_response_from_saved_config_echoes_secret_refs_without_raw_keys() {
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -1791,6 +2884,7 @@ mod tests {
         providers.insert(
             "llama-cpp".to_string(),
             swage_config::ProviderEndpointConfig {
+                display_name: None,
                 worker_staleness_threshold_ms: None,
                 protocol: swage_config::Protocol::OpenAi,
                 base_url: Some("http://127.0.0.1:8080/v1".to_string()),
@@ -1798,6 +2892,7 @@ mod tests {
                 api_key_env: None,
                 command: None,
                 state_dir: None,
+                plaintext_credentials: Default::default(),
             },
         );
 
@@ -1844,10 +2939,11 @@ mod tests {
                 capabilities: swage_config::ModelCapabilitiesConfig {
                     reasoning_replay: true,
                     effort: None,
+                    output_limit: None,
                 },
             },
         );
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -1855,6 +2951,7 @@ mod tests {
             initial_config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
 
         let request = SaveSettingsRequest {
@@ -1862,6 +2959,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -1870,6 +2968,7 @@ mod tests {
                     api_key: None,
                     command: None,
                     state_dir: None,
+                    plaintext_credentials: None,
                 },
             )]
             .into_iter()
@@ -1887,6 +2986,7 @@ mod tests {
                     capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig {
                         reasoning_replay: true,
                         effort: None,
+                        output_limit: None,
                     },
                 },
             )]
@@ -1904,17 +3004,12 @@ mod tests {
             .into_iter()
             .collect(),
             tool_runtime: None,
-            tool_permissions: Some(swage_protocol::client::settings::ToolPermissionConfig {
+            tool_permissions: Some(swage_protocol::client::settings::ToolGrantSettings {
                 allow: vec!["file_read".to_string()],
                 deny: vec!["shell".to_string()],
                 bundles: Default::default(),
-                require_approval: vec![],
             }),
             hitl: Some(wire_from_config(swage_config::HitlConfig::default())),
-            sandbox: Some(swage_protocol::client::settings::SandboxConfig {
-                enabled: false,
-                allow_degraded_execution: true,
-            }),
             context: Some(swage_protocol::client::settings::ContextConfig {
                 assembly: "default".to_string(),
                 alternatives: Vec::new(),
@@ -1929,6 +3024,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             voice: None,
         };
 
@@ -1986,6 +3082,115 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_speech_disables_capabilities_and_a_successful_retry_restores_them() {
+        use crate::voice::{SynthesiseSpeechRequest, synthesise_speech, voice_capabilities};
+        use axum::{Router, http::StatusCode, routing::post};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        let upstream = Router::new().route(
+            "/audio/speech",
+            post(move || {
+                let counted = counted.clone();
+                async move {
+                    if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (StatusCode::NOT_FOUND, "speech model not found")
+                    } else {
+                        (StatusCode::OK, "RIFFAUDIO")
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let storage = Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::for_test(
+            storage.clone(),
+            storage,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let settings_request = |model: &str| {
+            let mut request =
+                voice_settings_request(Some(swage_protocol::client::settings::VoiceConfig {
+                    transcription_model: Some("whisper".into()),
+                    speech_model: Some(model.into()),
+                }));
+            request.providers.get_mut("local").unwrap().base_url = Some(base_url.clone());
+            request
+        };
+        save_settings(&state, settings_request("not-a-real-audio-model"))
+            .await
+            .unwrap();
+        let request = || SynthesiseSpeechRequest {
+            text: "Check speech.".into(),
+            voice: None,
+            format: None,
+        };
+        let error = synthesise_speech(&state, request()).await.unwrap_err();
+        assert!(error.to_string().contains("404"), "{error}");
+
+        let voice = voice_capabilities(&state).await;
+        assert!(
+            !voice.synthesis,
+            "a provider 404 must stop advertising synthesis"
+        );
+        assert!(
+            voice.transcription,
+            "speech failure must not disable transcription"
+        );
+        let reason = voice.unavailable_reason.unwrap();
+        assert!(
+            reason.contains("404") && reason.contains("speech model not found"),
+            "{reason}"
+        );
+        assert!(!crate::capabilities::workflow_capabilities(&state).await.tts);
+
+        save_settings(&state, settings_request("not-a-real-audio-model"))
+            .await
+            .unwrap();
+        let saved_failure = voice_capabilities(&state).await;
+        assert!(
+            !saved_failure.synthesis,
+            "saving unchanged voice settings must retain the observed failure"
+        );
+        assert_eq!(saved_failure.unavailable_reason, Some(reason));
+
+        let recovered = synthesise_speech(&state, request()).await.unwrap();
+        assert_eq!(recovered.audio_bytes, b"RIFFAUDIO");
+        assert!(voice_capabilities(&state).await.synthesis);
+        assert_eq!(voice_capabilities(&state).await.unavailable_reason, None);
+        assert!(crate::capabilities::workflow_capabilities(&state).await.tts);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        save_settings(&state, settings_request("not-a-real-audio-model"))
+            .await
+            .unwrap();
+        assert!(
+            voice_capabilities(&state).await.synthesis,
+            "saving unchanged voice settings must retain successful validation"
+        );
+        save_settings(&state, settings_request("replacement-speech-model"))
+            .await
+            .unwrap();
+        assert!(!voice_capabilities(&state).await.synthesis);
+        assert!(
+            voice_capabilities(&state)
+                .await
+                .unavailable_reason
+                .unwrap()
+                .contains("has not been checked")
+        );
+        server.abort();
+    }
+
     fn voice_settings_request(
         voice: Option<swage_protocol::client::settings::VoiceConfig>,
     ) -> SaveSettingsRequest {
@@ -1994,6 +3199,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2002,6 +3208,7 @@ mod tests {
                     api_key: None,
                     command: None,
                     state_dir: None,
+                    plaintext_credentials: None,
                 },
             )]
             .into_iter()
@@ -2025,13 +3232,13 @@ mod tests {
             tool_runtime: None,
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: None,
             observability: None,
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             voice,
         }
     }
@@ -2040,7 +3247,7 @@ mod tests {
     async fn save_settings_hot_applies_a_declared_section_and_refuses_by_its_own_rule() {
         let swage_home = SwageHomeGuard::new();
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2048,6 +3255,7 @@ mod tests {
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
 
         let mut request = voice_settings_request(None);
@@ -2088,11 +3296,76 @@ mod tests {
         assert_eq!(state.active_config().memory.curator_idle_minutes, 45);
     }
 
+    #[tokio::test]
+    async fn delegation_depth_saves_hot_applies_reloads_and_refuses_zero() {
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::for_test(
+            storage.clone(),
+            storage,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            4,
+            "the gateway loads the depth default"
+        );
+        let mut request = voice_settings_request(None);
+        request.sessions = Some(
+            serde_json::from_value(
+                serde_json::json!({"archive_after_days": 7, "max_delegation_depth": 2}),
+            )
+            .unwrap(),
+        );
+        let response = save_settings(&state, request.clone()).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(response.sessions).unwrap()["max_delegation_depth"],
+            2
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            2,
+            "new chains read the saved depth without a restart"
+        );
+        let reloaded = swage_config::load_resolved_config_from(
+            &state.config_root,
+            &ScopeLocation::General,
+            "default",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(reloaded.sessions).unwrap()["max_delegation_depth"],
+            2,
+            "the declared setting survives a file reload"
+        );
+        request.sessions = Some(
+            serde_json::from_value(
+                serde_json::json!({"archive_after_days": 7, "max_delegation_depth": 0}),
+            )
+            .unwrap(),
+        );
+        let result = save_settings(&state, request).await;
+        assert!(result.is_err(), "the settings API refuses a zero depth");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sessions.max_delegation_depth")
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            2,
+            "a refused save leaves the active setting intact"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_applies_voice_model_routes() {
         let swage_home = SwageHomeGuard::new();
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2100,6 +3373,7 @@ mod tests {
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
 
         save_settings(&state, voice_settings_request(None))
@@ -2128,8 +3402,15 @@ mod tests {
         .expect("voice routes should save and hot-apply");
         assert_eq!(response.voice.speech_model.as_deref(), Some("tts-1"));
         let configured = crate::voice::voice_capabilities(&state).await;
-        assert!(configured.transcription && configured.synthesis);
-        assert_eq!(configured.unavailable_reason, None);
+        assert!(configured.transcription);
+        assert!(!configured.synthesis);
+        assert!(
+            configured
+                .unavailable_reason
+                .as_deref()
+                .unwrap()
+                .contains("has not been checked")
+        );
         assert!(!state.restart_required());
 
         let reloaded = swage_config::load_resolved_config_from(
@@ -2165,6 +3446,7 @@ mod tests {
             initial_config.providers.entries.insert(
                 id.to_string(),
                 swage_config::ProviderEndpointConfig {
+                    display_name: None,
                     worker_staleness_threshold_ms: threshold,
                     protocol: swage_config::Protocol::OpenAi,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2172,10 +3454,11 @@ mod tests {
                     api_key_env: None,
                     command: None,
                     state_dir: None,
+                    plaintext_credentials: Default::default(),
                 },
             );
         }
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2183,6 +3466,7 @@ mod tests {
             initial_config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
 
         let loaded = load_settings(&state).await.expect("load settings");
@@ -2203,6 +3487,7 @@ mod tests {
                 (
                     id.clone(),
                     SaveProviderSettings {
+                        display_name: None,
                         protocol: provider.protocol.clone(),
                         worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                         base_url: provider.base_url.clone(),
@@ -2211,6 +3496,7 @@ mod tests {
                         api_key: None,
                         command: provider.command.clone(),
                         state_dir: provider.state_dir.clone(),
+                        plaintext_credentials: None,
                     },
                 )
             })
@@ -2224,13 +3510,13 @@ mod tests {
             tool_runtime: None,
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: None,
             observability: None,
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             voice: None,
         };
         save_settings(&state, request)
@@ -2282,7 +3568,7 @@ mod tests {
             provider_type: "searxng".to_string(),
             base_url: "http://127.0.0.1:8080".to_string(),
         });
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2290,6 +3576,7 @@ mod tests {
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
         let mut python_execute: swage_protocol::client::settings::PythonExecuteToolConfig =
             wire_from_config(swage_config::PythonExecuteToolConfig::default());
@@ -2299,6 +3586,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2307,6 +3595,7 @@ mod tests {
                     api_key: None,
                     command: None,
                     state_dir: None,
+                    plaintext_credentials: None,
                 },
             )]
             .into_iter()
@@ -2339,13 +3628,13 @@ mod tests {
             }),
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: None,
             observability: None,
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             voice: None,
         };
 
@@ -2428,7 +3717,7 @@ mod tests {
         let _swage_home = SwageHomeGuard::new();
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2467,6 +3756,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2475,6 +3765,7 @@ mod tests {
                     api_key: None,
                     command: None,
                     state_dir: None,
+                    plaintext_credentials: None,
                 },
             )]
             .into_iter()
@@ -2499,13 +3790,13 @@ mod tests {
             tool_runtime: None,
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: Some(wire_from_config(pricing)),
             observability: Some(wire_from_config(observability)),
             communication: Some(wire_from_config(communication.clone())),
             sessions: None,
             memory: None,
+            attachments: None,
             voice: None,
         };
 
@@ -2539,20 +3830,19 @@ mod tests {
             models: HashMap::new(),
             generation_presets: HashMap::new(),
             tool_runtime: None,
-            tool_permissions: Some(swage_protocol::client::settings::ToolPermissionConfig {
+            tool_permissions: Some(swage_protocol::client::settings::ToolGrantSettings {
                 allow: vec!["*".into()],
                 deny: vec!["".into()],
                 bundles: Default::default(),
-                require_approval: vec![],
             }),
             hitl: Some(wire_from_config(swage_config::HitlConfig::default())),
-            sandbox: Some(wire_from_config(swage_config::SandboxConfig::default())),
             context: Some(wire_from_config(swage_config::ContextConfig::default())),
             pricing: None,
             observability: None,
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             voice: None,
         };
 
@@ -2573,14 +3863,14 @@ mod tests {
         request.context = Some(swage_protocol::client::settings::ContextConfig {
             assembly: "default".into(),
             alternatives: Vec::new(),
-            timeout: 61,
+            timeout: 0,
             budget: None,
             compaction_threshold: None,
             diagnosis_reader_model: None,
             diagnosis_synthesis_model: None,
         });
-        let error = validate_settings_request(&request)
-            .expect_err("context timeout above range is invalid");
+        let error =
+            validate_settings_request(&request).expect_err("zero context timeout is invalid");
         assert!(error.message().contains("context timeout"));
 
         request.context = Some(wire_from_config(swage_config::ContextConfig::default()));
@@ -2612,15 +3902,10 @@ mod tests {
         let mut partial = swage_config::PartialConfig::default();
         let mut bundles = HashMap::new();
         bundles.insert("dangerous".to_string(), vec!["shell".to_string()]);
-        let permissions = swage_config::ToolPermissionConfig {
+        let permissions = swage_protocol::client::settings::ToolGrantSettings {
             allow: vec!["file_read".into()],
             deny: vec!["shell".into()],
-            bundles,
-            require_approval: vec![swage_config::RequireApprovalEntry::WithOptions {
-                tool: "python_execute".into(),
-                timeout: Some(120),
-                timeout_policy: Some(swage_core::ApprovalTimeoutPolicy::Interrupt),
-            }],
+            bundles: bundles.into_iter().collect(),
         };
 
         apply_runtime_settings_to_partial(
@@ -2630,10 +3915,6 @@ mod tests {
                 hitl: Some(swage_config::HitlConfig {
                     timeout: 600,
                     timeout_policy: swage_core::ApprovalTimeoutPolicy::Interrupt,
-                }),
-                sandbox: Some(swage_config::SandboxConfig {
-                    enabled: false,
-                    allow_degraded_execution: true,
                 }),
                 context: Some(swage_config::ContextConfig {
                     assembly: "compact".into(),
@@ -2664,10 +3945,104 @@ mod tests {
         assert!(body.contains("[hitl]"));
         assert!(body.contains("timeout = 600"));
         assert!(body.contains("timeout_policy = \"interrupt\""));
-        assert!(body.contains("[sandbox]"));
-        assert!(body.contains("enabled = false"));
+        assert!(!body.contains("[sandbox]"));
+        assert!(!body.contains("require_approval"));
         assert!(body.contains("[context]"));
         assert!(body.contains("assembly = \"compact\""));
         assert!(body.contains("budget = 8192"));
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn image_scheme_settings_save_hot_apply_reload_and_refuse() {
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::for_test(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+                as std::sync::Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        assert_eq!(
+            load_settings(&state)
+                .await
+                .unwrap()
+                .attachments
+                .accepted_schemes,
+            ["https", "data"]
+        );
+        let mut request = voice_settings_request(None);
+        request.attachments = Some(swage_config::AttachmentsConfig {
+            accepted_schemes: vec!["http".into()],
+        });
+        let response = save_settings(&state, request.clone()).await.unwrap();
+        assert_eq!(response.attachments.accepted_schemes, ["http"]);
+        assert_eq!(state.active_config().attachments.accepted_schemes, ["http"]);
+        assert!(!state.restart_required());
+        let reloaded = swage_config::load_resolved_config_from(
+            &state.config_root,
+            &ScopeLocation::General,
+            "default",
+        )
+        .unwrap();
+        assert_eq!(reloaded.attachments.accepted_schemes, ["http"]);
+        // Exercise the gate with the running setting, rather than only its saved representation.
+        crate::turn::check_attachment_support(
+            &crate::capabilities::WorkflowCapabilities::for_protocol(
+                swage_config::Protocol::OpenAi,
+            ),
+            &state.active_config().attachments,
+            &[swage_protocol::client::turn::MessageAttachment::ImageUrl {
+                url: "http://example.test/a.png".into(),
+            }],
+        )
+        .unwrap();
+        for invalid in [vec![], vec!["https:".into()]] {
+            request.attachments = Some(swage_config::AttachmentsConfig {
+                accepted_schemes: invalid,
+            });
+            let error = save_settings(&state, request.clone())
+                .await
+                .expect_err("invalid policy must be refused");
+            assert!(
+                error.to_string().contains("attachments.accepted_schemes"),
+                "{error}"
+            );
+            assert_eq!(state.active_config().attachments.accepted_schemes, ["http"]);
+            let reloaded = swage_config::load_resolved_config_from(
+                &state.config_root,
+                &ScopeLocation::General,
+                "default",
+            )
+            .unwrap();
+            assert_eq!(reloaded.attachments.accepted_schemes, ["http"]);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod config_write_pause {
+    use std::sync::{LazyLock, Mutex};
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    type Pause = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static PAUSES: LazyLock<Mutex<HashMap<PathBuf, Pause>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub fn before_write(path: PathBuf) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, waiting) = oneshot::channel();
+        let (resume, released) = oneshot::channel();
+        PAUSES.lock().unwrap().insert(path, (reached, released));
+        (waiting, resume)
+    }
+
+    pub async fn wait(path: &std::path::Path) {
+        let pause = PAUSES.lock().unwrap().remove(path);
+        if let Some((reached, released)) = pause {
+            reached.send(()).unwrap();
+            released.await.unwrap();
+        }
     }
 }

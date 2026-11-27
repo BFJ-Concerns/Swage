@@ -18,4 +18,11 @@ worktree?: WorkflowWorktreeCompletion | null,
 /**
  * Absent for a worker that settled on its own account.
  */
-termination?: WorkflowWorkerTermination | null, };
+termination?: WorkflowWorkerTermination | null,
+/**
+ * Whether any attempt of this worker followed a gateway interruption:
+ * the interrupted attempt's outcome is unknown and the tool calls it
+ * issued may have been applied, so this worker's effects may have been
+ * repeated.
+ */
+redispatched_after_interruption: boolean, };

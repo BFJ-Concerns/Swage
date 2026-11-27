@@ -21,39 +21,73 @@ impl Tool for WorkflowRunTool {
     fn name(&self) -> &str {
         "workflow_run"
     }
-    fn description(&self) -> &str {
-        "Start either an available workflow by name or a newly authored workflow from JavaScript source. A request that an available workflow already serves — an unattended research sweep, say — is started here, by name, in the same turn it is asked for, rather than carried out conversationally first. Provide exactly one of name or source. Inline source inherits this session's dispatch bounds and cannot deliver outside the run; use wait=true only when this turn needs the final result. Before authoring source, activate the Workflow Authoring skill: it documents the whole script surface — agent, agentStart, wait, parallel, pipeline, workflow, gate, postEvent, awaitEvent, budget, the meta/defaults headers, and the determinism rules."
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("name"),
+        }
     }
+
+    fn description(&self) -> &str {
+        "Start a workflow run. A workflow is a script that carries out a job as many agent \
+         calls, each one recorded, so that an interrupted run carries on from where it \
+         stopped. Give `name` to start a workflow this session can already see, as \
+         `workflow_list` shows them, or `source` to run a script written in this session \
+         without saving it: one of the two, never both. Where an available workflow already \
+         does what is being asked for, starting it is the way to do the job, in place of \
+         carrying the work out by hand in the conversation. A script run from `source` can \
+         reach no further than this session can, and can deliver nothing outside the run. \
+         The call returns the run's record once the run has started: `id` and `state` are \
+         fields of the result itself, beside `view_url`, the address of the run's page, and \
+         `workflow_run_status` reads the run by that id later. With `wait` the call holds \
+         until the run is no longer running and returns the record as it then stands: \
+         `final_output` holds what the script returned once `state` is `completed`, and a \
+         run that has parked on a wait of its own comes back `parked`, with no output yet. \
+         A run still running after ten minutes fails the wait and not the run. A run that \
+         has failed by the time the call returns is reported as a failed call. \
+         The script interface is set out by the `workflow-authoring` skill and by the \
+         `workflow-engine` document that `docs_read` returns."
+    }
+    fn execution_outcome(
+        &self,
+        result: &Value,
+    ) -> swage_protocol::client::conversation::ToolExecution {
+        if result["state"] == "failed" {
+            swage_protocol::client::conversation::ToolExecution::failed()
+        } else {
+            swage_protocol::client::conversation::ToolExecution::succeeded()
+        }
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
-            "description": "Provide exactly one of name or source.",
+            "description": "Which workflow to start, what to hand it, and whether to wait for it.",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The available workflow's name in this topic. Use this or source, but not both."
+                    "description": "The name of an available workflow, as `workflow_list` gives it."
                 },
                 "source": {
                     "type": "string",
-                    "description": "JavaScript source for a one-off workflow authored in this session. Use this or name, but not both."
+                    "description": "The JavaScript source of a workflow to run once, unsaved."
                 },
                 "args": {
-                    "description": "Arguments handed to the script as `args`; any JSON value the workflow expects."
+                    "description": "The value the script receives as `args`: whatever JSON the workflow's argument contract asks for."
                 },
                 "budget": {
                     "type": "object",
-                    "description": "Optional run limits.",
+                    "description": "Limits on the run. Each is optional.",
                     "properties": {
                         "max_agent_calls": {"type": "integer", "description": "Most agent calls the run may make."},
-                        "max_total_tokens": {"type": "integer", "description": "Token ceiling across all the run's agent calls."},
-                        "reserved_closing_tokens": {"type": "integer", "description": "Tokens held back from ordinary work and released when the run enters wind-down."},
+                        "max_total_tokens": {"type": "integer", "description": "Most tokens the run's agent calls may use between them."},
+                        "reserved_closing_tokens": {"type": "integer", "description": "Tokens kept back from the run's ordinary work and released to it when it winds down."},
                         "max_concurrent_agent_calls": {"type": "integer", "description": "Most agent calls in flight at once."}
                     }
                 },
                 "wait": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Wait for the run to finish and return its final output. Leave false to start it detached and get the run reference."
+                    "description": "Hold the call until the run is no longer running, and return its record as it then stands, for when this turn cannot go on without the run's result. Left out or false, the call returns once the run has started."
                 }
             },
             "additionalProperties": false
@@ -62,7 +96,17 @@ impl Tool for WorkflowRunTool {
     fn requires_device_execution(&self) -> bool {
         true
     }
-    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        for key in ["name", "source"] {
+            if params.get(key).is_some_and(|value| {
+                !value.is_null() && value.as_str().is_none_or(|text| text.trim().is_empty())
+            }) {
+                return Err(ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: format!("{key} must be a non-empty string"),
+                });
+            }
+        }
         let name = params.get("name").and_then(Value::as_str);
         let source = params.get("source").and_then(Value::as_str);
         if matches!((name, source), (Some(_), Some(_)) | (None, None)) {
@@ -71,6 +115,13 @@ impl Tool for WorkflowRunTool {
                 message: "provide exactly one of name or source".into(),
             });
         }
+        Ok(())
+    }
+
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        self.validate_call(&params)?;
+        let name = params.get("name").and_then(Value::as_str);
+        let source = params.get("source").and_then(Value::as_str);
         let args = params.get("args").cloned().unwrap_or(Value::Null);
         let budget = params
             .get("budget")
@@ -142,6 +193,19 @@ impl Tool for WorkflowRunTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_headline_renders_the_call_argument() {
+        let tool = WorkflowRunTool;
+        assert_eq!(
+            swage_tool::tool::display_summary(
+                &tool.display_hints(),
+                &json!({"name": "research-sweep", "args": {"query": "example"}})
+            )
+            .as_deref(),
+            Some("research-sweep")
+        );
+    }
+
     use std::sync::Arc;
 
     use super::*;
@@ -160,21 +224,40 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(
                 vec![Arc::new(WorkflowRunTool) as Arc<dyn Tool>],
             );
-        let context = MockToolContext::new("agent", Uuid::new_v4().to_string());
+        let root = tempfile::tempdir().unwrap();
+        let mut context = MockToolContext::new("agent", Uuid::new_v4().to_string());
+        context.working_directory = root.path().to_path_buf();
 
-        for params in [json!({}), json!({"name": "saved", "source": "return null"})] {
-            let error = dispatcher
-                .dispatch("workflow_run", params, &context, "agent")
-                .await
-                .expect_err("ambiguous input should be rejected through the dispatcher");
-            assert!(
-                matches!(
-                    error,
-                    ToolError::InvalidParameters { ref message, .. }
-                        if message == "provide exactly one of name or source"
-                ),
-                "unexpected dispatcher error: {error}"
-            );
+        for approved in [false, true] {
+            for params in [json!({}), json!({"name": "saved", "source": "return null"})] {
+                let result = if approved {
+                    dispatcher
+                        .dispatch_approved("workflow_run", params, &context, "agent")
+                        .await
+                } else {
+                    dispatcher
+                        .dispatch("workflow_run", params, &context, "agent")
+                        .await
+                };
+                let error =
+                    result.expect_err("ambiguous input should be refused through the dispatcher");
+                assert_eq!(
+                    error.execution(),
+                    swage_protocol::client::conversation::ToolExecution::refused()
+                );
+                assert!(
+                    swage_agent::agent::format_tool_error_for_model(&error)
+                        .contains("provide exactly one of name or source")
+                );
+                assert!(
+                    matches!(
+                        error,
+                        ToolError::InvalidParameters { ref message, .. }
+                            if message == "provide exactly one of name or source"
+                    ),
+                    "unexpected dispatcher error: {error}"
+                );
+            }
         }
 
         for params in [json!({"name": "saved"}), json!({"source": "return null"})] {
@@ -183,11 +266,9 @@ mod tests {
                 .await
                 .expect_err("one workflow input should pass schema validation and reach execution");
             assert!(
-                matches!(
-                    error,
-                    ToolError::ExecutionFailed { ref message, .. }
-                        if message == "workflow_run requires gateway execution"
-                ),
+                error
+                    .to_string()
+                    .contains("workflow_run requires gateway execution"),
                 "one workflow input did not reach execution: {error}"
             );
         }
@@ -218,7 +299,7 @@ mod tests {
 
         assert_eq!(
             schema["description"],
-            "Provide exactly one of name or source."
+            WorkflowRunTool.parameters()["description"]
         );
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["name"]["type"], "string");
@@ -242,7 +323,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -337,7 +418,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -373,5 +454,79 @@ mod tests {
             !model_visible.contains("..."),
             "the production error must reach the model without silent truncation: {model_visible}"
         );
+    }
+}
+
+#[cfg(test)]
+mod run_page_tests {
+    use super::*;
+    use crate::{state::AppState, tool_executor::GatewayToolContext};
+    use std::sync::Arc;
+    use swage_storage::{SessionStore, SqliteStorage, Storage, TopicStore, WorkflowStore};
+    use swage_tool::context::MockToolContext;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inline_run_result_and_detail_keep_the_view_address_name_origin_and_wake() {
+        let root = tempfile::tempdir().expect("test root");
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let topic = storage.general_scope().await.expect("topic");
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .expect("session");
+        let config = swage_config::ResolvedConfig::default();
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let base = MockToolContext::new("current-agent", session.id.to_string());
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let context =
+            GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
+                .with_app_state(Some(state.clone()));
+        let result = WorkflowRunTool.execute(json!({"source": r#"export const meta = { name: "three-whys" }; await wait({timerMs: 600000}); return 1;"#}), &context).await.expect("launch");
+        let id: Uuid = serde_json::from_value(result["id"].clone()).expect("id");
+        // Wait for the host's durable timer parking, rather than putting a
+        // wake time in the fixture that the projection merely echoes.
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let record = storage
+                    .get_workflow_run(id)
+                    .await
+                    .expect("read")
+                    .expect("run");
+                if record.state == "parked" {
+                    break record;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("parked");
+        let detail =
+            crate::workflow::get_run(axum::extract::State(state.clone()), crate::error::Path(id))
+                .await
+                .expect("detail")
+                .0;
+        let wire = serde_json::to_value(&detail).expect("wire");
+        crate::workflow::cancel_run(axum::extract::State(state), crate::error::Path(id))
+            .await
+            .expect("cancel");
+        assert_eq!(result["view_url"], format!("/workflow-runs/{id}"));
+        assert_eq!(wire["run"]["script_name"], "three-whys");
+        assert_eq!(
+            wire["run"]["dispatching_session_id"],
+            session.id.to_string()
+        );
+        assert_eq!(
+            wire["run"]["wake_at"],
+            serde_json::to_value(parked.wake_at).expect("wake")
+        );
+        assert!(!wire["run"]["wake_at"].is_null());
     }
 }

@@ -25,10 +25,10 @@ use swage_core::{GatewayError, StorageError};
 use swage_protocol::client::surface::{
     CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
     DeleteSurfaceModuleResponse, LibraryEntryModuleView, LibraryEntryResponse, LibraryEntrySummary,
-    LibraryListResponse, MoveSurfaceModuleRequest, SaveSurfaceToLibraryRequest,
-    SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView, SurfaceResponse, SurfaceSummary,
-    TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest,
-    WriteSurfaceModuleResponse,
+    LibraryListResponse, ModuleDelivery, MoveSurfaceModuleRequest, RenameSurfaceRequest,
+    SaveSurfaceToLibraryRequest, SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView,
+    SurfaceResponse, SurfaceSummary, TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest,
+    WriteSurfaceModuleRequest, WriteSurfaceModuleResponse,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
@@ -288,12 +288,10 @@ pub async fn save_surface_to_library(
     library_entry_response(state, entry.id).await
 }
 
+/// Tags in the one canonical form every tag path shares
+/// (`swage_core::tags`): saved tags and the catalogue's filter meet in it.
 fn normalised_tags(tags: &[String]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    tags.iter()
-        .map(|tag| tag.trim().to_lowercase())
-        .filter(|tag| !tag.is_empty() && seen.insert(tag.clone()))
-        .collect()
+    swage_core::tags::canonical_tags(tags)
 }
 
 /// The library's catalogue: names, descriptions and tags, never module
@@ -516,6 +514,112 @@ async fn module_on_surface(
         })
 }
 
+/// Rename a session's surface and record the title it replaces.
+pub async fn rename_surface(
+    state: &AppState,
+    id: Uuid,
+    request: RenameSurfaceRequest,
+    author: &str,
+) -> Result<SurfaceResponse, GatewayError> {
+    let surface = surface_or_invalid(state, id).await?;
+    let title = request.title.trim();
+    if title.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "a surface needs a non-empty title".into(),
+        ));
+    }
+    state
+        .storage
+        .rename_surface(
+            id,
+            title,
+            NewAuditEvent {
+                id: Uuid::new_v4().to_string(),
+                session_id: Some(surface.session_id),
+                entity_kind: "surface".into(),
+                entity_id: id.to_string(),
+                event_kind: "surface_renamed".into(),
+                summary: format!("surface renamed: {title}"),
+                metadata: json!({"title": title, "author": author}),
+            },
+        )
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError("the surface disappeared during rename".into())
+        })?;
+    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+        surface_id: id,
+        module_id: None,
+    });
+    surface_response(state, id).await
+}
+
+/// Resolve a note without removing it from the surface's record.
+pub async fn resolve_surface_annotation(
+    state: &AppState,
+    surface_id: Uuid,
+    annotation_id: Uuid,
+    author: &str,
+) -> Result<SurfaceAnnotationView, GatewayError> {
+    let surface = surface_or_invalid(state, surface_id).await?;
+    let prior = state
+        .storage
+        .get_surface_annotation(annotation_id)
+        .await?
+        .filter(|note| note.surface_id == surface_id)
+        .ok_or_else(|| GatewayError::ValidationError("no such note on this surface".into()))?;
+    module_on_surface(state, &surface, prior.module_id).await?;
+    if state
+        .storage
+        .resolve_surface_annotation(annotation_id, NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: Some(surface.session_id),
+            entity_kind: "surface".into(),
+            entity_id: surface_id.to_string(),
+            event_kind: "surface_annotation_resolved".into(),
+            summary: format!("note resolved on {}", surface.title),
+            metadata: json!({"annotation_id": annotation_id, "module_id": prior.module_id, "author": author}),
+        })
+        .await?
+    {
+        let current = state
+            .storage
+            .get_surface_annotation(annotation_id)
+            .await?
+            .ok_or_else(|| {
+                GatewayError::ValidationError("the note disappeared during resolution".into())
+            })?;
+        let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+            surface_id,
+            module_id: Some(prior.module_id),
+        });
+        return Ok(annotation_view(current));
+    }
+    if prior.resolved_at.is_none() {
+        return Err(GatewayError::ValidationError(
+            "the note changed during resolution; read it again".into(),
+        ));
+    }
+    Ok(annotation_view(prior))
+}
+
+pub async fn rename_surface_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RenameSurfaceRequest>,
+) -> Result<Json<SurfaceResponse>, ApiError> {
+    Ok(Json(rename_surface(&state, id, request, "user").await?))
+}
+
+pub async fn resolve_surface_annotation_handler(
+    State(state): State<AppState>,
+    Path((surface_id, annotation_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<SurfaceAnnotationView>, ApiError> {
+    Ok(Json(
+        resolve_surface_annotation(&state, surface_id, annotation_id, "user").await?,
+    ))
+}
+
 /// Write a module: append a new instance, or replace an existing one's source
 /// against the revision the writer read. A replace whose revision has moved
 /// on lands nothing and answers with the module as it now stands — the
@@ -526,6 +630,7 @@ pub async fn write_surface_module(
     surface_id: Uuid,
     request: WriteSurfaceModuleRequest,
     author: &str,
+    delivery: Option<ModuleDelivery>,
 ) -> Result<WriteSurfaceModuleResponse, GatewayError> {
     let surface = surface_or_invalid(state, surface_id).await?;
 
@@ -541,7 +646,12 @@ pub async fn write_surface_module(
             })?;
             let outcome = state
                 .storage
-                .replace_surface_module_source(existing.id, expected_revision, &request.source)
+                .replace_surface_module_source(
+                    existing.id,
+                    expected_revision,
+                    &request.source,
+                    delivery,
+                )
                 .await?
                 .ok_or_else(|| {
                     GatewayError::ValidationError(format!(
@@ -570,7 +680,7 @@ pub async fn write_surface_module(
             }
             let created = state
                 .storage
-                .append_surface_module(surface.id, kind, &request.source)
+                .append_surface_module(surface.id, kind, &request.source, delivery)
                 .await?;
             (created, None)
         }
@@ -586,7 +696,7 @@ pub async fn write_surface_module(
         .storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
-            session_id: None,
+            session_id: Some(surface.session_id),
             entity_kind: "surface".into(),
             entity_id: surface.id.to_string(),
             event_kind: "surface_module_written".into(),
@@ -595,6 +705,7 @@ pub async fn write_surface_module(
                 "module_id": module.id,
                 "kind": module.kind,
                 "author": author,
+                "delivery": module.delivery,
                 "prior_source": prior_source,
                 "new_source": request.source,
             }),
@@ -654,7 +765,7 @@ pub async fn delete_surface_module(
         .storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
-            session_id: None,
+            session_id: Some(surface.session_id),
             entity_kind: "surface".into(),
             entity_id: surface.id.to_string(),
             event_kind: "surface_module_deleted".into(),
@@ -716,7 +827,7 @@ pub async fn move_surface_module(
         .storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
-            session_id: None,
+            session_id: Some(surface.session_id),
             entity_kind: "surface".into(),
             entity_id: surface.id.to_string(),
             event_kind: "surface_module_moved".into(),
@@ -791,6 +902,7 @@ pub async fn create_surface_annotation(
         state,
         &surface.title,
         surface.id,
+        Some(surface.session_id),
         &annotation,
         "surface_annotation_created",
         None,
@@ -852,11 +964,14 @@ pub async fn update_surface_annotation(
         })?;
 
     let surface = state.storage.get_page(updated.surface_id).await?;
-    let title = surface.map(|surface| surface.title).unwrap_or_default();
+    let (title, session_id) = surface
+        .map(|surface| (surface.title, Some(surface.session_id)))
+        .unwrap_or_default();
     record_annotation_change(
         state,
         &title,
         updated.surface_id,
+        session_id,
         &updated,
         "surface_annotation_updated",
         Some(&existing),
@@ -902,10 +1017,13 @@ async fn delete_surface_annotation_after_read(
     author: &str,
 ) -> Result<(), GatewayError> {
     let surface = state.storage.get_page(existing.surface_id).await?;
-    let title = surface.map(|surface| surface.title).unwrap_or_default();
+    let (title, session_id) = surface
+        .map(|surface| (surface.title, Some(surface.session_id)))
+        .unwrap_or_default();
     let audit_event = annotation_change_event(
         &title,
         existing.surface_id,
+        session_id,
         &existing,
         "surface_annotation_deleted",
         Some(&existing),
@@ -936,10 +1054,12 @@ async fn delete_surface_annotation_after_read(
 /// propagates AFTER the mutation landed, matching write_surface_module: a loud
 /// applied-but-unrecorded error, never a success report on an unrecorded
 /// change.
+#[allow(clippy::too_many_arguments)]
 async fn record_annotation_change(
     state: &AppState,
     surface_title: &str,
     surface_id: Uuid,
+    surface_session_id: Option<Uuid>,
     annotation: &SurfaceAnnotation,
     event_kind: &str,
     prior: Option<&SurfaceAnnotation>,
@@ -950,6 +1070,7 @@ async fn record_annotation_change(
         .create_audit_event(annotation_change_event(
             surface_title,
             surface_id,
+            surface_session_id,
             annotation,
             event_kind,
             prior,
@@ -960,9 +1081,11 @@ async fn record_annotation_change(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn annotation_change_event(
     surface_title: &str,
     surface_id: Uuid,
+    surface_session_id: Option<Uuid>,
     annotation: &SurfaceAnnotation,
     event_kind: &str,
     prior: Option<&SurfaceAnnotation>,
@@ -971,7 +1094,9 @@ fn annotation_change_event(
 ) -> NewAuditEvent {
     NewAuditEvent {
         id: Uuid::new_v4().to_string(),
-        session_id: None,
+        // The surface's session: the write was made in it, whether by the
+        // session's agent or the person at its view.
+        session_id: surface_session_id,
         entity_kind: "surface".into(),
         entity_id: surface_id.to_string(),
         event_kind: event_kind.into(),
@@ -1002,6 +1127,7 @@ pub async fn surface_response(
     // Each note travels with the module it hangs on, so the reader finds it
     // where the location is rather than having to match ids by hand.
     Ok(SurfaceResponse {
+        shape_only: surface.shape_only,
         id: surface.id,
         session_id: surface.session_id,
         title: surface.title,
@@ -1036,12 +1162,14 @@ fn module_view(
         source: module.source,
         revision: module.revision,
         updated_at: module.updated_at,
+        delivery: module.delivery,
         annotations,
     }
 }
 
 fn annotation_view(annotation: SurfaceAnnotation) -> SurfaceAnnotationView {
     SurfaceAnnotationView {
+        resolved_at: annotation.resolved_at,
         id: annotation.id,
         module_id: annotation.module_id,
         body: annotation.body,
@@ -1099,7 +1227,7 @@ pub async fn write_surface_module_handler(
     Json(request): Json<WriteSurfaceModuleRequest>,
 ) -> Result<Json<WriteSurfaceModuleResponse>, ApiError> {
     Ok(Json(
-        write_surface_module(&state, surface_id, request, "user").await?,
+        write_surface_module(&state, surface_id, request, "user", None).await?,
     ))
 }
 
@@ -1270,6 +1398,7 @@ mod tests {
                     expected_revision: None,
                 },
                 "user",
+                None,
             )
             .await
             .unwrap(),
@@ -1295,6 +1424,7 @@ mod tests {
                     expected_revision: None,
                 },
                 "user",
+                None,
             )
             .await
             .unwrap(),
@@ -1340,6 +1470,7 @@ mod tests {
             surface_id,
             replace(module_id, 0, "# Agent's"),
             "gateway",
+            None,
         )
         .await
         .unwrap();
@@ -1356,6 +1487,7 @@ mod tests {
             surface_id,
             replace(module_id, 0, "# Person's"),
             "user",
+            None,
         )
         .await
         .unwrap();
@@ -1389,6 +1521,7 @@ mod tests {
             surface_id,
             replace(module_id, current.revision, "# Person's, knowingly"),
             "user",
+            None,
         )
         .await
         .unwrap();
@@ -1411,6 +1544,7 @@ mod tests {
                 expected_revision: None,
             },
             "gateway",
+            None,
         )
         .await
         .unwrap_err();
@@ -1494,6 +1628,7 @@ mod tests {
                     expected_revision: None,
                 },
                 "user",
+                None,
             )
             .await
             .unwrap();
@@ -1908,6 +2043,7 @@ mod tests {
         let audit = annotation_change_event(
             "Planning",
             surface_id,
+            None,
             &existing,
             "surface_annotation_deleted",
             None,
@@ -2205,5 +2341,66 @@ mod tests {
             .await
             .expect_err("the general scope is not a topic");
         assert!(matches!(error, GatewayError::TopicNotFound { .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn module_and_annotation_writes_are_attributed_to_the_surfaces_session() {
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let session_id = storage
+            .get_page(surface_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id;
+        let note = create_surface_annotation(
+            &state,
+            surface_id,
+            annotation(module_id, "attributed"),
+            "user",
+        )
+        .await
+        .unwrap();
+        move_surface_module(
+            &state,
+            surface_id,
+            module_id,
+            MoveSurfaceModuleRequest { position: 0 },
+            "user",
+        )
+        .await
+        .unwrap();
+        delete_surface_annotation(&state, note.id, "user")
+            .await
+            .unwrap();
+        delete_surface_module(&state, surface_id, module_id, "user")
+            .await
+            .unwrap();
+
+        let by_session = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(session_id),
+                entity_kind: Some("surface".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut kinds: Vec<&str> = by_session
+            .iter()
+            .map(|event| event.event_kind.as_str())
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(
+            kinds,
+            vec![
+                "surface_annotation_created",
+                "surface_annotation_deleted",
+                "surface_created",
+                "surface_module_deleted",
+                "surface_module_moved",
+                "surface_module_written",
+            ],
+            "every write on the surface is listed by its session: {by_session:?}"
+        );
     }
 }

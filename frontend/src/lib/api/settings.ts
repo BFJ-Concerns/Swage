@@ -10,7 +10,8 @@ import type { ProviderSignInState } from "../protocol/ProviderSignInState";
 import type { SignInMethod } from "../protocol/SignInMethod";
 import type { StartProviderSignInResponse } from "../protocol/StartProviderSignInResponse";
 import type { SaveProviderSettings } from "../protocol/SaveProviderSettings";
-import type { SaveSettingsRequest } from "../protocol/SaveSettingsRequest";
+import type { SaveSecuritySettingsRequest } from "../protocol/SaveSecuritySettingsRequest";
+import type { SecuritySettingsResponse } from "../protocol/SecuritySettingsResponse";
 import * as generated from "../protocol/client";
 
 export async function fetchSettings(): Promise<SettingsResponse> {
@@ -18,7 +19,7 @@ export async function fetchSettings(): Promise<SettingsResponse> {
 }
 
 export async function saveSettings(payload: SettingsPayload): Promise<SettingsResponse> {
-  return generated.saveSettings(payload as unknown as SaveSettingsRequest);
+  return generated.saveSettings(payload);
 }
 
 export async function discoverModels(
@@ -43,6 +44,30 @@ export async function restartGateway(): Promise<RestartStatusResponse> {
   return generated.restartGateway();
 }
 
+// Security checks per scope (C69): what sessions in the install or in one
+// topic run under, the scope's own overrides, and each check standing
+// relaxed with the scope that relaxed it.
+export async function fetchInstallSecuritySettings(): Promise<SecuritySettingsResponse> {
+  return generated.getInstallSecuritySettings();
+}
+
+export async function saveInstallSecuritySettings(
+  overrides: SaveSecuritySettingsRequest,
+): Promise<SecuritySettingsResponse> {
+  return generated.saveInstallSecuritySettings(overrides);
+}
+
+export async function fetchTopicSecuritySettings(topicId: string): Promise<SecuritySettingsResponse> {
+  return generated.getTopicSecuritySettings(topicId);
+}
+
+export async function saveTopicSecuritySettings(
+  topicId: string,
+  overrides: SaveSecuritySettingsRequest,
+): Promise<SecuritySettingsResponse> {
+  return generated.saveTopicSecuritySettings(topicId, overrides);
+}
+
 export async function fetchProviderSignIn(providerId: string): Promise<ProviderSignInState> {
   return generated.getProviderSignInState(providerId);
 }
@@ -61,3 +86,5 @@ export async function signOutProvider(providerId: string): Promise<ProviderSignI
 export function emptyPreset(): GenerationPresetConfig {
   return { stop_sequences: [] };
 }
+
+export const fetchProviderSecrets = generated.listSecrets;

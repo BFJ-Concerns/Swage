@@ -14,7 +14,6 @@ use tokio::process::{Child, Command};
 use super::Tool;
 use super::workspace::{
     ToolOutputArtifactPath, create_tool_output_artifact, tool_output_artifact_path,
-    truncated_output_value,
 };
 
 // ---------------------------------------------------------------------------
@@ -24,7 +23,7 @@ use super::workspace::{
 /// Executes shell commands in the turn workspace.
 ///
 /// Commands run via `sh -c` with CWD set to the active ToolContext directory.
-/// Output is capped at `max_output_bytes`; the process group stops on timeout
+/// The two streams share `max_output_bytes`; the process group stops on timeout
 /// or when execution is cancelled.
 pub struct ShellTool {
     pub timeout: Duration,
@@ -44,7 +43,33 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace directory."
+        "Run a command line with `sh` in the session's working directory and return what it \
+         printed. `output` holds its standard output, then its standard error after a \
+         `stderr:` label; `exit_code` is its exit status, and `success` is true only when \
+         that is zero, so a command that ran and failed is reported as failed. Each call \
+         starts a new shell: a change of directory or a variable set in one call is gone in \
+         the next. A command still running at the installation's time limit is stopped, \
+         along with every process it started, and the call fails saying so. The two streams \
+         share the installation's output limit. One that is cut to fit keeps its beginning, \
+         is marked in `output` where it stops and flagged (`stdout_truncated`, \
+         `stderr_truncated`), and the result then gives the path of a file holding the whole \
+         of that stream (`stdout_artifact_path`, `stderr_artifact_path`), which `file_read` \
+         opens. Unless the operator has \
+         lifted it, the command runs sandboxed: it can change files under the working \
+         directory and little outside it, so a write refused elsewhere is that boundary and \
+         not a fault to retry. The file tools read, write, edit and search files directly; \
+         this tool is for running programs."
+    }
+
+    fn execution_outcome(
+        &self,
+        result: &Value,
+    ) -> swage_protocol::client::conversation::ToolExecution {
+        if result["success"] == false {
+            swage_protocol::client::conversation::ToolExecution::failed()
+        } else {
+            swage_protocol::client::conversation::ToolExecution::succeeded()
+        }
     }
 
     fn parameters(&self) -> Value {
@@ -53,7 +78,7 @@ impl Tool for ShellTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute."
+                    "description": "The command line, as `sh` reads it: pipes, redirections and several commands joined together all work."
                 }
             },
             "required": ["command"]
@@ -97,6 +122,12 @@ impl Tool for ShellTool {
         let cap = self.max_output_bytes;
         let tool_name = self.name().to_owned();
         let artifact_paths = shell_output_artifact_paths(ctx);
+        // A call that reports no output leaves no file of it behind.
+        let unreported_artifacts = [&artifact_paths.stdout_path, &artifact_paths.stderr_path]
+            .into_iter()
+            .flatten()
+            .map(|path| path.absolute.clone())
+            .collect::<Vec<_>>();
 
         // Read stdout and stderr concurrently to prevent pipe-buffer deadlocks.
         // Each stream is bounded at max_output_bytes so a high-throughput command
@@ -125,50 +156,52 @@ impl Tool for ShellTool {
             Ok::<_, ToolError>((stdout, stderr))
         };
 
-        // Safe to abandon on timeout: read_fut owns only local pipe handles and
-        // output buffers — no shared or persisted state. The timeout arm below
-        // kills the child and discards the partial buffers, so dropping the
-        // future leaves nothing half-written.
-        let read_result = tokio::time::timeout(self.timeout, read_fut).await;
+        // Pipe EOF does not mean the command has exited. Both output collection
+        // and process exit share one deadline; timeout stops the process group.
+        let execution = async {
+            let (stdout, stderr) = read_fut.await?;
+            let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Failed to wait for command: {e}"),
+            })?;
+            Ok::<_, ToolError>((stdout, stderr, exit_status))
+        };
+        let result = Box::pin(tokio::time::timeout(self.timeout, execution)).await;
 
-        match read_result {
+        match result {
             Err(_elapsed) => {
                 // Timeout expired — stop the process group to free resources.
                 kill_child(&mut child, &mut process_group).await;
+                remove_artifacts(&unreported_artifacts).await;
                 Err(ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
-                    message: format!("Command timed out after {:.1}s", self.timeout.as_secs_f64()),
+                    message: format!(
+                        "Command timed out after {:.1}s (shell_timeout_secs)",
+                        self.timeout.as_secs_f64()
+                    ),
                 })
             }
 
             Ok(Err(e)) => {
-                // I/O error reading output — stop the process group and propagate.
+                // Output or process-wait error — stop the group and propagate.
                 kill_child(&mut child, &mut process_group).await;
+                remove_artifacts(&unreported_artifacts).await;
                 Err(e)
             }
 
-            Ok(Ok((stdout, stderr))) => {
-                // Reap the child to get the exit status.
-                let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: format!("Failed to wait for command: {e}"),
-                })?;
+            Ok(Ok((stdout, stderr, exit_status))) => {
                 process_group.disarm();
 
-                let stdout_str = String::from_utf8_lossy(&stdout.bytes);
-                let stderr_str = String::from_utf8_lossy(&stderr.bytes);
+                // The streams share the limit, so that what `output` holds
+                // of each is either all of it or flagged as cut, with the
+                // whole stream left in its file.
+                let (stdout_kept, stderr_kept) =
+                    share_output_limit(stdout.bytes.len(), stderr.bytes.len(), cap);
+                let stdout = stdout.kept_to(stdout_kept).await;
+                let stderr = stderr.kept_to(stderr_kept).await;
 
-                // Append truncation notes so the model knows the stream was cut.
-                let stdout_display = if stdout.truncated {
-                    format!("{stdout_str}\n[stdout truncated: exceeded {cap} bytes]")
-                } else {
-                    stdout_str.into_owned()
-                };
-                let stderr_display = if stderr.truncated {
-                    format!("{stderr_str}\n[stderr truncated: exceeded {cap} bytes]")
-                } else {
-                    stderr_str.into_owned()
-                };
+                let stdout_display = stdout.display("stdout");
+                let stderr_display = stderr.display("stderr");
 
                 // Combine stdout then stderr (prefixed) so the model sees both.
                 let combined = if stderr_display.is_empty() {
@@ -179,12 +212,17 @@ impl Tool for ShellTool {
                     format!("{stdout_display}stderr: {stderr_display}")
                 };
 
-                let mut output = truncated_output_value(&combined, self.max_output_bytes);
+                let mut output = json!({ "output": combined });
                 output["exit_code"] = json!(exit_status.code());
+                output["success"] = json!(exit_status.success());
+                if stdout.truncated || stderr.truncated {
+                    output["truncated"] = json!(true);
+                    output["total_bytes"] = json!(stdout.total_bytes + stderr.total_bytes);
+                }
                 if stdout.truncated {
                     output["stdout_truncated"] = json!(true);
                     output["stdout_total_bytes"] = json!(stdout.total_bytes);
-                    if let Some(path) = stdout.artifact_relative_path {
+                    if let Some(path) = stdout.reported_artifact_path {
                         output["stdout_artifact_path"] = json!(path);
                         output["stdout_follow_up"] = shell_output_follow_up(&path);
                     }
@@ -192,7 +230,7 @@ impl Tool for ShellTool {
                 if stderr.truncated {
                     output["stderr_truncated"] = json!(true);
                     output["stderr_total_bytes"] = json!(stderr.total_bytes);
-                    if let Some(path) = stderr.artifact_relative_path {
+                    if let Some(path) = stderr.reported_artifact_path {
                         output["stderr_artifact_path"] = json!(path);
                         output["stderr_follow_up"] = shell_output_follow_up(&path);
                     }
@@ -203,11 +241,75 @@ impl Tool for ShellTool {
     }
 }
 
+/// One stream as it was read: at most the limit's worth of its bytes, how
+/// many it produced, and the file that holds all of them.
 struct BoundedRead {
     bytes: Vec<u8>,
     total_bytes: usize,
+    artifact_path: Option<ToolOutputArtifactPath>,
+}
+
+/// One stream as the result reports it.
+struct ReportedStream {
+    bytes: Vec<u8>,
+    total_bytes: usize,
     truncated: bool,
-    artifact_relative_path: Option<String>,
+    reported_artifact_path: Option<String>,
+}
+
+impl BoundedRead {
+    /// Keep the first `kept` bytes. A stream reported whole needs no file,
+    /// so its file is removed; a cut one keeps it and reports its path.
+    async fn kept_to(mut self, kept: usize) -> ReportedStream {
+        self.bytes.truncate(kept);
+        let truncated = self.total_bytes > kept;
+        if !truncated && let Some(path) = self.artifact_path.as_ref() {
+            let _ = tokio::fs::remove_file(&path.absolute).await;
+        }
+        ReportedStream {
+            bytes: self.bytes,
+            total_bytes: self.total_bytes,
+            truncated,
+            reported_artifact_path: truncated
+                .then(|| self.artifact_path.map(|path| path.reported))
+                .flatten(),
+        }
+    }
+}
+
+impl ReportedStream {
+    /// The stream's text, ending in a note where it was cut so that the
+    /// reader does not take the cut for the stream's end.
+    fn display(&self, stream: &str) -> String {
+        let text = String::from_utf8_lossy(&self.bytes);
+        if self.truncated {
+            format!(
+                "{text}\n[{stream} cut here: the first {} of {} bytes]\n",
+                self.bytes.len(),
+                self.total_bytes
+            )
+        } else {
+            text.into_owned()
+        }
+    }
+}
+
+/// How many bytes of each stream fit under `cap` together. Both are kept
+/// whole when they fit. Otherwise the smaller is kept whole where it is
+/// within half the limit and the other takes the rest, and two streams
+/// that are both over half take half each.
+fn share_output_limit(stdout: usize, stderr: usize, cap: usize) -> (usize, usize) {
+    if stdout + stderr <= cap {
+        return (stdout, stderr);
+    }
+    let half = cap / 2;
+    if stdout <= half {
+        (stdout, cap - stdout)
+    } else if stderr <= half {
+        (cap - stderr, stderr)
+    } else {
+        (cap - half, half)
+    }
 }
 
 struct ShellOutputArtifactPaths {
@@ -219,6 +321,12 @@ fn shell_output_artifact_paths(ctx: &dyn ToolContext) -> ShellOutputArtifactPath
     ShellOutputArtifactPaths {
         stdout_path: Some(tool_output_artifact_path(ctx, "stdout.txt")),
         stderr_path: Some(tool_output_artifact_path(ctx, "stderr.txt")),
+    }
+}
+
+async fn remove_artifacts(paths: &[std::path::PathBuf]) {
+    for path in paths {
+        let _ = tokio::fs::remove_file(path).await;
     }
 }
 
@@ -272,18 +380,10 @@ where
     if let Some(writer) = artifact_writer.as_mut() {
         writer.flush().await?;
     }
-    let truncated = total > cap;
-    if !truncated && let Some(path) = artifact_path.as_ref() {
-        let _ = tokio::fs::remove_file(&path.absolute).await;
-    }
-
     Ok(BoundedRead {
         bytes: buf,
         total_bytes: total,
-        truncated,
-        artifact_relative_path: truncated
-            .then(|| artifact_path.map(|path| path.relative))
-            .flatten(),
+        artifact_path,
     })
 }
 
@@ -443,8 +543,59 @@ mod tests {
         assert!(result.is_err(), "timeout should produce an error");
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("timed out"),
+            msg.contains("timed out after 0.2s") && msg.contains("shell_timeout_secs"),
             "error message should mention timeout: {msg:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_stops_command_after_both_output_streams_close() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ctx_in_dir_with_ids(&workspace);
+        let t = ShellTool {
+            timeout: Duration::from_millis(200),
+            max_output_bytes: 1024 * 1024,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            t.execute(
+                json!({"command": "echo $$ > shell.pid; exec 1>&- 2>&-; sh -c 'echo $$ > descendant.pid; sleep 2; touch finished' & wait"}),
+                &context,
+            ),
+        )
+        .await
+        .expect("closing output streams must not bypass the shell deadline");
+        let error = result.expect_err("the command must time out before it finishes");
+        let message = error.to_string();
+        assert!(
+            message.contains("timed out after 0.2s") && message.contains("shell_timeout_secs"),
+            "{message}"
+        );
+        let pid: libc::pid_t = std::fs::read_to_string(workspace.path().join("shell.pid"))
+            .expect("the actual shell must record its PID")
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "the shell must stop");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert!(
+            workspace.path().join("descendant.pid").exists(),
+            "the descendant must actually start before the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        assert!(
+            !workspace.path().join("finished").exists(),
+            "the command's descendants must stop at the deadline"
+        );
+        let next = t
+            .execute(json!({"command": "printf fresh"}), &context)
+            .await;
+        assert_eq!(
+            next.expect("the next shell call must work")["output"],
+            "fresh"
         );
     }
 
@@ -464,15 +615,55 @@ mod tests {
         let val = result.expect("command should succeed");
         let output = val["output"].as_str().unwrap();
         assert_eq!(val["exit_code"], json!(0));
-        assert!(
-            output.len() <= 10,
-            "content should be capped: len={}",
-            output.len()
+        assert_eq!(
+            output, "1234567890\n[stdout cut here: the first 10 of 1000 bytes]\n",
+            "the stream is cut at the limit and marked where it stops"
         );
         assert_eq!(val["truncated"], json!(true));
-        assert!(val["total_bytes"].as_u64().unwrap() > 10);
+        assert_eq!(val["total_bytes"], json!(1000));
         assert_eq!(val["stdout_truncated"], json!(true));
-        assert!(val["stdout_total_bytes"].as_u64().unwrap() > 10);
+        assert_eq!(val["stdout_total_bytes"], json!(1000));
+    }
+
+    /// A command that fills the limit on stdout and then fails keeps its
+    /// error: stderr is within its share, so it is reported whole, and
+    /// stdout is the stream flagged as cut, with its file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_stdout_does_not_push_a_short_stderr_out_of_the_output() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = ctx_in_dir_with_ids(&dir);
+        let t = ShellTool {
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 40,
+        };
+
+        let val = t
+            .execute(
+                json!({"command": "printf '%0.s1234567890' $(seq 1 10); echo 'build failed' >&2; exit 1"}),
+                &ctx,
+            )
+            .await
+            .expect("command should return its output");
+
+        let output = val["output"].as_str().unwrap();
+        assert!(output.ends_with("stderr: build failed\n"), "{output}");
+        assert!(val.get("stderr_truncated").is_none(), "{val}");
+        assert_eq!(val["stdout_truncated"], json!(true));
+        let artifact_path = val["stdout_artifact_path"]
+            .as_str()
+            .expect("the cut stream keeps its file");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(artifact_path)).expect("stdout file"),
+            "1234567890".repeat(10)
+        );
+    }
+
+    #[test]
+    fn two_long_streams_take_half_the_limit_each() {
+        assert_eq!(share_output_limit(3, 4, 10), (3, 4));
+        assert_eq!(share_output_limit(100, 2, 10), (8, 2));
+        assert_eq!(share_output_limit(2, 100, 10), (2, 8));
+        assert_eq!(share_output_limit(100, 100, 11), (6, 5));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -528,10 +719,9 @@ mod tests {
         let val = result.expect("command should return captured stderr");
         let output = val["output"].as_str().unwrap();
         assert_eq!(val["exit_code"], json!(1));
-        assert!(
-            output.len() <= 10,
-            "content should be capped: len={}",
-            output.len()
+        assert_eq!(
+            output,
+            "stderr: 1234567890\n[stderr cut here: the first 10 of 1000 bytes]\n"
         );
         assert_eq!(val["truncated"], json!(true));
         assert_eq!(val["stderr_truncated"], json!(true));
@@ -592,5 +782,43 @@ mod tests {
                 || canonical.to_str().unwrap().contains(output),
             "pwd output {output:?} should match workspace {canonical:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[tokio::test]
+    async fn regression_output_uses_runtime_directory_and_reads_back() {
+        use swage_tool::context::{MockToolContext, ToolOutputLocation, serialise_tool_context};
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("notes"), "reference").unwrap();
+        let mut base = MockToolContext::new("agent", "session");
+        base.working_directory = workspace.path().into();
+        let mut ctx = serialise_tool_context(&base);
+        ctx.tool_output_directory = Some(ToolOutputLocation {
+            directory: runtime.path().into(),
+        });
+        let result = ShellTool {
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 16,
+        }
+        .execute(json!({"command":"ls -la; seq 1 100"}), &ctx)
+        .await
+        .unwrap();
+        let path = result["stdout_artifact_path"].as_str().unwrap();
+        assert!(
+            std::path::Path::new(path).starts_with(runtime.path()),
+            "{result}"
+        );
+        assert!(!workspace.path().join(".swage").exists());
+        let read = crate::tool::file_read::FileReadTool {
+            max_output_bytes: 10000,
+        }
+        .execute(result["stdout_follow_up"]["arguments"].clone(), &ctx)
+        .await
+        .unwrap();
+        assert!(read["output"].as_str().unwrap().contains("100\n"), "{read}");
     }
 }

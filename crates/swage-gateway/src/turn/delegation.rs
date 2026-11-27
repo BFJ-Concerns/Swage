@@ -1,13 +1,12 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DELEGATED_CHILDREN_METADATA_KEY,
     DelegationExecutor, DelegationHandler, DispatchContextComposition, GatewayDispatcherRequest,
-    MessageRouter, NewAgentMessage, ResolvedToolRoot, Uuid,
-    WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY, WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY,
-    WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY, WORKER_PLACEMENT_CWD_METADATA_KEY,
-    WORKFLOW_CALL_TOOLS_METADATA_KEY, add_dispatch_bound_task_definition_ids,
-    apply_agent_definition, apply_dispatch_bounds, apply_dispatch_task_bounds,
-    apply_workflow_call_tools, available_skills_for_agent, build_agent_config_for_topic_workspace,
-    build_approval_registrar, build_assembly_elements,
+    NewAgentMessage, ResolvedToolRoot, Uuid, WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY,
+    WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY, WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY,
+    WORKER_PLACEMENT_CWD_METADATA_KEY, WORKFLOW_CALL_TOOLS_METADATA_KEY,
+    add_dispatch_bound_task_definition_ids, apply_agent_definition, apply_dispatch_bounds,
+    apply_dispatch_task_bounds, apply_workflow_call_tools, available_skills_for_agent,
+    build_agent_config_for_topic_workspace, build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
@@ -24,19 +23,41 @@ use swage_agent::{
 };
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
+use tokio_util::task::AbortOnDropHandle;
+use tracing::Instrument;
 
 pub(super) const DELEGATED_CHILD_SKILLS_METADATA_KEY: &str = "delegated_child_skills";
 pub(super) const DELEGATED_CHILD_COMPOSITION_METADATA_KEY: &str = "delegated_child_composition";
 pub(super) const DELEGATED_CHILD_REQUESTED_CWD_METADATA_KEY: &str = "delegated_child_requested_cwd";
 const DELEGATED_CHILD_ISOLATION_METADATA_KEY: &str = "delegated_child_isolation";
+const DELEGATION_BOUND_METADATA_KEY: &str = "delegation_bound";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DelegationBound {
+    depth: u64,
+    limit: u64,
+}
+
+const DELEGATED_CHILD_SELECTION_METADATA_KEY: &str = "delegated_child_selection";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DelegatedSelection {
+    model_key: String,
+    model_id: String,
+    model: Option<swage_config::ModelEndpointConfig>,
+    preset: Option<swage_config::GenerationPresetConfig>,
+    effort: Option<swage_core::ResolvedEffort>,
+    prompt: Option<crate::experimentation::VariantDecision>,
+}
 
 struct ResolvedNamedChild {
-    continuation: DelegatedChildContinuation,
+    session_id: Uuid,
+    thread_id: Uuid,
     metadata: serde_json::Value,
 }
 
-/// Look up a child this session has delegated to under `name`, and load
-/// everything it has heard and said so far.
+/// Look up a child this session has delegated to under `name`, validate its
+/// session and load its metadata.
 ///
 /// The agent is fixed by the call that opened the child: a later call naming
 /// it must be talking to the same agent, or it is a different child wearing a
@@ -95,17 +116,9 @@ async fn resolve_named_child(
             "child {name:?} is still taking its previous turn; named child turns are sequential"
         )));
     }
-    let history = super::rebuild_thread_history_messages(state.storage.as_ref(), thread_id)
-        .await
-        .map_err(|error| {
-            AgentError::InvalidConfig(format!("cannot reload child {name:?}: {error}"))
-        })?;
     Ok(Some(ResolvedNamedChild {
-        continuation: DelegatedChildContinuation {
-            session_id,
-            thread_id,
-            history,
-        },
+        session_id,
+        thread_id,
         metadata: child_session
             .metadata
             .unwrap_or_else(|| serde_json::json!({})),
@@ -211,6 +224,9 @@ struct GatewayDelegatedContextAssembler {
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
+    /// The tools the child's own dispatcher offers it, by name: the standing
+    /// text follows them.
+    offered_tools: swage_tool::registry::OfferedTools,
 }
 
 pub(crate) fn delegated_context_assembler(
@@ -222,6 +238,7 @@ pub(crate) fn delegated_context_assembler(
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
+    offered_tools: swage_tool::registry::OfferedTools,
 ) -> Arc<dyn DelegationContextAssembler> {
     let swage_root = resolve_swage_root(&state).to_path_buf();
     Arc::new(GatewayDelegatedContextAssembler {
@@ -234,6 +251,7 @@ pub(crate) fn delegated_context_assembler(
         context_event_tx,
         effective_tool_permissions,
         composition,
+        offered_tools,
     })
 }
 
@@ -245,6 +263,44 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         turn_id: Uuid,
         delegated_history: Vec<swage_core::ChatMessage>,
     ) -> Result<DelegatedAssembly, AgentError> {
+        // This seam runs only after the executor has created a real child
+        // turn. Selection records must never make its parent look active here.
+        if let Some(value) = session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(DELEGATED_CHILD_SELECTION_METADATA_KEY))
+        {
+            let selection: DelegatedSelection =
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    AgentError::InvalidConfig(format!("invalid child selection: {error}"))
+                })?;
+            let events = self
+                .state
+                .storage
+                .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                    session_id: Some(session.id),
+                    entity_kind: Some("experiment_location".into()),
+                    entity_id: Some(crate::experimentation::LOCATION_TASK_PROMPT.into()),
+                    event_kind: Some("variant_selected".into()),
+                    limit: 1,
+                    ..Default::default()
+                })
+                .await?;
+            if events.is_empty()
+                && let Some(prompt) = selection.prompt
+                && let Err(error) = crate::experimentation::record_selection(
+                    &self.state,
+                    crate::experimentation::LOCATION_TASK_PROMPT,
+                    &prompt,
+                    Some(session.id),
+                    Some(turn_id),
+                )
+                .await
+            {
+                tracing::warn!(%error, session_id = %session.id,
+                    "task prompt variant record unavailable; serving the definition default");
+            }
+        }
         let active_skills = load_active_skills_for_agent(
             &self.state,
             session.id,
@@ -268,11 +324,17 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
         let assembly_name = context_choices.assembly_name;
         // A delegated child serves the operator through its parent and
-        // carries the same profile and index.
+        // carries the same profile and index, reaching as far as its own
+        // tools let it.
         let memory_index = Some(
             crate::memory::load_memory_index(&self.swage_root, &self.topic.location())
                 .await
-                .into_element(),
+                .into_element(swage_context::memory::MemoryReach::for_tools(
+                    self.offered_tools
+                        .is_offered(crate::tool::memory::MEMORY_READ_TOOL),
+                    self.offered_tools
+                        .is_offered(crate::tool::memory::MEMORY_WRITE_TOOL),
+                )),
         );
         let mut session_variables: std::collections::BTreeMap<String, String> = self
             .state
@@ -293,7 +355,8 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             session.active_workspace_attachment_id,
         )
         .await;
-        let environment = build_session_environment(&self.topic, &self.tool_root, session);
+        let environment =
+            build_session_environment(&self.topic, &self.tool_root, session, &workspace_policy);
         let available_skills = available_skills_for_agent(
             &self.topic.location(),
             &self.agent_id,
@@ -307,12 +370,14 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         );
         let elements = build_assembly_elements(
             &self.config.instructions,
+            &self.config.instruction_sources,
             operator_guidance,
             active_skills,
             delegated_history,
             memory_index,
             environment,
             available_skills,
+            self.offered_tools.clone(),
             self.config.default_model_id(),
             context_choices.working_norms_scaffold,
             &hierarchy,
@@ -330,11 +395,19 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &session_variables,
         );
         let mut assembly_report = output.report;
+        super::redact_element_texts(&self.state, &mut assembly_report).await;
         assembly_report.effective_tool_permissions = Some(self.effective_tool_permissions.clone());
-        let report = serde_json::to_value(&assembly_report).unwrap_or_else(|error| {
+        let mut report = serde_json::to_value(&assembly_report).unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to serialise delegated assembly report");
             serde_json::json!({ "error": "serialisation failed" })
         });
+        if let Some(selection) = session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(DELEGATED_CHILD_SELECTION_METADATA_KEY))
+        {
+            report["selection"] = selection.clone();
+        }
         let _ = self
             .context_event_tx
             .send(crate::websocket::ServerEvent::ContextAssembled {
@@ -461,7 +534,8 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
         let turn_id = match &event {
             AgentEvent::ProviderRequestPrepared { turn_id, .. }
             | AgentEvent::ProviderResponseCaptured { turn_id, .. }
-            | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
+            | AgentEvent::ProviderReasoningCaptured { turn_id, .. }
+            | AgentEvent::ProviderAttempt { turn_id, .. } => *turn_id,
             _ => return Ok(()),
         };
         let Some(snapshot) = self.state.storage.get_snapshot(turn_id).await? else {
@@ -498,10 +572,256 @@ impl DelegationSnapshotRecorder for SnapshotOnlyDelegationRecorder {
     }
 }
 
+// Execution has settled before this read. A cancellation request alone must
+// never tell an open view that the turn has ended.
+async fn announce_delegated_outcome(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    result: &Result<swage_storage::AgentMessage, AgentError>,
+) {
+    use crate::websocket::ServerEvent;
+    use swage_storage::TurnState;
+
+    let turn = match state.storage.get_turn(turn_id).await {
+        Ok(Some(turn)) => turn,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%turn_id, %error, "could not read delegated outcome for the open view");
+            return;
+        }
+    };
+    let event = match turn.state {
+        TurnState::Completed | TurnState::Incomplete => ServerEvent::TurnComplete {
+            turn_id,
+            incomplete_reason: (turn.state == TurnState::Incomplete).then(|| "max_tokens".into()),
+            input_tokens: None,
+            output_tokens: None,
+            cost_microcents: None,
+            structured_output: turn.structured_output,
+        },
+        TurnState::Cancelled => ServerEvent::Cancelled {},
+        TurnState::Failed | TurnState::Refused | TurnState::Interrupted => ServerEvent::Error {
+            code: match turn.state {
+                TurnState::Refused => "provider_refused",
+                TurnState::Interrupted => "turn_interrupted",
+                _ => "agent_error",
+            }
+            .into(),
+            message: match result {
+                Ok(message) => message.payload["error"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| turn.state.to_string()),
+                Err(error) => error.to_string(),
+            },
+        },
+        _ => return,
+    };
+    // Delegated children have no token stream for their open conversation.
+    // Deliver the recorded reply on the same channel as the terminal event
+    // so the view receives the reply, including partial output, first.
+    match crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone())
+        .get_thread_detail(turn.thread_id)
+        .await
+    {
+        Ok(detail) => {
+            for message in detail.messages.into_iter().filter(|message| {
+                message.turn_id == Some(turn_id)
+                    && message.origin == swage_storage::MessageOrigin::Assistant
+            }) {
+                state
+                    .send_to_session(
+                        session_id,
+                        &ServerEvent::MessageAppended {
+                            session_id,
+                            message,
+                        },
+                    )
+                    .await;
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%turn_id, %error, "could not read delegated reply for the open view");
+        }
+    }
+    state.send_to_session(session_id, &event).await;
+}
+
+// Both completion modes publish their child session through the same stop
+// registry; the executor owns the token and its lifetime remains the turn's.
+async fn track_delegated_session(
+    state: &AppState,
+    token: CancellationToken,
+    mut started_rx: tokio::sync::oneshot::Receiver<swage_agent::DetachedDelegation>,
+    forward_started: Option<tokio::sync::oneshot::Sender<swage_agent::DetachedDelegation>>,
+    mut execution: std::pin::Pin<
+        Box<impl std::future::Future<Output = Result<swage_storage::AgentMessage, AgentError>>>,
+    >,
+) -> Result<swage_storage::AgentMessage, AgentError> {
+    tokio::select! {
+        biased;
+        started = &mut started_rx => {
+            match started {
+                Ok(started) => {
+                    let session_id = started.child_session_id;
+                    let turn_id = started.child_turn_id;
+                    state.active_turns.lock().await.insert(session_id, token);
+                    let registration = RegisteredChild { state: state.clone(), session_id, turn_id, settled: false };
+                    crate::service::announce_session_updated(&state.broadcast, session_id);
+                    if let Some(sender) = forward_started { let _ = sender.send(started); }
+                    let result = execution.await;
+                    // The guard stays armed until the child leaves the running
+                    // registry: a stop can drop this future while it settles.
+                    announce_delegated_outcome(state, session_id, turn_id, &result).await;
+                    state.active_turns.lock().await.remove(&session_id);
+                    registration.settle();
+                    crate::service::announce_session_updated(&state.broadcast, session_id);
+                    drain_queue_after_delegated_turn(state, session_id, turn_id).await;
+                    result
+                }
+                Err(_) => execution.await,
+            }
+        }
+        result = &mut execution => {
+            // Completion can win the same poll that published the address.
+            if let Ok(started) = started_rx.try_recv() {
+                let session_id = started.child_session_id;
+                let turn_id = started.child_turn_id;
+                announce_delegated_outcome(state, session_id, turn_id, &result).await;
+                crate::service::announce_session_updated(&state.broadcast, session_id);
+                if let Some(sender) = forward_started { let _ = sender.send(started); }
+                drain_queue_after_delegated_turn(state, session_id, turn_id).await;
+            }
+            result
+        },
+    }
+}
+
+/// A delegated child registered as running. A Wait-mode child is awaited
+/// inside its parent's tool call, which is dropped when the parent is stopped;
+/// the child's execution goes with it. Dropped before it settles, the
+/// registration records the child's turn as cancelled, tells its open view so,
+/// and releases the session from the running registry, so the child is not
+/// shown or treated as running afterwards. Its queue stays standing, as after
+/// any stop.
+struct RegisteredChild {
+    state: AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    settled: bool,
+}
+
+impl RegisteredChild {
+    /// The child has left the running registry; its caller settles the rest.
+    fn settle(mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for RegisteredChild {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let (state, session_id, turn_id) = (self.state.clone(), self.session_id, self.turn_id);
+        // Drop is synchronous; the cleanup awaits storage and the registry.
+        std::mem::drop(tokio::spawn(async move {
+            use swage_storage::TurnState;
+            match state.storage.get_turn(turn_id).await {
+                Ok(Some(turn))
+                    if matches!(
+                        turn.state,
+                        TurnState::Pending
+                            | TurnState::Processing
+                            | TurnState::Delegating
+                            | TurnState::AwaitingApproval
+                    ) =>
+                {
+                    if let Err(error) = state
+                        .storage
+                        .update_turn_state(turn_id, TurnState::Cancelled)
+                        .await
+                    {
+                        tracing::warn!(%turn_id, %error, "could not record a dropped delegated turn as cancelled");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%turn_id, %error, "could not read a dropped delegated turn");
+                }
+            }
+            announce_delegated_outcome(&state, session_id, turn_id, &Err(AgentError::Cancelled))
+                .await;
+            state.active_turns.lock().await.remove(&session_id);
+            crate::service::announce_session_updated(&state.broadcast, session_id);
+        }));
+    }
+}
+
+/// The approval registrar for a delegated child. A child's agent events reach
+/// no projection until it finishes, so its approval is announced here instead:
+/// views of running work hear the child's session change when a request starts
+/// waiting on the person and again when it is answered or expires.
+fn signalling_approval_registrar(state: AppState) -> swage_agent::ApprovalChannelRegistrar {
+    let register = build_approval_registrar(state.approval_channels.clone());
+    Arc::new(move |approval_id, sender| {
+        announce_approval_session(&state, approval_id);
+        let registration = register(approval_id, sender);
+        let state = state.clone();
+        swage_agent::approval::ApprovalChannelRegistration::new(move || {
+            drop(registration);
+            announce_approval_session(&state, approval_id);
+        })
+    })
+}
+
+/// Signal the session an approval's turn belongs to.
+fn announce_approval_session(state: &AppState, approval_id: Uuid) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let session_id = async {
+            let approval = state.storage.get_approval(approval_id).await.ok()??;
+            let turn = state.storage.get_turn(approval.turn_id).await.ok()??;
+            let thread = state.storage.get(turn.thread_id).await.ok()??;
+            Some(thread.session_id)
+        }
+        .await;
+        match session_id {
+            Some(session_id) => {
+                crate::service::announce_session_updated(&state.broadcast, session_id)
+            }
+            None => {
+                tracing::warn!(%approval_id, "could not find the session of a delegated approval")
+            }
+        }
+    });
+}
+
+/// Start the child session's queued work once its delegated turn has settled,
+/// unless the turn was stopped or interrupted, which leaves the queue standing.
+async fn drain_queue_after_delegated_turn(state: &AppState, session_id: Uuid, turn_id: Uuid) {
+    match state.storage.get_turn(turn_id).await {
+        Ok(Some(turn)) => {
+            if crate::turn_queue::drains_queue_after(turn.state) {
+                crate::turn_queue::spawn_drain(state.clone(), session_id);
+            }
+        }
+        Ok(None) => {
+            tracing::warn!(%turn_id, "delegated turn missing; its queue was not drained");
+        }
+        Err(error) => {
+            tracing::warn!(%turn_id, %error, "could not read delegated outcome for queue drain");
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct GatewayDelegationHandler {
     state: AppState,
     pub(super) active_delegations: swage_agent::ActiveDelegations,
+    depth: u64,
+    depth_limit: Option<u64>,
 }
 
 impl GatewayDelegationHandler {
@@ -509,6 +829,127 @@ impl GatewayDelegationHandler {
         Self {
             state,
             active_delegations: swage_agent::active_delegations(),
+            depth: 0,
+            depth_limit: None,
+        }
+    }
+
+    pub(crate) async fn for_external_child(
+        state: AppState,
+        location: &swage_core::ScopeLocation,
+        sender_agent_id: &str,
+        sender_turn_id: Option<Uuid>,
+    ) -> Result<Self, AgentError> {
+        let mut handler = Self::new(state);
+        if let Some(turn_id) = sender_turn_id {
+            handler = handler.for_turn(turn_id).await?;
+        }
+        if handler.depth_limit.is_none() {
+            handler.depth_limit = Some(
+                load_session_config(&handler.state, location, sender_agent_id)
+                    .map_err(|error| AgentError::InvalidConfig(error.to_string()))?
+                    .sessions
+                    .max_delegation_depth,
+            );
+        }
+        handler.depth = handler.depth.saturating_add(1);
+        Ok(handler)
+    }
+
+    fn restore_bound(&mut self, metadata: Option<&serde_json::Value>) -> Result<(), AgentError> {
+        if let Some(bound) =
+            metadata.and_then(|metadata| metadata.get(DELEGATION_BOUND_METADATA_KEY))
+        {
+            let bound: DelegationBound =
+                serde_json::from_value(bound.clone()).map_err(|error| {
+                    AgentError::InvalidConfig(format!("invalid delegation bound: {error}"))
+                })?;
+            self.depth = bound.depth;
+            self.depth_limit = Some(bound.limit);
+        }
+        Ok(())
+    }
+
+    async fn for_turn(&self, turn_id: Uuid) -> Result<Self, AgentError> {
+        let turn = self.state.storage.get_turn(turn_id).await?.ok_or_else(|| {
+            swage_core::StorageError::NotFound {
+                entity: "turn".into(),
+                id: turn_id.to_string(),
+            }
+        })?;
+        let thread =
+            swage_storage::store::ThreadStore::get(self.state.storage.as_ref(), turn.thread_id)
+                .await?
+                .ok_or(AgentError::ThreadNotFound(turn.thread_id))?;
+        let session = self
+            .state
+            .storage
+            .get_session(thread.session_id)
+            .await?
+            .ok_or(AgentError::SessionNotFound(thread.session_id))?;
+        let mut handler = Self {
+            state: self.state.clone(),
+            active_delegations: self.active_delegations.clone(),
+            depth: self.depth,
+            depth_limit: self.depth_limit,
+        };
+        handler.restore_bound(session.metadata.as_ref())?;
+        Ok(handler)
+    }
+
+    async fn check_depth(
+        &self,
+        depth: u64,
+        limit: u64,
+        target_agent_id: &str,
+        delegate_call_id: &str,
+        sender_turn_id: Option<Uuid>,
+    ) -> Result<(), AgentError> {
+        if depth <= limit {
+            return Ok(());
+        }
+        let reason = format!("delegation depth {depth} exceeds the limit {limit}");
+        let sender_session_id = match sender_turn_id {
+            Some(turn_id) => Some(
+                self.filesystem_authority_for_turn(turn_id)
+                    .await?
+                    .session_id,
+            ),
+            None => None,
+        };
+        self.state.storage.create_audit_event(swage_storage::NewAuditEvent {
+            id: Uuid::new_v4().to_string(), session_id: sender_session_id,
+            entity_kind: "delegation".into(), entity_id: delegate_call_id.to_owned(),
+            event_kind: "delegation_refused".into(), summary: reason.clone(),
+            metadata: serde_json::json!({"turn_id": sender_turn_id, "target_agent_id": target_agent_id,
+                "depth": depth, "limit": limit, "reason": reason}),
+        }).await?;
+        Err(AgentError::InvalidConfig(reason))
+    }
+
+    pub(crate) async fn check_external_depth(
+        &self,
+        target_agent_id: &str,
+        delegate_call_id: &str,
+        sender_turn_id: Option<Uuid>,
+    ) -> Result<(), AgentError> {
+        self.check_depth(
+            self.depth,
+            self.depth_limit
+                .expect("external child has a settled limit"),
+            target_agent_id,
+            delegate_call_id,
+            sender_turn_id,
+        )
+        .await
+    }
+
+    pub(crate) fn record_bound(&self, metadata: &mut serde_json::Value) {
+        if let Some(limit) = self.depth_limit {
+            metadata[DELEGATION_BOUND_METADATA_KEY] = serde_json::json!(DelegationBound {
+                depth: self.depth,
+                limit,
+            });
         }
     }
 }
@@ -556,12 +997,59 @@ impl DelegationHandler for GatewayDelegationHandler {
         let active_workspace_attachment_id =
             sender_filesystem_authority.active_workspace_attachment_id;
         let sender_session_id = sender_filesystem_authority.session_id;
+        let handler = self.for_turn(sender_turn_id).await?;
+        let depth_limit =
+            match handler.depth_limit {
+                Some(limit) => limit,
+                None => load_session_config(&self.state, &topic.location(), sender_agent_id)
+                    .map_err(|error| {
+                        AgentError::InvalidConfig(format!(
+                            "failed to load dispatch bound for agent {sender_agent_id:?}: {error}"
+                        ))
+                    })?
+                    .sessions
+                    .max_delegation_depth,
+            };
+        let child_depth = handler.depth.saturating_add(1);
+        let mut child_handler = Self {
+            state: self.state.clone(),
+            active_delegations: self.active_delegations.clone(),
+            depth: child_depth,
+            depth_limit: Some(depth_limit),
+        };
         let existing_named_child = match child {
             Some(name) => {
                 resolve_named_child(&self.state, sender_session_id, name, target_agent_id).await?
             }
             None => None,
         };
+        if let Some(child) = &existing_named_child {
+            child_handler.restore_bound(Some(&child.metadata))?;
+        }
+        self.check_depth(
+            child_handler.depth,
+            child_handler
+                .depth_limit
+                .expect("child has a settled limit"),
+            target_agent_id,
+            delegate_call_id,
+            Some(sender_turn_id),
+        )
+        .await?;
+        let fixed_selection: Option<DelegatedSelection> = existing_named_child
+            .as_ref()
+            .map(|child| {
+                let value = child
+                    .metadata
+                    .get(DELEGATED_CHILD_SELECTION_METADATA_KEY)
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig("named child has no creation selection".into())
+                    })?;
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    AgentError::InvalidConfig(format!("invalid child selection: {error}"))
+                })
+            })
+            .transpose()?;
         let read_child_option = |key: &str| -> Result<Option<serde_json::Value>, AgentError> {
             existing_named_child
                 .as_ref()
@@ -636,38 +1124,88 @@ impl DelegationHandler for GatewayDelegationHandler {
                 target_resolved
             }
         };
-        let target_resolved = match task_definition.as_deref() {
+        let mut prompt_decision = None;
+        let mut target_resolved = match task_definition.as_deref() {
             Some(id) => {
-                let definition =
+                let mut definition =
                     crate::service::resolve_task_definition(self.state.storage.as_ref(), id)
                         .await
                         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
-                let decision = crate::experimentation::select_variant(
-                    &target_resolved.experimentation,
-                    crate::experimentation::LOCATION_TASK_PROMPT,
-                    &[],
-                    "definition",
-                    sender_turn_id,
-                )
-                .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
-                if let Err(error) = crate::experimentation::record_selection(
-                    &self.state,
-                    crate::experimentation::LOCATION_TASK_PROMPT,
-                    &decision,
-                    existing_named_child
-                        .as_ref()
-                        .map(|child| child.continuation.session_id),
-                    Some(sender_turn_id),
-                )
-                .await
-                {
-                    tracing::warn!(%error, task_id = id, "task prompt variant record unavailable; serving the definition default");
+                if fixed_selection.is_some() {
+                    // The permissions still resolve on every call; the child's
+                    // model and prompt choice belong to its creation record.
+                    definition.model_id = None;
+                } else {
+                    let decision = crate::experimentation::select_variant(
+                        &target_resolved.experimentation,
+                        crate::experimentation::LOCATION_TASK_PROMPT,
+                        &[],
+                        "definition",
+                        sender_turn_id,
+                    )
+                    .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+                    prompt_decision = Some(decision);
                 }
                 super::apply_task_definition(target_resolved, &definition)
                     .map_err(|error| AgentError::InvalidConfig(error.to_string()))?
             }
             None => target_resolved,
         };
+        let retain_effort = fixed_selection.is_some();
+        let mut selection = match fixed_selection {
+            Some(selection) => selection,
+            None => {
+                let model = target_resolved.models.default_model().cloned();
+                DelegatedSelection {
+                    model_key: target_resolved.models.default.clone(),
+                    model_id: if target_resolved.default_model_id().is_empty() {
+                        self.state.active_provider().model_id().to_owned()
+                    } else {
+                        target_resolved.default_model_id().to_owned()
+                    },
+                    preset: model
+                        .as_ref()
+                        .and_then(|model| model.generation_preset.as_ref())
+                        .and_then(|id| target_resolved.generation.presets.get(id))
+                        .cloned(),
+                    model,
+                    effort: None,
+                    prompt: prompt_decision,
+                }
+            }
+        };
+        target_resolved.models.default = selection.model_key.clone();
+        if let Some(model) = &selection.model {
+            target_resolved
+                .models
+                .entries
+                .insert(selection.model_key.clone(), model.clone());
+            if let Some(id) = &model.generation_preset {
+                target_resolved.generation.presets.remove(id);
+                if let Some(preset) = &selection.preset {
+                    target_resolved
+                        .generation
+                        .presets
+                        .insert(id.clone(), preset.clone());
+                }
+            }
+        }
+        let child_provider =
+            crate::startup::selected_model_provider(&self.state, &target_resolved).await;
+        if !retain_effort {
+            selection.effort = selection
+                .model
+                .as_ref()
+                .and_then(|model| model.default_effort)
+                .map(|requested| {
+                    let capability = super::runtime_launch::effort_capability_for_model(
+                        &target_resolved,
+                        &selection.model_key,
+                        child_provider.as_ref(),
+                    );
+                    swage_core::resolve_effort(requested, &capability)
+                });
+        }
         resolve_requested_skills_for_agent(
             &topic.location(),
             target_agent_id,
@@ -687,6 +1225,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
             .expect("a delegated session always has at least its sender bound");
         add_dispatch_bound_task_definition_ids(&mut session_metadata, &bound_task_definition_ids);
+        child_handler.record_bound(&mut session_metadata);
         if let Some(workflow_call_tools) = &sender_filesystem_authority.workflow_call_tools {
             session_metadata[WORKFLOW_CALL_TOOLS_METADATA_KEY] = workflow_call_tools.clone();
         }
@@ -703,6 +1242,9 @@ impl DelegationHandler for GatewayDelegationHandler {
                     "failed to record named child context composition: {error}"
                 ))
             })?;
+        session_metadata[DELEGATED_CHILD_SELECTION_METADATA_KEY] = serde_json::to_value(&selection)
+            .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+        let child_effort = selection.effort;
         let effective_target_resolved = apply_dispatch_bounds(
             &self.state,
             &topic.location(),
@@ -728,7 +1270,6 @@ impl DelegationHandler for GatewayDelegationHandler {
         if let Some(existing) = existing_named_child.as_ref() {
             session_metadata = existing.metadata.clone();
         }
-        let existing_child = existing_named_child.map(|child| child.continuation);
         let (mut target_agent_config, mut tool_root) = build_agent_config_for_topic_workspace(
             &self.state,
             target_agent_id.to_string(),
@@ -739,8 +1280,9 @@ impl DelegationHandler for GatewayDelegationHandler {
             active_workspace_attachment_id,
         )
         .await;
+        target_agent_config.model_id = Some(selection.model_id);
         let mut worktree_owner_id = None;
-        let placement = if existing_child.is_some() {
+        let placement = if existing_named_child.is_some() {
             reauthorise_named_child_placement(
                 &self.state,
                 topic_id,
@@ -850,16 +1392,53 @@ impl DelegationHandler for GatewayDelegationHandler {
         let target_sandbox_guard = target_dispatcher_build.sandbox_guard;
         let target_dispatcher = target_dispatcher_build.dispatcher;
 
-        let router = Arc::new(MessageRouter::new(self.state.storage.clone(), None));
+        // The child's dispatcher determines whether replay can offer a full read.
+        let existing_child = if let Some(existing) = existing_named_child {
+            let name = child.expect("resolved child has a name");
+            let retrieval = swage_core::ReplayRetrieval::with_read_tool(
+                target_dispatcher
+                    .offered_tools()
+                    .contains(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
+            );
+            // A delegated child serves the authored frame, as its agent
+            // config does: its session draws no variant of its own.
+            let history = match super::history::rebuild_thread_history_messages_with_retrieval(
+                &self.state,
+                existing.thread_id,
+                retrieval,
+                &target_agent_config.delivered_material_frame,
+            )
+            .await
+            {
+                Ok(history) => history,
+                Err(error) => {
+                    shutdown_sandbox_guard(
+                        &target_sandbox_guard,
+                        "failed to shut down delegated sandbox after history reload error",
+                    )
+                    .await;
+                    return Err(AgentError::InvalidConfig(format!(
+                        "cannot reload child {name:?}: {error}"
+                    )));
+                }
+            };
+            Some(DelegatedChildContinuation {
+                session_id: existing.session_id,
+                thread_id: existing.thread_id,
+                history,
+            })
+        } else {
+            None
+        };
+
+        let router = Arc::new(self.state.message_router());
         let executor = DelegationExecutor {
             storage: self.state.storage.clone(),
-            provider: self.state.active_provider(),
+            provider: child_provider,
             hook_registry: self.state.hook_registry.clone(),
             leak_detector: None,
-            approval_registrar: Some(build_approval_registrar(
-                self.state.approval_channels.clone(),
-            )),
-            delegation_handler: Some(Arc::new(self.clone())),
+            approval_registrar: Some(signalling_approval_registrar(self.state.clone())),
+            delegation_handler: Some(Arc::new(child_handler)),
             router: router.clone(),
             active_delegations: self.active_delegations.clone(),
             context_assembler: delegated_context_assembler(
@@ -871,6 +1450,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 silent_ws_tx,
                 effective_tool_permissions_record(&effective_target_resolved),
                 composition.clone(),
+                target_dispatcher.offered(),
             ),
             snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };
@@ -887,6 +1467,11 @@ impl DelegationHandler for GatewayDelegationHandler {
         if let Some(context) = context {
             payload["context"] = context;
         }
+        // The parent's own tool call for this delegation, so a reader of
+        // the record — recovery after a restart — can tell whether the
+        // child's result reached the parent's thread as that call's
+        // result, not only its mailbox.
+        payload["_call_id"] = serde_json::json!(delegate_call_id);
 
         let delegate_msg = match router
             .send_message(NewAgentMessage {
@@ -921,25 +1506,53 @@ impl DelegationHandler for GatewayDelegationHandler {
         match completion_mode {
             DelegateCompletionMode::Wait => {
                 let child_cancel_token = cancel_token.child_token();
-                let result_msg = match executor
-                    .execute_delegation(
-                        &delegate_msg,
-                        Some(sender_turn_id),
-                        Some(sender_session_id),
-                        topic_id,
-                        target_agent_config,
-                        target_context_transfer_config,
-                        Some(target_dispatcher),
-                        session_metadata,
-                        child_cancel_token,
-                        None,
-                        existing_child,
-                        placement
-                            .as_ref()
-                            .map(|placement| placement.path.to_string_lossy().into_owned()),
-                    )
-                    .await
-                {
+                let delegate_message_id = delegate_msg.id;
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let tracking_state = self.state.clone();
+                // Give each child its own poll stack so nested waits do not
+                // accumulate the parents' turn frames on the same stack. The
+                // tracking runs with it, so a dropped wait aborts both and the
+                // child's registration releases it.
+                let child_task = AbortOnDropHandle::new(tokio::spawn(
+                    async move {
+                        let execution = Box::pin(
+                            executor.execute_delegation(
+                                &delegate_msg,
+                                Some(sender_turn_id),
+                                Some(sender_session_id),
+                                topic_id,
+                                target_agent_config,
+                                target_context_transfer_config,
+                                Some(target_dispatcher),
+                                session_metadata,
+                                child_cancel_token.clone(),
+                                Some(started_tx),
+                                existing_child,
+                                placement
+                                    .as_ref()
+                                    .map(|placement| placement.path.to_string_lossy().into_owned()),
+                                child_effort,
+                            ),
+                        );
+                        track_delegated_session(
+                            &tracking_state,
+                            child_cancel_token,
+                            started_rx,
+                            None,
+                            execution,
+                        )
+                        .await
+                    }
+                    .in_current_span(),
+                ));
+                let result = child_task.await.unwrap_or_else(|error| {
+                    Err(swage_core::ToolError::ExecutionFailed {
+                        name: "delegate".into(),
+                        message: format!("child task ended before returning a result: {error}"),
+                    }
+                    .into())
+                });
+                let result_msg = match result {
                     Ok(result_msg) => result_msg,
                     Err(error) => {
                         shutdown_sandbox_guard(
@@ -948,7 +1561,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         )
                         .await;
                         let _ = router
-                            .fail_message(delegate_msg.id, &error.to_string())
+                            .fail_message(delegate_message_id, &error.to_string())
                             .await;
                         return Err(error);
                     }
@@ -1006,14 +1619,16 @@ impl DelegationHandler for GatewayDelegationHandler {
                 let child_cancel_token = cancel_token.child_token();
                 let delegate_message_id = delegate_msg.id;
                 let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+                let tracking_state = self.state.clone();
                 let detached_router = router.clone();
                 let worktree_host = Arc::clone(&self.state.worktree_host);
                 let placement = placement.clone();
                 let retain_worktree = child.is_some();
 
                 tokio::spawn(async move {
-                    let result = executor
-                        .execute_delegation(
+                    let execution = Box::pin(
+                        executor.execute_delegation(
                             &delegate_msg,
                             Some(sender_turn_id),
                             Some(sender_session_id),
@@ -1022,14 +1637,23 @@ impl DelegationHandler for GatewayDelegationHandler {
                             target_context_transfer_config,
                             Some(target_dispatcher),
                             session_metadata,
-                            child_cancel_token,
+                            child_cancel_token.clone(),
                             Some(started_tx),
                             existing_child,
                             placement
                                 .as_ref()
                                 .map(|placement| placement.path.to_string_lossy().into_owned()),
-                        )
-                        .await;
+                            child_effort,
+                        ),
+                    );
+                    let result = Box::pin(track_delegated_session(
+                        &tracking_state,
+                        child_cancel_token,
+                        started_rx,
+                        Some(registered_tx),
+                        execution,
+                    ))
+                    .await;
 
                     shutdown_sandbox_guard(
                         &target_sandbox_guard,
@@ -1062,7 +1686,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     }
                 });
 
-                let detached = started_rx.await.map_err(|_| {
+                let mut detached = registered_rx.await.map_err(|_| {
                     AgentError::InvalidConfig(
                         "detached delegation stopped before child turn startup".to_string(),
                     )
@@ -1080,6 +1704,24 @@ impl DelegationHandler for GatewayDelegationHandler {
                 {
                     tracing::warn!(%error, child = name, "could not record the named child");
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                #[cfg(test)]
+                crate::workflow::workflow_pause_test_hook::pause(
+                    "detached-snapshot-pending",
+                    sender_session_id,
+                )
+                .await;
+                let (observed, status_as_of) = self
+                    .state
+                    .storage
+                    .get_turn_observation(detached.child_turn_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig("delegated child turn disappeared".into())
+                    })?;
+                detached.status = Some(observed.state.to_string());
+                detached.error_message = observed.failure_message;
+                detached.status_as_of = Some(status_as_of);
                 Ok(DelegationOutcome::Detached(detached))
             }
         }
@@ -1191,4 +1833,446 @@ struct DispatchFilesystemAuthority {
     active_workspace_attachment_id: Option<Uuid>,
     placement: Option<ResolvedWorkerDirectory>,
     workflow_call_tools: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod settlement_tests {
+    use super::*;
+    use swage_storage::{NewTurn, TurnState};
+    use tokio::sync::{mpsc, oneshot};
+
+    async fn tracked_child(
+        ending: TurnState,
+        queue_message: bool,
+    ) -> (
+        AppState,
+        Uuid,
+        mpsc::UnboundedReceiver<crate::websocket::ServerEvent>,
+    ) {
+        let (state, session_id) = super::super::tests::make_state_with_session(vec![
+            swage_core::StreamChunk::Delta {
+                content: "Queued answer".into(),
+            },
+            swage_core::StreamChunk::Done {
+                finish_reason: None,
+            },
+        ])
+        .await;
+        let mut signals = state.broadcast.subscribe();
+        let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".into(),
+                state: TurnState::Processing,
+                user_input: Some("Delegated request".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let (events, receiver) = mpsc::unbounded_channel();
+        state.listen_to_session(session_id, events).await;
+        let (started, started_rx) = oneshot::channel();
+        let (registered, registered_rx) = oneshot::channel();
+        let delegate_message_id = Uuid::new_v4();
+        started
+            .send(swage_agent::DetachedDelegation {
+                delegate_message_id,
+                child_session_id: session_id,
+                child_thread_id: thread_id,
+                target_agent_id: "gateway".into(),
+                child_turn_id: turn.id,
+                status: None,
+                status_as_of: None,
+                error_message: None,
+            })
+            .ok()
+            .unwrap();
+        let execution = Box::pin(async {
+            registered_rx.await.unwrap();
+            assert!(state.active_turns.lock().await.contains_key(&session_id));
+            if queue_message {
+                crate::turn_queue::queue_input(
+                    &state,
+                    session_id,
+                    thread_id,
+                    "Next request".into(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    state
+                        .storage
+                        .list_queued_turn_inputs(session_id)
+                        .await
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            if ending == TurnState::Cancelled {
+                super::super::cancel_turn(&state, session_id).await.unwrap();
+                assert!(state.active_turns.lock().await[&session_id].is_cancelled());
+            }
+            state
+                .storage
+                .update_turn_state(turn.id, ending.clone())
+                .await
+                .unwrap();
+            state
+                .storage
+                .create_agent_message(swage_storage::NewAgentMessage {
+                    sender_agent_id: "gateway".into(),
+                    recipient_agent_id: "parent".into(),
+                    kind: swage_core::MessageKind::Result,
+                    correlation_id: Some(delegate_message_id),
+                    payload: match ending {
+                        TurnState::Failed => serde_json::json!({"error": "child failed"}),
+                        TurnState::Interrupted => serde_json::json!({"error": "interrupted"}),
+                        _ => serde_json::json!({"response": "Child answer"}),
+                    },
+                })
+                .await
+                .map_err(AgentError::from)
+        });
+        track_delegated_session(
+            &state,
+            CancellationToken::new(),
+            started_rx,
+            Some(registered),
+            execution,
+        )
+        .await
+        .expect("tracked child should return its durable result");
+        assert!(!state.active_turns.lock().await.contains_key(&session_id));
+        // Views of running work hear the child start and settle, as they do
+        // for a turn started in the child's own conversation.
+        let mut session_signals = 0;
+        while let Ok(event) = signals.try_recv() {
+            if matches!(event, crate::websocket::ServerEvent::SessionUpdated { session_id: signalled } if signalled == session_id)
+            {
+                session_signals += 1;
+            }
+        }
+        assert!(
+            session_signals >= 2,
+            "the child signals when it registers and when it settles; saw {session_signals}"
+        );
+        (state, session_id, receiver)
+    }
+
+    #[tokio::test]
+    async fn delegated_stop_leaves_queued_message_without_starting_another_turn() {
+        for ending in [TurnState::Cancelled, TurnState::Interrupted] {
+            let (state, session_id, mut events) = tracked_child(ending, true).await;
+            // Let an incorrectly spawned drain run, including its next turn.
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                while events.recv().await.is_some() {}
+            })
+            .await;
+            assert_eq!(
+                state
+                    .storage
+                    .list_queued_turn_inputs(session_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1,
+                "stopping a delegated child must leave its queued message standing"
+            );
+            let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+            assert_eq!(
+                state
+                    .storage
+                    .list_turns_by_thread(thread_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1,
+                "stopping a delegated child must not start another turn"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delegated_completion_drains_queued_message_without_another_send() {
+        let (state, session_id, mut events) = tracked_child(TurnState::Completed, true).await;
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, crate::websocket::ServerEvent::TurnComplete { .. }) {
+                    let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+                    if state
+                        .storage
+                        .list_turns_by_thread(thread_id)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|turn| {
+                            turn.user_input.as_deref() == Some("Next request")
+                                && turn.state == TurnState::Completed
+                        })
+                    {
+                        return;
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "queued request must run when the delegated turn ends without another send"
+        );
+        let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
+        assert_eq!(
+            turns.len(),
+            2,
+            "the queued request must create its own turn"
+        );
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.user_input.as_deref() == Some("Next request")
+                    && turn.state == TurnState::Completed)
+        );
+    }
+
+    async fn assert_recorded_reply_before_terminal(ending: TurnState) {
+        let (state, session_id) = super::super::tests::make_state_with_session(vec![]).await;
+        let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".into(),
+                state: ending.clone(),
+                user_input: Some("Delegated request".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let reply = state
+            .storage
+            .append_message(swage_storage::model::AppendMessage {
+                thread_id,
+                attachments: vec![],
+                turn_id: Some(turn.id),
+                role: swage_core::Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
+                content: if ending == TurnState::Cancelled {
+                    "Partial child reply"
+                } else {
+                    "Recorded child reply"
+                }
+                .into(),
+                agent_id: "gateway".into(),
+            })
+            .await
+            .unwrap();
+        let (sender, mut events) = mpsc::unbounded_channel();
+        state.listen_to_session(session_id, sender).await;
+        announce_delegated_outcome(&state, session_id, turn.id, &Err(AgentError::Cancelled)).await;
+        let event = events
+            .try_recv()
+            .expect("recorded reply must reach the open child view");
+        assert!(
+            matches!(event, crate::websocket::ServerEvent::MessageAppended { session_id: id, ref message }
+                if id == session_id && message.id == reply.id && message.content == reply.content
+                    && message.turn_id == Some(turn.id)),
+            "recorded assistant reply must precede the terminal event: {event:?}"
+        );
+        let terminal = events
+            .try_recv()
+            .expect("child must settle after its recorded reply");
+        assert!(match ending {
+            TurnState::Cancelled => matches!(terminal, crate::websocket::ServerEvent::Cancelled {}),
+            _ =>
+                matches!(terminal, crate::websocket::ServerEvent::TurnComplete { turn_id, .. } if turn_id == turn.id),
+        });
+        assert!(events.try_recv().is_err(), "reply must be delivered once");
+    }
+
+    #[tokio::test]
+    async fn delegated_recorded_reply_precedes_completion() {
+        assert_recorded_reply_before_terminal(TurnState::Completed).await;
+    }
+
+    #[tokio::test]
+    async fn delegated_recorded_partial_reply_precedes_cancellation() {
+        assert_recorded_reply_before_terminal(TurnState::Cancelled).await;
+    }
+
+    #[tokio::test]
+    async fn delegated_completion_settles_open_view() {
+        let (_, _, mut events) = tracked_child(TurnState::Completed, false).await;
+        assert!(
+            matches!(
+                events.try_recv(),
+                Ok(crate::websocket::ServerEvent::TurnComplete { .. })
+            ),
+            "completed delegation must tell the open child view"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_interruption_settles_open_view_as_interrupted() {
+        let (_, _, mut events) = tracked_child(TurnState::Interrupted, false).await;
+        assert!(
+            matches!(events.try_recv(), Ok(crate::websocket::ServerEvent::Error { code, .. }) if code == "turn_interrupted"),
+            "an interrupted delegation must tell the open child view it was interrupted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delegated_approval_signals_its_session_when_it_waits_and_when_it_ends() {
+        let (state, session_id) = super::super::tests::make_state_with_session(vec![]).await;
+        let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".into(),
+                state: TurnState::AwaitingApproval,
+                user_input: Some("Delegated request".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let approval = state
+            .storage
+            .create_approval(swage_storage::NewApprovalRequest {
+                turn_id: turn.id,
+                agent_id: "gateway".into(),
+                kind: swage_storage::ApprovalKind::Hook,
+                tool_name: None,
+                tool_arguments: None,
+                hook_name: None,
+                prompt: "Allow?".into(),
+                context: None,
+                timeout_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Interrupt,
+            })
+            .await
+            .unwrap();
+        let mut signals = state.broadcast.subscribe();
+        let next_signal = |signals: &mut tokio::sync::broadcast::Receiver<
+            crate::websocket::ServerEvent,
+        >| {
+            let mut signals = signals.resubscribe();
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if let Ok(crate::websocket::ServerEvent::SessionUpdated { session_id }) =
+                            signals.recv().await
+                        {
+                            return session_id;
+                        }
+                    }
+                })
+                .await
+                .expect("the child's session is signalled")
+            }
+        };
+        let registrar = signalling_approval_registrar(state.clone());
+        let waiting = next_signal(&mut signals);
+        let (sender, _receiver) = oneshot::channel();
+        let registration = registrar(approval.id, sender);
+        assert_eq!(waiting.await, session_id);
+        let ended = next_signal(&mut signals);
+        drop(registration);
+        assert_eq!(ended.await, session_id);
+    }
+
+    #[tokio::test]
+    async fn a_child_dropped_with_its_stopped_parent_is_released_and_recorded_cancelled() {
+        let (state, session_id) = super::super::tests::make_state_with_session(vec![]).await;
+        let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".into(),
+                state: TurnState::Processing,
+                user_input: Some("Delegated request".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        state.listen_to_session(session_id, events).await;
+        let (started, started_rx) = oneshot::channel();
+        started
+            .send(swage_agent::DetachedDelegation {
+                delegate_message_id: Uuid::new_v4(),
+                child_session_id: session_id,
+                child_thread_id: thread_id,
+                target_agent_id: "gateway".into(),
+                child_turn_id: turn.id,
+                status: None,
+                status_as_of: None,
+                error_message: None,
+            })
+            .ok()
+            .unwrap();
+        let tracking = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let execution = Box::pin(std::future::pending::<
+                    Result<swage_storage::AgentMessage, AgentError>,
+                >());
+                track_delegated_session(
+                    &state,
+                    CancellationToken::new(),
+                    started_rx,
+                    None,
+                    execution,
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !state.active_turns.lock().await.contains_key(&session_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the child registers as running");
+
+        // The parent's stop drops its tool call, and the child with it.
+        tracking.abort();
+        let _ = tracking.await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.active_turns.lock().await.contains_key(&session_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the dropped child leaves the running registry");
+        let recorded = state.storage.get_turn(turn.id).await.unwrap().unwrap();
+        assert_eq!(recorded.state, TurnState::Cancelled);
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(crate::websocket::ServerEvent::Cancelled {}) = receiver.recv().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            settled.is_ok(),
+            "the child's open view is told it was cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_failure_settles_open_view() {
+        let (_, _, mut events) = tracked_child(TurnState::Failed, false).await;
+        assert!(
+            matches!(events.try_recv(), Ok(crate::websocket::ServerEvent::Error { code, message }) if code == "agent_error" && message == "child failed"),
+            "failed delegation must tell the open child view its recorded error"
+        );
+    }
 }

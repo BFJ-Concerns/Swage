@@ -153,11 +153,13 @@ mod tests {
                 name: "history".to_string(),
                 source: "thread-123".to_string(),
                 token_count: 42,
+                full_text: None,
                 preview: Some("Hello…".to_string()),
                 priority: 0,
                 named_assembly: None,
             }],
             total_tokens: 42,
+            provider_attempts: Vec::new(),
             budget: Some(1000),
             budget_remaining: Some(958),
             compaction_applied: vec![],
@@ -200,6 +202,7 @@ mod tests {
             failure_reason: None,
             focus: None,
             diagnosis: None,
+            calls: Vec::new(),
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -244,6 +247,7 @@ mod tests {
             failure_reason: Some("LLM timeout".to_string()),
             focus: None,
             diagnosis: None,
+            calls: Vec::new(),
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -270,6 +274,7 @@ mod tests {
             failure_reason: None,
             focus: None,
             diagnosis: None,
+            calls: Vec::new(),
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -292,6 +297,7 @@ mod tests {
             failure_reason: None,
             focus: Some("Preserve dates and named decisions".to_string()),
             diagnosis: None,
+            calls: Vec::new(),
         };
 
         let persisted = serde_json::to_string(&record).expect("record should serialise");
@@ -311,6 +317,7 @@ mod tests {
             name: "custom-assembly".to_string(),
             source: "named assembly".to_string(),
             token_count: 150,
+            full_text: None,
             preview: None,
             priority: 50,
             named_assembly: Some(NamedAssemblyReport {
@@ -321,6 +328,7 @@ mod tests {
                         name: "history".to_string(),
                         source: "thread-abc".to_string(),
                         token_count: 100,
+                        full_text: None,
                         preview: None,
                         priority: 0,
                         named_assembly: None,
@@ -329,6 +337,7 @@ mod tests {
                         name: "prompts".to_string(),
                         source: "prompt rules".to_string(),
                         token_count: 50,
+                        full_text: None,
                         preview: None,
                         priority: 100,
                         named_assembly: None,
@@ -355,6 +364,7 @@ mod tests {
             name: "history".to_string(),
             source: "thread-123".to_string(),
             token_count: 42,
+            full_text: None,
             preview: Some("Hello…".to_string()),
             priority: 0,
             named_assembly: None,
@@ -376,6 +386,7 @@ mod tests {
                 name: "prompts".to_string(),
                 source: "agent prompts".to_string(),
                 token_count: 120,
+                full_text: None,
                 preview: Some("Be concise.".to_string()),
                 priority: 100,
                 named_assembly: None,

@@ -13,6 +13,9 @@ use ts_rs::TS;
 
 use swage_protocol::{channel, client, device, hosting, plugin};
 
+#[path = "support/projection_output.rs"]
+mod projection_output;
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -31,10 +34,20 @@ fn typescript_bindings_are_regenerated() {
     plugin::ContextProgramOutput::export_all(&cfg).expect("export context output");
     // Exporting the top-level types pulls in every dependency they
     // reference, so the full surface lands in one pass.
+    client::workflow::WorkflowRunEndingNotice::export_all(&cfg).expect("export ending notice");
+    client::workflow::AnswerWorkflowRunHoldResponse::export_all(&cfg)
+        .expect("export hold answer response");
+    client::workflow::WorkflowWorkerActivity::export_all(&cfg).expect("export worker activity");
+    client::workflow::WorkflowRunStatusRequest::export_all(&cfg).expect("export status request");
+    client::workflow::DelegationStartResult::export_all(&cfg)
+        .expect("export delegation start result");
+    client::workflow::WorkflowRunStartResult::export_all(&cfg).expect("export run start result");
     client::channel::CreateChannelLinkCodeRequest::export_all(&cfg)
         .expect("export channel link code request");
     client::channel::ChannelLinkCodeResponse::export_all(&cfg)
         .expect("export channel link code response");
+    client::channel::ChannelLinkListResponse::export_all(&cfg).expect("export channel links");
+    client::channel::ChannelLinkCodeListResponse::export_all(&cfg).expect("export channel codes");
     client::error::ApiErrorBody::export_all(&cfg).expect("export api error body");
     client::websocket::ClientEvent::export_all(&cfg).expect("export client events");
     client::websocket::ServerEvent::export_all(&cfg).expect("export server events");
@@ -47,6 +60,7 @@ fn typescript_bindings_are_regenerated() {
         .expect("export memory instruction request");
     client::memory::MemoryInstructionResponse::export_all(&cfg)
         .expect("export memory instruction response");
+    client::surface::RenameSurfaceRequest::export_all(&cfg).expect("export surface rename");
     client::surface::CreateSurfaceRequest::export_all(&cfg).expect("export create surface");
     client::surface::WriteSurfaceModuleResponse::export_all(&cfg)
         .expect("export write surface module response");
@@ -100,6 +114,14 @@ fn typescript_bindings_are_regenerated() {
     client::settings::SaveSettingsRequest::export_all(&cfg).expect("export save settings");
     client::settings::ModelDiscoveryResponse::export_all(&cfg).expect("export model discovery");
     client::settings::RestartStatusResponse::export_all(&cfg).expect("export restart status");
+    client::security_settings::SecuritySettingsResponse::export_all(&cfg)
+        .expect("export security settings");
+    client::security_settings::SaveSecuritySettingsRequest::export_all(&cfg)
+        .expect("export save security settings");
+    client::access::AccessStatusResponse::export_all(&cfg).expect("export access status");
+    client::access::PairingCodeResponse::export_all(&cfg).expect("export pairing code");
+    client::access::PairClientRequest::export_all(&cfg).expect("export pair client");
+    client::access::PairClientResponse::export_all(&cfg).expect("export pair client response");
     client::material::CreateAttachmentRequest::export_all(&cfg).expect("export attachment request");
     client::material::QueuedAttachmentResponse::export_all(&cfg).expect("export queued attachment");
     client::material::AttachmentListResponse::export_all(&cfg).expect("export attachments");
@@ -166,6 +188,7 @@ fn typescript_bindings_are_regenerated() {
         .expect("export workflow completed event");
     client::workflow::WorkerIsolation::export_all(&cfg).expect("export worker isolation");
     client::skill::SkillListResponse::export_all(&cfg).expect("export skill catalogue");
+    hosting::SecretListResponse::export_all(&cfg).expect("export governed secret choices");
     hosting::PresenceSnapshotResponse::export_all(&cfg).expect("export hosting presence");
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
     hosting::ApprovalDecisionRequest::export_all(&cfg).expect("export hosting approval decision");
@@ -401,38 +424,26 @@ fn trim_generated_typescript(directory: &Path) {
 /// The OpenAPI document and the TypeScript client are projections of the
 /// route manifest; like the schema, they are rewritten in place so drift
 /// shows as a dirty tree at the gate.
-#[test]
 fn client_route_projections_are_regenerated() {
-    let document = render_canonical(&client::openapi::document());
-    let document_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/client-openapi.json");
-    std::fs::write(&document_path, document).expect("write openapi document");
+    write_json_projection("client-openapi.json", client::openapi::document());
 
     let client_path = repo_root().join("frontend/src/lib/protocol/client.ts");
     std::fs::write(&client_path, client::typescript_client::render())
         .expect("write generated client");
 }
 
-#[test]
 fn client_schema_is_regenerated() {
-    let schema = schemars::schema_for!(client::ClientSurface);
-    let rendered = render_canonical(&schema);
-
-    let schema_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/client.json");
-    std::fs::create_dir_all(schema_path.parent().expect("schema dir")).expect("create schema dir");
-    std::fs::write(&schema_path, rendered).expect("write schema document");
+    write_schema::<client::ClientSurface>("client.json");
 }
 
-#[test]
 fn device_schema_is_regenerated() {
     write_schema::<device::DeviceSurface>("device.json");
 }
 
-#[test]
 fn channel_schema_is_regenerated() {
     write_schema::<channel::ChannelSurface>("channel.json");
 }
 
-#[test]
 fn hosting_schema_is_regenerated() {
     write_schema::<hosting::HostingSurface>("hosting.json");
 }
@@ -441,38 +452,19 @@ fn hosting_schema_is_regenerated() {
 fn plugin_process_schema_is_regenerated() {
     write_schema::<plugin::PluginProcessSurface>("plugin-process.json");
 }
-
-/// Renders a JSON document with every object's keys in sorted order. The
-/// committed projections must come out the same whatever the build that
-/// regenerates them: serde_json keeps insertion order when any crate in the
-/// build turns on its `preserve_order` feature (the JavaScript runtime
-/// does) and sorts keys otherwise, so a document rendered as serialised
-/// would differ between a crate-alone run and the whole-workspace gate.
-fn render_canonical<T: serde::Serialize>(value: &T) -> String {
-    let value = serde_json::to_value(value).expect("document serialises");
-    serde_json::to_string_pretty(&with_sorted_keys(value)).expect("document renders") + "\n"
-}
-
-fn with_sorted_keys(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(object) => {
-            let mut entries: Vec<(String, serde_json::Value)> = object
-                .into_iter()
-                .map(|(key, value)| (key, with_sorted_keys(value)))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            serde_json::Value::Object(entries.into_iter().collect())
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(with_sorted_keys).collect())
-        }
-        other => other,
-    }
-}
-
 fn write_schema<T: schemars::JsonSchema>(name: &str) {
     let schema = schemars::schema_for!(T);
-    let rendered = render_canonical(&schema);
+    write_json_projection(
+        name,
+        serde_json::to_value(schema).expect("schema serialises"),
+    );
+}
+
+/// Every JSON projection has the same byte representation across feature sets.
+fn write_json_projection(name: &str, mut document: serde_json::Value) {
+    document.sort_all_objects();
+    let rendered = serde_json::to_string_pretty(&document).expect("projection serialises") + "\n";
+
     let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("schema")
         .join(name);

@@ -2,12 +2,18 @@
 // manifest (crates/swage-protocol/src/client/routes.rs). Do not edit:
 // change the manifest and regenerate.
 
+import type { AccessStatusResponse } from "./AccessStatusResponse";
+import type { ChannelLinkCodeListResponse } from "./ChannelLinkCodeListResponse";
+import type { ChannelLinkCodeResponse } from "./ChannelLinkCodeResponse";
+import type { ChannelLinkListResponse } from "./ChannelLinkListResponse";
+import type { ChannelStatusListResponse } from "./ChannelStatusListResponse";
 import type { ConversationBranchListResponse } from "./ConversationBranchListResponse";
 import type { ConversationBranchResponse } from "./ConversationBranchResponse";
 import type { ConversationDetail } from "./ConversationDetail";
 import type { ConversationListResponse } from "./ConversationListResponse";
 import type { ConversationResponse } from "./ConversationResponse";
 import type { ConversationThreadDetail } from "./ConversationThreadDetail";
+import type { CreateChannelLinkCodeRequest } from "./CreateChannelLinkCodeRequest";
 import type { CreateConversationBranchRequest } from "./CreateConversationBranchRequest";
 import type { CreateConversationRequest } from "./CreateConversationRequest";
 import type { CreateSurfaceAnnotationRequest } from "./CreateSurfaceAnnotationRequest";
@@ -26,6 +32,9 @@ import type { MemoryPageListResponse } from "./MemoryPageListResponse";
 import type { MemoryPageResponse } from "./MemoryPageResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
 import type { MoveSurfaceModuleRequest } from "./MoveSurfaceModuleRequest";
+import type { PairClientRequest } from "./PairClientRequest";
+import type { PairClientResponse } from "./PairClientResponse";
+import type { PairingCodeResponse } from "./PairingCodeResponse";
 import type { PluginEnablementRequest } from "./PluginEnablementRequest";
 import type { PluginListResponse } from "./PluginListResponse";
 import type { PluginSummary } from "./PluginSummary";
@@ -33,10 +42,14 @@ import type { ProposeTurnGraphRequest } from "./ProposeTurnGraphRequest";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RelinkWorkspaceAttachmentRequest } from "./RelinkWorkspaceAttachmentRequest";
+import type { RenameSurfaceRequest } from "./RenameSurfaceRequest";
 import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
+import type { SaveSecuritySettingsRequest } from "./SaveSecuritySettingsRequest";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
 import type { SaveSurfaceToLibraryRequest } from "./SaveSurfaceToLibraryRequest";
+import type { SecretListResponse } from "./SecretListResponse";
+import type { SecuritySettingsResponse } from "./SecuritySettingsResponse";
 import type { SettingsResponse } from "./SettingsResponse";
 import type { StartProviderSignInRequest } from "./StartProviderSignInRequest";
 import type { StartProviderSignInResponse } from "./StartProviderSignInResponse";
@@ -82,6 +95,26 @@ async function request<T>(
     return undefined as T;
   }
   return (await response.json()) as T;
+}
+
+/** List channel statuses. */
+export async function listChannelStatuses(): Promise<ChannelStatusListResponse> {
+  return request<ChannelStatusListResponse>("GET", `/api/channels`);
+}
+
+/** List linked channel conversations. */
+export async function listChannelLinks(): Promise<ChannelLinkListResponse> {
+  return request<ChannelLinkListResponse>("GET", `/api/onboarding/channels`);
+}
+
+/** Issue a single-use channel link code. */
+export async function createChannelLinkCode(body: CreateChannelLinkCodeRequest): Promise<ChannelLinkCodeResponse> {
+  return request<ChannelLinkCodeResponse>("POST", `/api/onboarding/channels/link-codes`, body);
+}
+
+/** Read unredeemed channel link codes. */
+export async function listChannelLinkCodes(): Promise<ChannelLinkCodeListResponse> {
+  return request<ChannelLinkCodeListResponse>("GET", `/api/onboarding/channels/link-codes`);
 }
 
 /** List every topic. */
@@ -171,6 +204,11 @@ export async function abandonThread(id: string): Promise<ConversationThreadDetai
 /** Delete a conversation. */
 export async function deleteConversation(id: string): Promise<void> {
   return request<void>("DELETE", `/api/conversations/${encodeURIComponent(id)}`);
+}
+
+/** Stop the conversation's running turn, whichever client holds its connection. */
+export async function cancelConversationTurn(id: string): Promise<void> {
+  return request<void>("POST", `/api/conversations/${encodeURIComponent(id)}/cancel`);
 }
 
 /** Read a turn context report. */
@@ -293,6 +331,16 @@ export async function getSurface(surfaceId: string): Promise<SurfaceResponse> {
   return request<SurfaceResponse>("GET", `/api/surfaces/${encodeURIComponent(surfaceId)}`);
 }
 
+/** Rename this session's surface. */
+export async function renameSurface(surfaceId: string, body: RenameSurfaceRequest): Promise<SurfaceResponse> {
+  return request<SurfaceResponse>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}`, body);
+}
+
+/** Resolve a note while keeping it in the record. */
+export async function resolveSurfaceAnnotation(surfaceId: string, annotationId: string): Promise<SurfaceAnnotationView> {
+  return request<SurfaceAnnotationView>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/annotations/${encodeURIComponent(annotationId)}/resolve`);
+}
+
 /** Write a surface module: append one, or replace one's source against the revision read — a moved-on revision is refused with the module as it now stands. */
 export async function writeSurfaceModule(surfaceId: string, body: WriteSurfaceModuleRequest): Promise<WriteSurfaceModuleResponse> {
   return request<WriteSurfaceModuleResponse>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/modules`, body);
@@ -323,6 +371,11 @@ export async function deleteSurfaceAnnotation(annotationId: string): Promise<Del
   return request<DeleteSurfaceAnnotationResponse>("DELETE", `/api/surface-annotations/${encodeURIComponent(annotationId)}`);
 }
 
+/** List governed secrets without revealing values. */
+export async function listSecrets(): Promise<SecretListResponse> {
+  return request<SecretListResponse>("GET", `/api/secrets`);
+}
+
 /** Read gateway settings. */
 export async function getSettings(): Promise<SettingsResponse> {
   return request<SettingsResponse>("GET", `/api/settings`);
@@ -331,6 +384,41 @@ export async function getSettings(): Promise<SettingsResponse> {
 /** Save gateway settings. */
 export async function saveSettings(body: SaveSettingsRequest): Promise<SettingsResponse> {
   return request<SettingsResponse>("PUT", `/api/settings`, body);
+}
+
+/** Whether the gateway gates this connection and whether it is admitted. */
+export async function accessStatus(): Promise<AccessStatusResponse> {
+  return request<AccessStatusResponse>("GET", `/api/access`);
+}
+
+/** Issue a one-time pairing code; loopback only. */
+export async function issuePairingCode(): Promise<PairingCodeResponse> {
+  return request<PairingCodeResponse>("POST", `/api/pair/codes`);
+}
+
+/** Redeem a pairing code for the gateway's token, set as the browser's cookie. */
+export async function pairClient(body: PairClientRequest): Promise<PairClientResponse> {
+  return request<PairClientResponse>("POST", `/api/pair`, body);
+}
+
+/** Read the install's security checks: effective, overrides and relaxations. */
+export async function getInstallSecuritySettings(): Promise<SecuritySettingsResponse> {
+  return request<SecuritySettingsResponse>("GET", `/api/settings/security`);
+}
+
+/** Replace the install's security overrides. */
+export async function saveInstallSecuritySettings(body: SaveSecuritySettingsRequest): Promise<SecuritySettingsResponse> {
+  return request<SecuritySettingsResponse>("PUT", `/api/settings/security`, body);
+}
+
+/** Read a topic's security checks: effective, overrides and relaxations. */
+export async function getTopicSecuritySettings(id: string): Promise<SecuritySettingsResponse> {
+  return request<SecuritySettingsResponse>("GET", `/api/topics/${encodeURIComponent(id)}/settings/security`);
+}
+
+/** Replace a topic's security overrides. */
+export async function saveTopicSecuritySettings(id: string, body: SaveSecuritySettingsRequest): Promise<SecuritySettingsResponse> {
+  return request<SecuritySettingsResponse>("PUT", `/api/topics/${encodeURIComponent(id)}/settings/security`, body);
 }
 
 /** List the platform's own documentation, hosted by the gateway. */

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Creator"
+  short_description: "Write, change or audit an agent the product runs"
+  default_prompt: "Use $swage-agent-creator to write, change or audit one of this product's runtime agents."

@@ -3,6 +3,8 @@
 //! Keeps audio support behind one runtime boundary so the gateway and clients
 //! do not need provider-specific branching.
 
+use std::sync::RwLock;
+
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -20,8 +22,7 @@ pub struct VoiceCapabilities {
     pub default_voice: Option<String>,
     #[serde(default)]
     pub supported_voices: Vec<String>,
-    /// Why transcription or synthesis is unavailable, naming what to
-    /// configure; `None` when both are available.
+    /// Why transcription or synthesis is unavailable. `None` when both are available.
     #[serde(default)]
     pub unavailable_reason: Option<String>,
 }
@@ -130,6 +131,13 @@ pub struct OpenAiVoiceProvider {
     api_key: Option<MaskedString>,
     base_url: String,
     routes: VoiceModelRoutes,
+    speech_status: RwLock<SpeechStatus>,
+}
+
+enum SpeechStatus {
+    Unverified,
+    Available,
+    Failed(String),
 }
 
 impl OpenAiVoiceProvider {
@@ -140,6 +148,7 @@ impl OpenAiVoiceProvider {
             api_key: endpoint.api_key,
             base_url: endpoint.base_url,
             routes,
+            speech_status: RwLock::new(SpeechStatus::Unverified),
         }
     }
 
@@ -185,6 +194,72 @@ impl OpenAiVoiceProvider {
         headers
     }
 
+    async fn request_speech(
+        &self,
+        model: &str,
+        request: SpeechRequest,
+    ) -> Result<SpeechResponse, ProviderError> {
+        let voice = request.voice.unwrap_or_else(|| {
+            self.capabilities()
+                .default_voice
+                .unwrap_or_else(|| "alloy".into())
+        });
+        let format = request.format.unwrap_or_else(|| "wav".to_string());
+        let mime_type = match format.as_str() {
+            "mp3" => "audio/mpeg",
+            "flac" => "audio/flac",
+            "opus" => "audio/ogg",
+            _ => "audio/wav",
+        }
+        .to_string();
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/audio/speech",
+                self.base_url.trim_end_matches('/')
+            ))
+            .headers({
+                let mut headers = self.auth_headers();
+                headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                headers
+            })
+            .json(&serde_json::json!({
+                "model": model,
+                "input": request.text,
+                "voice": voice,
+                "response_format": format,
+            }))
+            .send()
+            .await
+            .map_err(|error| ProviderError::Network {
+                provider: "openai-voice".to_string(),
+                message: error.to_string(),
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+            return Err(ProviderError::HttpError {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+
+        Ok(SpeechResponse {
+            audio_bytes: bytes.to_vec(),
+            mime_type,
+            voice,
+        })
+    }
+
     fn supported_voices() -> Vec<String> {
         [
             "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
@@ -203,12 +278,20 @@ struct OpenAiTranscriptionResponse {
 #[async_trait]
 impl VoiceProvider for OpenAiVoiceProvider {
     fn capabilities(&self) -> VoiceCapabilities {
+        let speech_status = self.speech_status.read().unwrap_or_else(|e| e.into_inner());
         VoiceCapabilities {
             transcription: self.routes.transcription_model.is_some(),
-            synthesis: self.routes.speech_model.is_some(),
+            synthesis: self.routes.speech_model.is_some()
+                && matches!(*speech_status, SpeechStatus::Available),
             default_voice: Some("alloy".to_string()),
             supported_voices: Self::supported_voices(),
-            unavailable_reason: self.unavailable_reason(),
+            unavailable_reason: match (&self.routes.speech_model, &*speech_status) {
+                (Some(model), SpeechStatus::Unverified) => Some(format!(
+                    "speech model `{model}` has not been checked. Check the Speech model in Voice settings"
+                )),
+                (_, SpeechStatus::Failed(reason)) => Some(reason.clone()),
+                _ => self.unavailable_reason(),
+            },
         }
     }
 
@@ -263,65 +346,16 @@ impl VoiceProvider for OpenAiVoiceProvider {
 
     async fn synthesise(&self, request: SpeechRequest) -> Result<SpeechResponse, ProviderError> {
         let model = self.route_model(&self.routes.speech_model)?;
-        let voice = request.voice.unwrap_or_else(|| {
-            self.capabilities()
-                .default_voice
-                .unwrap_or_else(|| "alloy".into())
-        });
-        let format = request.format.unwrap_or_else(|| "wav".to_string());
-        let mime_type = match format.as_str() {
-            "mp3" => "audio/mpeg",
-            "flac" => "audio/flac",
-            "opus" => "audio/ogg",
-            _ => "audio/wav",
-        }
-        .to_string();
-
-        let response = reqwest::Client::new()
-            .post(format!(
-                "{}/audio/speech",
-                self.base_url.trim_end_matches('/')
-            ))
-            .headers({
-                let mut headers = self.auth_headers();
-                headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                headers
-            })
-            .json(&serde_json::json!({
-                "model": model,
-                "input": request.text,
-                "voice": voice,
-                "response_format": format,
-            }))
-            .send()
-            .await
-            .map_err(|error| ProviderError::Network {
-                provider: "openai-voice".to_string(),
-                message: error.to_string(),
-            })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read body>".to_string());
-            return Err(ProviderError::HttpError {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
-
-        Ok(SpeechResponse {
-            audio_bytes: bytes.to_vec(),
-            mime_type,
-            voice,
-        })
+        let result = self.request_speech(model, request).await;
+        let mut status = self
+            .speech_status
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *status = match &result {
+            Ok(_) => SpeechStatus::Available,
+            Err(error) => SpeechStatus::Failed(error.to_string()),
+        };
+        result
     }
 }
 
@@ -352,50 +386,63 @@ mod tests {
         }
     }
 
-    /// Accepts one HTTP request, answers it with `body`, and returns the raw
-    /// request bytes as text.
-    async fn capture_one_request(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+    /// Serve scripted responses and capture each complete HTTP request.
+    async fn capture_requests(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        capture_http_responses(responses.into_iter().map(|(status, body)| {
+            format!(
+                "HTTP/1.1 {status} Response\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        }).collect()).await
+    }
+
+    async fn capture_http_responses(
+        responses: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let handle = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut received = Vec::new();
-            let mut buffer = [0u8; 4096];
-            loop {
-                let read = socket.read(&mut buffer).await.unwrap();
-                received.extend_from_slice(&buffer[..read]);
-                let text = String::from_utf8_lossy(&received);
-                if let Some(header_end) = text.find("\r\n\r\n") {
-                    let length = text[..header_end]
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|value| value.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap_or(0);
-                    if received.len() >= header_end + 4 + length {
-                        break;
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut received = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(
+                        read > 0,
+                        "request must be complete before the socket closes"
+                    );
+                    received.extend_from_slice(&buffer[..read]);
+                    let text = String::from_utf8_lossy(&received);
+                    if let Some(header_end) = text.find("\r\n\r\n") {
+                        let length = text[..header_end]
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|value| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if received.len() >= header_end + 4 + length {
+                            break;
+                        }
                     }
                 }
-                if read == 0 {
-                    break;
-                }
+                socket.write_all(response.as_bytes()).await.unwrap();
+                requests.push(String::from_utf8(received).unwrap());
             }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
-            String::from_utf8_lossy(&received).into_owned()
+            requests
         });
         (base_url, handle)
     }
 
     #[tokio::test]
     async fn transcription_requests_the_configured_transcription_model() {
-        let (base_url, captured) = capture_one_request(r#"{"text":"hello"}"#).await;
+        let (base_url, captured) = capture_requests(vec![(200, r#"{"text":"hello"}"#)]).await;
         let response = routed(&base_url, both_routes())
             .transcribe(TranscriptionRequest {
                 audio_bytes: b"RIFF".to_vec(),
@@ -405,7 +452,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.text, "hello");
 
-        let request = captured.await.unwrap();
+        let request = captured.await.unwrap().pop().unwrap();
         assert!(request.starts_with("POST /audio/transcriptions "));
         assert!(
             request.contains("name=\"model\"\r\n\r\nwhisper-route\r\n"),
@@ -416,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn synthesis_requests_the_configured_speech_model() {
-        let (base_url, captured) = capture_one_request("RIFFAUDIO").await;
+        let (base_url, captured) = capture_requests(vec![(200, "RIFFAUDIO")]).await;
         routed(&base_url, both_routes())
             .synthesise(SpeechRequest {
                 text: "hi".into(),
@@ -426,7 +473,7 @@ mod tests {
             .await
             .unwrap();
 
-        let request = captured.await.unwrap();
+        let request = captured.await.unwrap().pop().unwrap();
         assert!(request.starts_with("POST /audio/speech "));
         let body: serde_json::Value =
             serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
@@ -465,12 +512,18 @@ mod tests {
     }
 
     #[test]
-    fn openai_voice_provider_reports_expected_defaults() {
+    fn openai_voice_provider_reports_speech_as_unverified_until_requested() {
         let provider = routed("https://api.openai.com/v1", both_routes());
         let capabilities = provider.capabilities();
         assert!(capabilities.transcription);
-        assert!(capabilities.synthesis);
-        assert_eq!(capabilities.unavailable_reason, None);
+        assert!(!capabilities.synthesis);
+        assert!(
+            capabilities
+                .unavailable_reason
+                .as_deref()
+                .unwrap()
+                .contains("has not been checked")
+        );
         assert_eq!(capabilities.default_voice.as_deref(), Some("alloy"));
         assert!(
             capabilities
@@ -478,5 +531,68 @@ mod tests {
                 .iter()
                 .any(|voice| voice == "nova")
         );
+    }
+
+    fn speech_request() -> SpeechRequest {
+        SpeechRequest {
+            text: "hello".into(),
+            voice: None,
+            format: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_speech_responses_fail_shared_status_and_allow_recovery() {
+        for status in [200, 400, 404, 500] {
+            let (url, captured) = capture_http_responses(vec![
+                "HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\naudio".into(),
+                format!("HTTP/1.1 {status} Response\r\ncontent-length: 100\r\nconnection: close\r\n\r\nshort"),
+                "HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\naudio".into(),
+            ]).await;
+            let provider = routed(&url, both_routes());
+            provider.synthesise(speech_request()).await.unwrap();
+            let error = provider.synthesise(speech_request()).await.unwrap_err();
+            assert!(
+                matches!(error, ProviderError::InvalidResponse(_)),
+                "HTTP {status}: {error}"
+            );
+            let capabilities = provider.capabilities();
+            assert!(!capabilities.synthesis);
+            assert!(
+                capabilities
+                    .unavailable_reason
+                    .unwrap()
+                    .contains(&error.to_string())
+            );
+            provider.synthesise(speech_request()).await.unwrap();
+            assert!(provider.capabilities().synthesis);
+            assert_eq!(provider.capabilities().unavailable_reason, None);
+            assert_eq!(captured.await.unwrap().len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn unreachable_speech_route_fails_shared_status() {
+        for before in [None, Some((200, "audio")), Some((401, "original failure"))] {
+            let (url, stopped) = capture_requests(before.into_iter().collect()).await;
+            let provider = routed(&url, both_routes());
+            if let Some((status, _)) = before {
+                assert_eq!(
+                    provider.synthesise(speech_request()).await.is_ok(),
+                    status == 200
+                );
+            }
+            stopped.await.unwrap();
+            let error = provider.synthesise(speech_request()).await.unwrap_err();
+            assert!(matches!(error, ProviderError::Network { .. }));
+            let capabilities = provider.capabilities();
+            assert!(!capabilities.synthesis);
+            assert!(
+                capabilities
+                    .unavailable_reason
+                    .unwrap()
+                    .contains(&error.to_string())
+            );
+        }
     }
 }

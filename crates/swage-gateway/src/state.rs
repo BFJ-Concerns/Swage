@@ -27,25 +27,12 @@ use swage_storage::{
     store::{Storage, TopicStore},
 };
 
-use crate::channel_gateway::{ChannelOrigin, DeliveryTarget, ExternalChannelIntegration};
+use crate::channel_gateway::ChannelOrigin;
 use crate::{
     capabilities::WorkflowCapabilities, device::DeviceRuntime, lifecycle::ActivityTracker,
     onboarding::RecoveryExportSnapshot, presence::PresenceRuntime, secret::SecretManager,
     telegram::TelegramClient, tool::ToolDispatcher, websocket::ServerEvent,
 };
-
-/// The environment variable an install sets to declare the boundary every
-/// turn runs inside — `SWAGE_EXECUTION_BOUNDARY=container` in the container
-/// image. It is read from the process environment only: the declaration
-/// belongs to the install, never to configuration an operator edits.
-pub const EXECUTION_BOUNDARY_ENV: &str = "SWAGE_EXECUTION_BOUNDARY";
-
-fn declared_execution_boundary_from_env() -> Option<String> {
-    std::env::var(EXECUTION_BOUNDARY_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
 
 /// A gate's sender and its claim, retained until the gate settles.
 pub struct ApprovalWaiter {
@@ -77,8 +64,12 @@ impl ApprovalWaiter {
 /// concurrent modification from multiple handler tasks.
 #[derive(Clone)]
 pub struct AppState {
+    #[cfg(feature = "test-fixtures")]
+    pub(crate) test_root: Option<Arc<tempfile::TempDir>>,
     /// Configuration root selected when this gateway instance was constructed.
     pub config_root: PathBuf,
+    /// Serialises config file updates and their corresponding runtime snapshots.
+    pub(crate) config_updates: Arc<AsyncMutex<()>>,
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
     pub storage: Arc<dyn Storage>,
     /// Topic storage backend. Separate from `storage` because `TopicStore` is
@@ -113,6 +104,8 @@ pub struct AppState {
     /// Dispatch pipeline: resolves tool lookups, permission checks, rate limiting,
     /// schema validation, execution, and leak detection for every tool call.
     pub tool_dispatcher: Arc<ToolDispatcher>,
+    /// The browser process and profile outlive replaceable tool dispatchers.
+    pub(crate) browser_host: Arc<std::sync::OnceLock<Arc<crate::browser::BrowserHost>>>,
     /// Records the timestamp of the last significant gateway activity.
     ///
     /// Used by operator and presence surfaces to report how recently the
@@ -159,10 +152,10 @@ pub struct AppState {
     pub presence: Arc<AsyncMutex<PresenceRuntime>>,
     /// Registered local and attached devices.
     pub devices: Arc<AsyncMutex<DeviceRuntime>>,
+    /// Serialises agent definition snapshots, writes and their audit records.
+    pub(crate) agent_definition_writes: Arc<AsyncMutex<()>>,
     /// One-time device pairing codes awaiting redemption by a remote device.
     pub pairing_codes: Arc<AsyncMutex<HashMap<String, PairingCodeRecord>>>,
-    /// One-time external-channel link codes awaiting redemption by a chat sender.
-    pub channel_link_codes: Arc<AsyncMutex<HashMap<String, ChannelLinkCodeRecord>>>,
     /// Canonical secret-management and resolution surface.
     pub secret_manager: Arc<SecretManager>,
     /// Configured Telegram bot client, if the channel is enabled.
@@ -179,12 +172,9 @@ pub struct AppState {
     pub restart_required: Arc<AtomicBool>,
     /// Whether this process can restart itself via the desktop/runtime wrapper.
     pub managed_gateway: bool,
-    /// The execution boundary the install declares for every turn — a
-    /// container image sets it — read from the process environment
-    /// (`EXECUTION_BOUNDARY_ENV`), never from operator-editable
-    /// configuration. When set, no per-turn sandbox is built and every turn's
-    /// record names this boundary.
-    pub declared_execution_boundary: Option<String>,
+    /// The token gate on a binding beyond loopback; open until startup reads
+    /// the binding and the token (crate::access_gate).
+    pub access_gate: crate::access_gate::SharedAccessGate,
     /// Hot-swapped runtime config used by new turns and settings reads.
     pub runtime_config: Arc<RwLock<ResolvedConfig>>,
     /// Hot-swapped provider catalogue used by new turns.
@@ -212,15 +202,6 @@ struct AgentMessageExpiryRuntime {
 
 #[derive(Debug, Clone)]
 pub struct PairingCodeRecord {
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelLinkCodeRecord {
-    pub integration: ExternalChannelIntegration,
-    pub topic_id: Option<Uuid>,
-    pub agent_id: Option<String>,
-    pub home_target: Option<DeliveryTarget>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -303,27 +284,6 @@ impl AppState {
         })
     }
 
-    pub fn new(
-        storage: Arc<dyn Storage>,
-        topic_store: Arc<dyn TopicStore>,
-        provider: Arc<dyn LlmProvider>,
-        config: ResolvedConfig,
-        tool_dispatcher: ToolDispatcher,
-        hook_registry: Option<Arc<HookRegistry>>,
-    ) -> Self {
-        let config_root = swage_config::discovery::resolve_root()
-            .unwrap_or_else(|_| swage_config::discovery::effective_root_path());
-        Self::new_with_config_root(
-            storage,
-            topic_store,
-            provider,
-            config,
-            tool_dispatcher,
-            hook_registry,
-            config_root,
-        )
-    }
-
     /// Construct application state with a root already selected by the caller.
     ///
     /// Startup and root-sensitive tests use this entry point so state
@@ -378,7 +338,10 @@ impl AppState {
             });
         }
         Self {
+            #[cfg(feature = "test-fixtures")]
+            test_root: None,
             config_root,
+            config_updates: Arc::new(AsyncMutex::new(())),
             storage: storage.clone(),
             topic_store,
             provider: provider.clone(),
@@ -405,8 +368,8 @@ impl AppState {
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             devices: Arc::new(AsyncMutex::new(DeviceRuntime::default())),
+            agent_definition_writes: Arc::new(AsyncMutex::new(())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
-            channel_link_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             secret_manager: Arc::new(SecretManager::new(storage.clone())),
             telegram: None,
             recovery_exports: Arc::new(AsyncMutex::new(Vec::new())),
@@ -415,10 +378,11 @@ impl AppState {
             managed_gateway: std::env::var("SWAGE_MANAGED_GATEWAY")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            declared_execution_boundary: declared_execution_boundary_from_env(),
+            access_gate: Arc::new(crate::access_gate::AccessGate::open()),
             runtime_config: Arc::new(RwLock::new(config)),
             runtime_provider: Arc::new(RwLock::new(provider)),
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),
+            browser_host: Arc::default(),
             codex_supervisor,
             worktree_host: Arc::new(crate::worktree::WorktreeHost::new(
                 crate::worktree::WorktreeConfig {
@@ -785,7 +749,7 @@ mod tests {
 
     fn make_minimal_state() -> AppState {
         let storage = Arc::new(MockStorage::new());
-        AppState::new(
+        AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
@@ -843,7 +807,7 @@ mod tests {
     #[test]
     fn appstate_new_initialises_approval_channels() {
         let storage = Arc::new(MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
@@ -852,5 +816,16 @@ mod tests {
             None,
         );
         assert!(state.approval_channels.lock().unwrap().is_empty());
+    }
+}
+
+impl AppState {
+    /// The inter-agent message router over this gateway's store and its
+    /// lifecycle hooks: every path that sends or delivers an agent message —
+    /// a delegation, a Result carried into a thread, the agent-message API —
+    /// builds its router here, so no path delivers past the hooks another
+    /// honours.
+    pub(crate) fn message_router(&self) -> swage_agent::MessageRouter {
+        swage_agent::MessageRouter::new(self.storage.clone(), self.hook_registry.clone())
     }
 }

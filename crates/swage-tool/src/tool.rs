@@ -47,6 +47,7 @@ pub struct ToolDisplayHints {
     /// search tool. The framework reads it from the call's arguments at
     /// execution time; a missing or non-scalar value falls back to the
     /// generic rendering rather than erroring.
+    /// A leading slash selects a nested value using JSON Pointer syntax.
     pub summary_param: Option<&'static str>,
 }
 
@@ -55,7 +56,12 @@ pub struct ToolDisplayHints {
 /// back to their generic rendering, never to a per-tool branch.
 pub fn display_summary(hints: &ToolDisplayHints, arguments: &Value) -> Option<String> {
     let param = hints.summary_param?;
-    match arguments.get(param)? {
+    let value = if param.starts_with('/') {
+        arguments.pointer(param)?
+    } else {
+        arguments.get(param)?
+    };
+    match value {
         Value::String(text) => Some(text.clone()),
         Value::Number(number) => Some(number.to_string()),
         Value::Bool(flag) => Some(flag.to_string()),
@@ -79,14 +85,6 @@ pub trait Tool: Send + Sync {
 
     /// JSON Schema object describing the parameters this tool accepts.
     fn parameters(&self) -> Value;
-
-    /// Parameter keys whose values should be redacted in logs and hook output.
-    ///
-    /// Defaults to an empty slice — override for tools that accept secrets,
-    /// tokens, or other sensitive data.
-    fn sensitive_keys(&self) -> &[&str] {
-        &[]
-    }
 
     /// Parameter keys whose values may be secret references.
     ///
@@ -112,6 +110,20 @@ pub trait Tool: Send + Sync {
     /// even a wildcard, offers it elsewhere.
     fn platform_holder(&self) -> Option<&'static str> {
         None
+    }
+
+    /// Classify a structured response whose transport succeeded.
+    fn execution_outcome(
+        &self,
+        _result: &Value,
+    ) -> swage_protocol::client::conversation::ToolExecution {
+        swage_protocol::client::conversation::ToolExecution::succeeded()
+    }
+
+    /// Check arguments before any work. An error here records a refusal
+    /// without execution. Implementations must perform no I/O in this hook.
+    fn validate_call(&self, _params: &Value) -> Result<(), ToolError> {
+        Ok(())
     }
 
     /// Execute the tool with already-validated parameters.
@@ -199,10 +211,6 @@ mod tests {
             json!({"type": "object", "properties": {}})
         }
 
-        fn sensitive_keys(&self) -> &[&str] {
-            &["secret", "token"]
-        }
-
         async fn execute(
             &self,
             _params: Value,
@@ -279,12 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_keys_default_is_empty() {
-        let tool = AddTool;
-        assert!(tool.sensitive_keys().is_empty());
-    }
-
-    #[test]
     fn display_hints_default_to_none_and_summary_reads_the_named_param() {
         assert_eq!(AddTool.display_hints(), ToolDisplayHints::default());
         assert_eq!(
@@ -305,10 +307,25 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_keys_overridden_when_specified() {
-        let tool = BrokenTool;
-        let keys = tool.sensitive_keys();
-        assert_eq!(keys, &["secret", "token"]);
+    fn headline_paths_select_nested_values_and_escape_keys() {
+        let args = json!({"changes": [{"path": "notes/a.txt"}], "a/b": {"~key": "escaped"}});
+        for (path, expected) in [
+            ("/changes/0/path", Some("notes/a.txt")),
+            ("/a~1b/~0key", Some("escaped")),
+            ("/changes/1/path", None),
+            ("/changes", None),
+        ] {
+            assert_eq!(
+                display_summary(
+                    &ToolDisplayHints {
+                        summary_param: Some(path)
+                    },
+                    &args
+                )
+                .as_deref(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]

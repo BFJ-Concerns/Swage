@@ -46,15 +46,23 @@ or the handover depending on the outcome.
 
 ## Scripts
 
-Scripts run in a caged V8 isolate. The language is all there — JSON,
-promises, Map/Set, regular expressions, BigInt — but the isolate has no
-ambient capability: `Date`, `eval`, `Intl`, WebAssembly, shared memory,
-`setTimeout`, `fetch` and `process` are absent, and `Math.random` throws to
-prevent non-deterministic branching, since replay depends on the script
-producing the same host-call sequence. Each isolate carries a heap limit and
-a limit on how long the script may execute without yielding to the host; a
-script that crosses either is terminated, the run fails with the reason, and
-the audit trail records an `engine_terminated` event naming it.
+Each workflow runs in its own V8 isolate. Scripts use the workflow API to
+wait on timers and obtain external values. `Math.random`
+and host-locale methods such as `toLocaleString()` throw
+`NondeterministicCallError`. Replay uses the journal to repeat the same
+sequence of host calls.
+
+The isolate limits its heap, its fixed-length buffers and its uninterrupted
+execution time. The heap and the combined backing stores of all live buffers
+each have a 64 MiB ceiling. Typed arrays and data views use those same backing
+stores. Resizable buffers are unavailable. To grow a buffer within the
+ceiling, allocate a new fixed-length buffer and copy the data into it.
+A script can execute for up to 30 seconds without yielding. Time spent
+waiting for a host call does not count towards that limit.
+
+Reaching a limit stops the script and fails the run. The audit trail records
+`heap_limit`, `buffer_limit` or `time_limit` as the reason in an
+`engine_terminated` event.
 
 A script may open with a `export const meta = { ... };` header declaring
 portable metadata: `name`, `description`, `task` (an opaque identity for
@@ -147,6 +155,20 @@ or throw. The completed call record's `served_model` names the model that
 actually served the call. Continuation calls ignore `fallbackModel` and never
 make a fallback attempt; they use the worker's persisted model selection,
 including a fallback selected at creation.
+
+### Effort floor
+
+`agent()` and `agentStart()` accept `minEffort`, the least effort the call
+accepts being served at, in the same vocabulary as `effort`. The gateway
+resolves the call's effort against the model it would run on before any worker
+starts, and refuses the call with an `EffortFloorError` naming the shortfall
+where that model would serve it below the floor: the requested level is one
+the model lacks and clamps to a lower one, the call sets no effort and its
+model has no default, or the model takes no effort setting at all. The refusal
+is journalled with the call, and no provider request is made. The
+`model_list` tool gives each catalogue model's `effort_levels`, the levels it
+serves as asked. A declared `fallbackModel` that serves the call is not
+checked against the floor.
 
 ### Composition
 
@@ -406,9 +428,8 @@ hash would change and replay would fail with a non-deterministic-call error.
 
 ## Cancellation
 
-Cancellation propagates through a `CancellationToken` the isolate's watchdog
-reads — it terminates even a loop that never yields — and that is raced
-against the execution future. The engine returns `Cancelled` and the run transitions to `cancelled`.
+Cancelling a workflow stops the script while it runs or waits for a host
+call. The workflow record moves to `cancelled`.
 
 For parked runs, which have no engine to signal, `cancel_run` directly sets
 the state to `cancelled` in storage.

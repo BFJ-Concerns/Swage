@@ -1,7 +1,7 @@
-//! A message the platform puts into a conversation — a schedule's brief, a
-//! delegation's completion notice, a notice about the operator's memory —
-//! recorded with the origin that composed it and announced to every client
-//! holding the conversation open.
+//! Material the platform delivers into a conversation — a delegated agent's
+//! result, a notice about how a turn ended, a notice about the operator's
+//! memory — recorded as delivered, with the origin that composed it, and
+//! announced to every client holding the conversation open.
 //!
 //! Placed here because it is the one route for a row a person did not type:
 //! persistence and announcement travel together, so a platform message never
@@ -40,10 +40,10 @@ pub(crate) struct PlatformMessage {
 }
 
 /// Record a platform message on its thread and announce it to the
-/// conversation's open views. The row rides the user role, so the model
-/// treats a brief or notice as material addressed to it — the same role a
-/// channel or typed message carries — while the recorded origin keeps the
-/// author label truthful.
+/// conversation's open views. The row rides the user role, the only role
+/// every provider accepts for it, and is recorded as delivered: the history
+/// rebuild frames it as material nobody in the conversation wrote, while the
+/// recorded origin keeps the author label truthful.
 pub(crate) async fn append_platform_message(
     state: &AppState,
     message: PlatformMessage,
@@ -65,6 +65,7 @@ pub(crate) async fn append_platform_message(
             turn_id: message.turn_id,
             role: Role::User,
             origin: message.origin,
+            delivered: true,
             content: message.content,
             attachments: Vec::new(),
             agent_id: message.agent_id,
@@ -85,6 +86,15 @@ pub(crate) fn announce_appended_message(state: &AppState, session_id: Uuid, mess
         session_id,
         message,
     });
+    announce_session_updated(&state.broadcast, session_id);
+}
+
+/// Tell mounted session lists to re-read their snapshot after a change.
+pub(crate) fn announce_session_updated(
+    broadcast: &tokio::sync::broadcast::Sender<ServerEvent>,
+    session_id: Uuid,
+) {
+    let _ = broadcast.send(ServerEvent::SessionUpdated { session_id });
 }
 
 /// The wire state an inbound row's turn holds the moment it is recorded.
@@ -133,6 +143,7 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].role, Role::User);
         assert_eq!(recorded[0].origin, MessageOrigin::Delegation);
+        assert!(recorded[0].delivered, "recorded as delivered material");
         assert_eq!(recorded[0].id, view.id);
         assert_eq!(view.origin, MessageOrigin::Delegation);
         assert_eq!(

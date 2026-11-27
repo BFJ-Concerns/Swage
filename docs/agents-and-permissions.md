@@ -1,5 +1,5 @@
 ---
-description: How Swage defines agents (including creating them through the API), reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, controls experimentation and variant selection, handles wall-triggered succession, and configures voice transcription and synthesis
+description: How Swage defines agents (including conversational authoring and the API), reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, controls experimentation and variant selection, handles wall-triggered succession, and configures voice transcription and synthesis
 ---
 
 # Agents and permissions
@@ -11,8 +11,8 @@ approval for configured tool calls.
 
 ## Agent definitions
 
-An agent definition is a durable record stored in the database that gives a
-session its character — its instructions, model preference, tool permissions,
+An agent definition is a reusable configuration that gives a session its
+character — its instructions, model preference, tool permissions,
 skills, and optional output schema. Each definition carries a stable `id`
 that sessions reference.
 
@@ -22,15 +22,14 @@ agent id can behave differently per topic without requiring separate ids.
 
 ### How the overlay works
 
-When a session starts, the gateway resolves the file-based configuration
-cascade (Global → Topic → Agent `.toml` files) into a resolved config, then
-overlays the agent definition on top. The overlay:
+At each turn, the gateway overlays the session's topic and agent layers
+(their `config.toml` files and `instructions/` directories, Global → Topic →
+Agent) on the running configuration — the global layer as loaded at startup
+and replaced by Settings saves — then overlays the agent definition on top.
+The overlay:
 
 - **Instructions** are appended after operator instructions, preserving the
   operator's ambient guidance while letting the definition extend it.
-- **Model preference** takes effect only when the named model id exists in
-  the configured model entries — an unconfigured model is logged as a warning
-  and ignored, so the session falls back to the resolved default.
 - **Tool permissions** are intersected with the config's grants. This can
   only narrow what the config allows, never widen it: the effective allow set
   is the intersection of both sides, and denies from either side stand.
@@ -45,6 +44,60 @@ permission set.
 
 Definitions can be created and edited through two surfaces.
 
+**In conversation.** Ask an agent to create a named agent you can choose for
+future sessions. For example:
+
+> Create a global agent called Reader, id reader, that searches and reads
+> files without changing them. Give it standing instructions to avoid
+> modifications and allow only file_read, file_list and file_search.
+
+To edit it, ask: “Change Reader's instructions to cite file paths in answers,
+keeping its other settings.” The agent can list definitions to find the id
+behind a display name. Creating refuses an id that already exists at that
+scope; editing changes only the fields supplied and refuses a missing
+definition. Supplied instructions replace the whole text, so a revision
+must retain any instructions you want to keep. Optional fields can be
+cleared; the name, description and instructions cannot be cleared with
+`null`.
+
+The agent needs the `agent_definition` tool. Its shipped bundle,
+`definition-authoring`, also includes `task_definition` for delegated work
+contracts. In **Settings → Automation**, add `definition-authoring` to
+**Tool allow rules** if you use restricted rules; the default `*` already
+allows it. If you have overridden the shipped bundle mapping, **Tool bundles**
+must map `definition-authoring` to `["agent_definition", "task_definition"]`.
+Denies and narrower agent or delegation grants still apply. An agent that
+lacks this tool cannot grant itself access.
+
+Definitions are global by default. Ask for a topic-specific definition to
+limit it to the conversation's topic; the tool cannot target another topic.
+In a conversation without a topic, this option limits it to the general
+scope. A topic-specific definition hides a global definition with the same id
+there. Say which scope you mean when editing or deleting one. Deleting is
+permanent, though the definition can be recreated.
+
+Tool permissions can only narrow what the configuration grants. The shipped
+**Swage default** and **Memory curator** cannot be changed or deleted through
+this tool. Invalid ids, blank display names, empty or duplicate skill names,
+malformed permission overlays and invalid output schemas are refused.
+Ids use lowercase ASCII letters, digits and hyphens. Saving a model preference
+outside the configured catalogue is refused with the available ids; choose
+the model when starting a session.
+At run time, a saved model preference no longer in the catalogue leaves the
+resolved default model in place.
+Approval requirements belong in configuration files, not in a definition.
+
+After creating or editing, reload the page. Open **Settings → Agents** to
+read the definition's instructions, model preference, tool permissions,
+skills and output contract. Its name is also available under **Agent** in
+the new-session picker for the scope where it is visible. Creating a
+definition does not switch the conversation you are in to that agent.
+
+Every creation, edit and deletion records the whole definition before and
+afterwards. In the operator view, choose **View history** and find
+**Configuration changes**. Expand **Whole prior and new state** to see
+**Prior state** and **New state**.
+
 **Through the API.** `POST /api/operator/agent-definitions` creates a
 definition; `PUT /api/operator/agent-definitions/{agent_id}` replaces one.
 A complete creation request:
@@ -58,25 +111,21 @@ A complete creation request:
   "tool_permissions": {
     "allow": ["knowledge_search", "knowledge_orient", "docs_read", "file_read", "file_list", "file_search", "url_fetch", "web_search"],
     "deny": [],
-    "bundles": {},
-    "require_approval": []
+    "bundles": {}
   }
 }
 ```
 
 `description` is required. `topic_id` scopes the definition to one topic;
 omit it for a global definition. The `tool_permissions` object carries
-`allow`, `deny`, `bundles`, and `require_approval`. `bundles` maps bundle
+`allow`, `deny`, and `bundles`. `bundles` maps bundle
 names to tool-name arrays — it must be present (use `{}` when no custom
 bundles are needed). The overlay intersects with the config cascade's
-grants, so it can only narrow what the config allows, never widen it; its
-`require_approval` is not applied, and the approval list comes from the
-config files.
+grants, so it can only narrow what the config allows, never widen it.
+An explicit `require_approval` field is refused before saving, including
+an empty list. Set approval requirements in the config files.
 Optional fields not shown above include `model_id`, `skills`,
 `output_schema`, and `output_max_retries`.
-
-Conversational authoring of agent definitions is not yet available. The
-API routes above are the supported surface.
 
 ## Effort
 
@@ -166,17 +215,16 @@ does not yet render it.
 
 ## What agents are available
 
-A fresh installation's agent registry holds one entry: the shipped default
-agent (`"gateway"`, display name **Swage default**). No other agent
-definitions ship with the gateway — a shipped workflow's internal roles (the
-research sweep's researcher, organiser, and synthesist) are bare dispatches
-inside the workflow script, not standalone definitions.
+A fresh installation includes **Swage default** (`gateway`) and **Memory
+curator** (`memory-curator`). The curator is visible in agent settings but
+cannot be selected for a new session. A shipped workflow's internal roles
+are not standalone agent definitions.
 
-The start-conversation picker in the web UI lists this default plus any
-operator-authored definitions visible to the topic. The `agent_id` field of
-`CreateConversationRequest` selects one of these — `"gateway"` or an
-operator-authored definition visible to the target topic; the gateway
-rejects anything else with a validation error.
+After a reload, the new-session picker lists the default plus authored
+definitions visible in the selected scope. Without a topic, it offers global
+definitions; a topic also sees its own definitions, which hide global ones
+with the same id. The `agent_id` field when creating a conversation selects
+the default or a visible authored definition; other choices are refused.
 
 ## Operator guidance (`AGENTS.md`)
 
@@ -252,16 +300,16 @@ this setting is false in both configurations.
 ### Default grants
 
 A fresh configuration allows all tools (`allow: ["*"]`), denies none, and
-requires approval for the eight tools that act outside the conversation:
-`shell`, `file_edit`, `file_write`, `python_execute`, `browser_click`,
-`browser_type`, `browser_select` and `browser_scroll`. In an attended session
-each call to one of these pauses until you approve or reject it. This default
-is defined in `ToolPermissionConfig::default()` and applies unless a config
+requires approval for four tools: `shell`, `file_edit`, `file_write` and
+`python_execute`. In an attended session each call to one of these pauses
+until you approve or reject it. Browser actions do not require approval by
+default. This default is defined in `ToolPermissionConfig::default()` and
+applies unless a config
 file replaces the approval list — a `require_approval` list in a global,
 topic or agent config file replaces the default list rather than adding to
 it, so `require_approval = []` turns the prompts off. An agent definition's
-permission overlay narrows grants only; its `require_approval` is not
-applied.
+permission overlay narrows grants only; an explicit `require_approval`
+field is refused before saving.
 
 ### Resolution order
 
@@ -322,7 +370,7 @@ Dispatch-bound intersection also handles approval requirements:
 
 - The worker's own `require_approval` entries are pruned to only tools in the
   effective allow set — an explicit filtering step, unlike the agent-definition
-  overlay where inert entries simply remain.
+  overlay, which refuses an explicit approval field before saving.
 - The dispatcher's approval demands carry forward onto the worker for any
   tool that is in the effective allow set and not already approval-gated.
   A tool the dispatcher could only use with approval cannot run approval-free
@@ -412,11 +460,9 @@ options govern sandbox behaviour:
 | `sandbox.allow_degraded_execution` | `false` | Whether to allow unsandboxed execution after sandbox setup fails |
 
 With sandboxing disabled, local gateway turns run without sandbox isolation
-and record a degraded boundary with reason
-`sandbox_disabled_by_configuration`. `allow_degraded_execution` is not
-required for this configuration choice. Installs with a declared boundary,
-such as a container image, retain that boundary instead; their sandbox
-settings do not change it.
+and record that the sandbox was switched off (`sandbox_disabled`), which is
+distinct from degraded execution after a sandbox failed to start.
+`allow_degraded_execution` is not required for this configuration choice.
 
 To turn sandboxing off for a topic, add this to its `config.toml`:
 
@@ -510,7 +556,7 @@ the global setting, and an agent-level file can override the topic's.
 |---|---|---|
 | `assembly` | `"default"` | Which named context assembly to use |
 | `alternatives` | `[]` | Hidden alternative assemblies available for local selection |
-| `timeout` | `5` (seconds, 1–60) | How long assembly may take before timing out |
+| `timeout` | `5` (seconds, at least 1) | How long assembly may take before timing out |
 | `budget` | unset | Token budget for the assembled context; must be positive when set |
 | `compaction_threshold` | unset (100 messages) | When to compact — `{ messages = N }` or `{ tokens = N }` |
 | `diagnosis_reader_model` | unset (session's model) | Model for the diagnosis readers during wall succession |
@@ -571,9 +617,11 @@ them:
 - **Desktop app:** quit and reopen the app.
 - **Standalone process:** stop and start the process.
 
-Sessions whose topic or agent has its own `config.toml` re-resolve the full
-configuration hierarchy — global file included — on each turn, so edits can
-reach those sessions without a restart.
+Only the global `config.toml` needs the restart: it is read when the gateway
+starts and rewritten by Settings saves, which apply at once. A topic's or
+agent's `config.toml` and `instructions/` are read at each turn and overlaid
+on the running configuration, so an edit there applies to the next turn
+under that scope, in every session alike, with no restart.
 
 ### Disabling experimentation
 
@@ -610,7 +658,9 @@ forced_variant = "family-fallback"
 Restart the gateway after changing either key.
 
 The shipped locations are `context.assembly`, `context.working_norms`,
-`task.prompt`, and `prompts.memory_curator`.
+`task.prompt`, `prompts.memory_curator`, and `prompts.succession_summary`
+(the instruction a conversation summary is written under, selected when a
+session first needs a summary).
 
 ### Alternatives
 
@@ -651,8 +701,14 @@ add(byName.prompts);
 add(byName.history);
 ```
 
-A script that errors (missing file, syntax error, runtime error) falls back
-to the built-in default assembly. A script that runs without error but
+Each assembly has separate 32 MiB ceilings for its heap and its
+fixed-length buffer backing stores. Resizable buffers are unavailable.
+`Math.random()` and host-locale methods such as `localeCompare()` and
+`toLocaleString()` throw `NondeterministicCallError`, even when the script
+supplies an explicit locale.
+
+When a script errors or reaches a limit, the built-in default assembly
+runs and the context report records the reason. A script that runs without error but
 leaves out baseline elements has them restored by the baseline floor, with
 warnings — except elements the script declares as omitted via `omit()`,
 which stay out. If the final composition ends up genuinely empty (every
@@ -660,7 +716,7 @@ baseline element was declared omitted and the script added nothing else),
 the assembly also falls back to the default.
 
 The other shipped locations (`context.working_norms`, `task.prompt`,
-`prompts.memory_curator`) have their alternatives defined in the gateway
+`prompts.memory_curator`, `prompts.succession_summary`) have their alternatives defined in the gateway
 source. For `context.working_norms`, the registered variants are
 `authored-v1` (the default) and `family-fallback`. These cannot be extended
 through configuration.

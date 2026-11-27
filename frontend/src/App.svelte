@@ -17,11 +17,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
+  import PairingDialog from "./lib/components/PairingDialog.svelte";
   import { getConversation } from "./lib/api/conversations";
   import { fetchSettings } from "./lib/api/settings";
+  import { openSharedWorkSurfaceChannel } from "./lib/api/work-surface";
   import { listEffectiveAgentDefinitions } from "./lib/api/agent-definitions";
   import type { EffectiveAgentDefinitionResponse } from "./lib/protocol/EffectiveAgentDefinitionResponse";
   import type { ConversationStore } from "./lib/stores/conversations";
+  import { ApiError } from "./lib/api/error";
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
   import { createSurfacesStore } from "./lib/stores/surfaces";
@@ -31,6 +34,7 @@
     type StreamingStore,
   } from "./lib/stores/streaming";
   import { createTopicStore } from "./lib/stores/topics";
+  import { watchOpenConversation } from "./lib/open-conversation-updates";
   import { conversationPath, createRouter } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
@@ -54,6 +58,7 @@
   let streamingStore: StreamingStore;
   const connectionStore = createConnectionStore({
     onReconnect: async (conversationId) => {
+      streamingStore.clearConnectionError(conversationId);
       const recoveredTurnGeneration = streamingStore.streamFor?.(conversationId)
         .activeTurnGeneration ?? 0;
       if (conversationStore.activeConversation?.id === conversationId) {
@@ -86,9 +91,7 @@
     streamingStore.handleServerEvent(event, conversationId),
   );
 
-  // The surfaces store opens its own work-surface channel: surface signals are not
-  // turn events, and an open surface must stay live even with no conversation
-  // selected.
+  // Surfaces and session lists share the gateway’s page-wide signal channel.
   const surfacesStore = createSurfacesStore();
 
   // ---------------------------------------------------------------------------
@@ -107,8 +110,14 @@
   }
 
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
-    keepSurfaceForConversation();
+    actionError = null;
+    scopeGeneration += 1;
     await conversationStore.selectConversation(id);
+    keepSurfaceForConversation();
+    // The selected detail is already visible. Connect it before loading its
+    // sidebar so a list failure cannot leave that conversation disconnected.
+    pendingStart = null;
+    connectionStore.connectTo(id);
 
     // A deep-linked conversation may belong to a topic other than the one
     // currently in scope (or none, on first load). Bring the topic into
@@ -118,10 +127,6 @@
     const conv = conversationStore.activeConversation;
     if (conv) await bringScopeIntoView(conv.topic_id ?? null);
 
-    // Selecting a session settles any pending start: the composer now
-    // belongs to this conversation.
-    pendingStart = null;
-    connectionStore.connectTo(id);
     // router is declared below but will be initialised before this is called.
     // The URL may already name one of this session's surfaces (a deep link
     // or a browser Back): keep it, so the surface opens.
@@ -133,23 +138,39 @@
   // The sidebar and agent list follow the session's scope: its topic, or
   // the general scope for a session without one. A scope already in view
   // is left alone so nothing reloads needlessly.
-  async function bringScopeIntoView(topicId: string | null): Promise<void> {
+  async function bringScopeIntoView(
+    topicId: string | null,
+    knownDefinitions?: EffectiveAgentDefinitionResponse[],
+  ): Promise<void> {
     const inView = topicStore.currentTopic?.id ?? null;
-    if (topicId && inView !== topicId) {
-      await topicStore.selectTopic(topicId);
-    } else if (!topicId && inView) {
-      topicStore.closeTopic();
-    } else if (inView === topicId && scopeLoadedFor === topicId) {
-      return;
-    }
+    if (inView === topicId && scopeLoadedFor === topicId) return;
     scopeLoadedFor = topicId;
-    await conversationStore.loadConversations(topicId);
+    agentDefinitions = knownDefinitions ?? [];
+    // Clear the old rows before publishing the new scope. Awaiting even a
+    // local topic selection can yield a rendered frame beneath its header.
+    const loading = conversationStore.loadConversations(topicId);
+    if (topicId && inView !== topicId) {
+      await Promise.all([loading, topicStore.selectTopic(topicId)]);
+    } else {
+      if (!topicId && inView) topicStore.closeTopic();
+      await loading;
+    }
+    if (scopeLoadedFor === topicId) await loadScopeAgentDefinitions(topicId);
+  }
+
+  let scopeDefinitionsGeneration = 0;
+  async function loadScopeAgentDefinitions(topicId: string | null): Promise<void> {
+    const generation = ++scopeDefinitionsGeneration;
     try {
-      agentDefinitions = await listEffectiveAgentDefinitions(topicId);
+      const definitions = await listEffectiveAgentDefinitions(topicId);
+      if (generation === scopeDefinitionsGeneration && scopeLoadedFor === topicId) {
+        agentDefinitions = definitions;
+      }
     } catch (error) {
       console.error("Failed to load agent definitions:", error);
     }
   }
+
   // The scope whose sidebar and agent list are loaded; null for the general
   // scope, undefined before any load.
   let scopeLoadedFor: string | null | undefined = undefined;
@@ -158,7 +179,7 @@
     try {
       await selectAndNavigateOrThrow(id);
     } catch (err) {
-      console.error("Failed to select conversation:", err);
+      actionError = describeActionError("Could not open conversation", err);
     }
   }
 
@@ -174,6 +195,7 @@
     effort?: import("./lib/protocol/Effort").Effort | null,
   ): Promise<string | null> {
     try {
+      actionError = null;
       keepSurfaceForConversation();
       // The scope in view, or none: a conversation started without a topic
       // runs in the general scope.
@@ -199,7 +221,7 @@
       router.navigate(conversationPath(id));
       return id;
     } catch (err) {
-      console.error("Failed to create conversation:", err);
+      actionError = describeActionError("Could not create conversation", err);
       return null;
     }
   }
@@ -232,6 +254,7 @@
     },
     loadConversations: (topicId) =>
       conversationStore.loadConversations(topicId),
+    refreshConversations: () => conversationStore.refreshConversations!(),
     selectConversation: selectAndNavigate,
     // The proxy captures topicId from topicStore at call time so child
     // components don't need to know about topics.
@@ -279,6 +302,9 @@
     // A URL that names a surface means the work surface: the pane opens the
     // surface once the session is in view.
     if (route.surfaceId) activeSurface = "surfaces";
+    else if (route.conversationId && activeSurface === "operator") {
+      activeSurface = "conversation";
+    }
     // A conversation the URL named is gone. Someone who was working in a
     // scope stays there with the composer ready, so the next message starts
     // afresh where they were; with no scope in view, the front door serves.
@@ -302,6 +328,9 @@
       selectConversation: selectAndNavigateOrThrow,
     },
     onRouteChange: handleRouteChange,
+    onNavigationError: (error) => {
+      actionError = describeActionError("Could not open conversation", error);
+    },
   });
 
   // ---------------------------------------------------------------------------
@@ -310,13 +339,26 @@
 
   let isInitialising = $state(true);
   let loadError = $state<string | null>(null);
+  let actionError = $state<string | null>(null);
+
+  function describeActionError(action: string, error: unknown): string {
+    const detail = error instanceof ApiError && error.code
+      ? `${error.code}: ${error.message}`
+      : error instanceof Error ? error.message : String(error);
+    return `${action}: ${detail}`;
+  }
   // Set to true when the router detects that the URL contained a stale ID.
   let notFound = $state(false);
   let activeSurface = $state<Surface>("conversation");
   let currentRoute = $state<Route>(router.currentRoute);
-  let modelOptions = $state<string[]>([]);
+  let globalModelOptions = $state<string[]>([]);
   let modelCatalogueReady = $state(false);
-  let defaultModelId = $state<string | null>(null);
+  let globalDefaultModelId = $state<string | null>(null);
+  const defaultModelId = $derived(topicStore.currentTopic
+    ? topicStore.currentTopic.effective_default_model ?? null : globalDefaultModelId);
+  const modelOptions = $derived(topicStore.currentTopic && !defaultModelId ? []
+    : defaultModelId && !globalModelOptions.includes(defaultModelId)
+      ? [...globalModelOptions, defaultModelId] : globalModelOptions);
   // The definitions offered by the scope in view: the composer's agent list.
   let agentDefinitions = $state<EffectiveAgentDefinitionResponse[]>([]);
   // The definitions offered by the scope chosen on the front door's start
@@ -329,14 +371,15 @@
 
   async function refreshModelCatalogue(): Promise<void> {
     const settings = await fetchSettings();
-    modelOptions = Object.keys(settings.models);
-    defaultModelId = settings.default_model;
+    globalModelOptions = Object.keys(settings.models);
+    globalDefaultModelId = settings.default_model;
     modelCatalogueReady = true;
   }
 
   async function refreshModelCatalogueAfterSave(): Promise<void> {
     try {
       await refreshModelCatalogue();
+      await topicStore.loadTopics();
     } catch (error) {
       console.error("Failed to refresh model settings after saving:", error);
     }
@@ -419,6 +462,17 @@
     };
   });
 
+  // A conversation open in this tab while another tab holds its socket follows
+  // the gateway's session signal, so a turn stopped or settled elsewhere — or
+  // by this tab's own Stop — shows here too.
+  onMount(() =>
+    watchOpenConversation({
+      openConversationId: () => conversationStore.activeConversation?.id ?? null,
+      holdsSocket: () => connectionStore.status === "connected",
+      refresh: () => conversationStore.refreshActiveConversation(),
+    }),
+  );
+
   // Passed to ConnectionIndicator so the user can trigger a manual reconnect.
   function handleRetry(): void {
     const id = conversationStore.activeConversation?.id;
@@ -462,9 +516,11 @@
       connectionStore.disconnect();
       conversationStore.clearActiveConversation();
       activeSurface = "conversation";
-      pendingStart = choice;
       router.navigate("/");
-      await bringScopeIntoView(choice.topicId);
+      const knownDefinitions = startScope === choice.topicId ? startAgentDefinitions : undefined;
+      const loading = bringScopeIntoView(choice.topicId, knownDefinitions);
+      pendingStart = choice;
+      await loading;
     } catch (err) {
       console.error("Failed to start a session:", err);
     }
@@ -474,7 +530,10 @@
   // agents. The request is checked when it settles so a slow answer for an
   // earlier choice never replaces a later one.
   let startScopeGeneration = 0;
+  let startScope: string | null | undefined;
   async function loadStartAgentDefinitions(topicId: string | null): Promise<void> {
+    if (startScope !== topicId) startAgentDefinitions = [];
+    startScope = topicId;
     const generation = ++startScopeGeneration;
     try {
       const definitions = await listEffectiveAgentDefinitions(topicId);
@@ -484,6 +543,19 @@
       console.error("Failed to load agent definitions:", error);
     }
   }
+
+  onMount(() => {
+    const channel = openSharedWorkSurfaceChannel();
+    function refreshPickers(): void {
+      if (scopeLoadedFor !== undefined) void loadScopeAgentDefinitions(scopeLoadedFor);
+      if (startScope !== undefined) void loadStartAgentDefinitions(startScope);
+    }
+    channel.onSignal((event) => {
+      if (event.type === "agent_definitions_changed" || event.type === "lagged") refreshPickers();
+    });
+    channel.onReconnect(refreshPickers);
+    return () => channel.close();
+  });
 
   async function createTopic(name: string): Promise<void> {
     await topicStore.createTopic(name);
@@ -531,6 +603,8 @@
     }
   });
 </script>
+
+<PairingDialog />
 
 {#if isInitialising}
   <!--
@@ -592,6 +666,13 @@
     onNavigate={navigate}
     onSettingsSaved={refreshModelCatalogueAfterSave}
     />
+
+  {#if actionError}
+    <div class="not-found-notice" role="alert">
+      {actionError}
+      <button class="dismiss" aria-label="Dismiss error" onclick={() => (actionError = null)}>✕</button>
+    </div>
+  {/if}
 
   {#if notFound}
     <!--

@@ -14,6 +14,11 @@ use std::borrow::Cow;
 use schemars::JsonSchema;
 
 use super::{
+    access::{AccessStatusResponse, PairClientRequest, PairClientResponse, PairingCodeResponse},
+    channel::{
+        ChannelLinkCodeListResponse, ChannelLinkCodeResponse, ChannelLinkListResponse,
+        CreateChannelLinkCodeRequest,
+    },
     context::TurnContextResponse,
     conversation::{
         ConversationBranchListResponse, ConversationBranchResponse, ConversationDetail,
@@ -29,6 +34,7 @@ use super::{
     provider_signin::{
         ProviderSignInState, StartProviderSignInRequest, StartProviderSignInResponse,
     },
+    security_settings::{SaveSecuritySettingsRequest, SecuritySettingsResponse},
     settings::{
         ModelDiscoveryResponse, RestartStatusResponse, SaveProviderSettings, SaveSettingsRequest,
         SettingsResponse,
@@ -36,8 +42,8 @@ use super::{
     surface::{
         CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
         DeleteSurfaceModuleResponse, LibraryEntryResponse, LibraryListResponse,
-        MoveSurfaceModuleRequest, SaveSurfaceToLibraryRequest, SurfaceAnnotationView,
-        SurfaceListResponse, SurfaceResponse, TopicDefaultSurfaceRequest,
+        MoveSurfaceModuleRequest, RenameSurfaceRequest, SaveSurfaceToLibraryRequest,
+        SurfaceAnnotationView, SurfaceListResponse, SurfaceResponse, TopicDefaultSurfaceRequest,
         UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest, WriteSurfaceModuleResponse,
     },
     topic::{
@@ -170,6 +176,62 @@ fn schema<T: JsonSchema>() -> Option<Cow<'static, str>> {
 /// this table.
 pub fn routes() -> Vec<Route> {
     vec![
+        Route {
+            operation_id: "list_channel_statuses",
+            method: Method::Get,
+            path: "/api/channels",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List channel statuses.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<crate::channel::ChannelStatusListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_channel_links",
+            method: Method::Get,
+            path: "/api/onboarding/channels",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List linked channel conversations.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<ChannelLinkListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "create_channel_link_code",
+            method: Method::Post,
+            path: "/api/onboarding/channels/link-codes",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Issue a single-use channel link code.",
+            request_optional: false,
+            request: schema::<CreateChannelLinkCodeRequest>(),
+            response: Response {
+                status: 201,
+                body: schema::<ChannelLinkCodeResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_channel_link_codes",
+            method: Method::Get,
+            path: "/api/onboarding/channels/link-codes",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Read unredeemed channel link codes.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<ChannelLinkCodeListResponse>(),
+            },
+        },
         Route {
             operation_id: "list_topics",
             method: Method::Get,
@@ -469,6 +531,24 @@ pub fn routes() -> Vec<Route> {
             }],
             query_parameters: vec![],
             summary: "Delete a conversation.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 204,
+                body: None,
+            },
+        },
+        Route {
+            operation_id: "cancel_conversation_turn",
+            method: Method::Post,
+            path: "/api/conversations/{id}/cancel",
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Stop the conversation's running turn, whichever client holds its connection.",
             request_optional: false,
 
             request: None,
@@ -881,6 +961,46 @@ pub fn routes() -> Vec<Route> {
             },
         },
         Route {
+            operation_id: "rename_surface",
+            method: Method::Post,
+            path: "/api/surfaces/{surface_id}",
+            path_parameters: vec![Parameter {
+                name: "surface_id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Rename this session's surface.",
+            request_optional: false,
+            request: schema::<RenameSurfaceRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<SurfaceResponse>(),
+            },
+        },
+        Route {
+            operation_id: "resolve_surface_annotation",
+            method: Method::Post,
+            path: "/api/surfaces/{surface_id}/annotations/{annotation_id}/resolve",
+            path_parameters: vec![
+                Parameter {
+                    name: "surface_id",
+                    kind: ParameterType::Uuid,
+                },
+                Parameter {
+                    name: "annotation_id",
+                    kind: ParameterType::Uuid,
+                },
+            ],
+            query_parameters: vec![],
+            summary: "Resolve a note while keeping it in the record.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<SurfaceAnnotationView>(),
+            },
+        },
+        Route {
             operation_id: "write_surface_module",
             method: Method::Post,
             path: "/api/surfaces/{surface_id}/modules",
@@ -1001,6 +1121,20 @@ pub fn routes() -> Vec<Route> {
             },
         },
         Route {
+            operation_id: "list_secrets",
+            method: Method::Get,
+            path: "/api/secrets",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List governed secrets without revealing values.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<crate::hosting::SecretListResponse>(),
+            },
+        },
+        Route {
             operation_id: "get_settings",
             method: Method::Get,
             path: "/api/settings",
@@ -1028,6 +1162,117 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<SettingsResponse>(),
+            },
+        },
+        Route {
+            operation_id: "access_status",
+            method: Method::Get,
+            path: "/api/access",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Whether the gateway gates this connection and whether it is admitted.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<AccessStatusResponse>(),
+            },
+        },
+        Route {
+            operation_id: "issue_pairing_code",
+            method: Method::Post,
+            path: "/api/pair/codes",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Issue a one-time pairing code; loopback only.",
+            request_optional: true,
+
+            request: None,
+            response: Response {
+                status: 201,
+                body: schema::<PairingCodeResponse>(),
+            },
+        },
+        Route {
+            operation_id: "pair_client",
+            method: Method::Post,
+            path: "/api/pair",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Redeem a pairing code for the gateway's token, set as the browser's cookie.",
+            request_optional: false,
+
+            request: schema::<PairClientRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<PairClientResponse>(),
+            },
+        },
+        Route {
+            operation_id: "get_install_security_settings",
+            method: Method::Get,
+            path: "/api/settings/security",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Read the install's security checks: effective, overrides and relaxations.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<SecuritySettingsResponse>(),
+            },
+        },
+        Route {
+            operation_id: "save_install_security_settings",
+            method: Method::Put,
+            path: "/api/settings/security",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Replace the install's security overrides.",
+            request_optional: false,
+
+            request: schema::<SaveSecuritySettingsRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<SecuritySettingsResponse>(),
+            },
+        },
+        Route {
+            operation_id: "get_topic_security_settings",
+            method: Method::Get,
+            path: "/api/topics/{id}/settings/security",
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Read a topic's security checks: effective, overrides and relaxations.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<SecuritySettingsResponse>(),
+            },
+        },
+        Route {
+            operation_id: "save_topic_security_settings",
+            method: Method::Put,
+            path: "/api/topics/{id}/settings/security",
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Replace a topic's security overrides.",
+            request_optional: false,
+
+            request: schema::<SaveSecuritySettingsRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<SecuritySettingsResponse>(),
             },
         },
         Route {

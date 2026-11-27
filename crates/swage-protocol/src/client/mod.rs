@@ -1,6 +1,7 @@
 //! Client surface: types spoken between the gateway and its own clients
 //! (web frontend, CLI, desktop shell) over HTTP and WebSocket.
 
+pub mod access;
 pub mod approval;
 pub mod channel;
 pub mod context;
@@ -17,6 +18,7 @@ pub mod provider_signin;
 pub mod recovery;
 pub mod routes;
 pub mod schedule;
+pub mod security_settings;
 pub mod settings;
 pub mod settings_section;
 pub mod skill;
@@ -40,6 +42,7 @@ use schemars::JsonSchema;
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct ClientSurface {
+    secret_list: crate::hosting::SecretListResponse,
     api_error: error::ApiErrorBody,
     client_event: websocket::ClientEvent,
     server_event: websocket::ServerEvent,
@@ -51,6 +54,7 @@ pub struct ClientSurface {
     create_channel_link_code_request: channel::CreateChannelLinkCodeRequest,
     create_topic_request: topic::CreateTopicRequest,
     create_surface_request: surface::CreateSurfaceRequest,
+    rename_surface_request: surface::RenameSurfaceRequest,
     memory_page_list: memory::MemoryPageListResponse,
     memory_page: memory::MemoryPageResponse,
     memory_instruction_request: memory::MemoryInstructionRequest,
@@ -74,6 +78,10 @@ pub struct ClientSurface {
     update_workspace_trust_request: topic::UpdateWorkspaceTrustRequest,
     relink_workspace_attachment_request: topic::RelinkWorkspaceAttachmentRequest,
     workspace_attachment_list: topic::WorkspaceAttachmentListResponse,
+    channel_link: channel::ChannelLinkResponse,
+    channel_link_list: channel::ChannelLinkListResponse,
+    channel_link_code_list: channel::ChannelLinkCodeListResponse,
+    channel_status_list: crate::channel::ChannelStatusListResponse,
     channel_link_code_response: channel::ChannelLinkCodeResponse,
     create_conversation_request: conversation::CreateConversationRequest,
     create_conversation_branch_request: conversation::CreateConversationBranchRequest,
@@ -103,6 +111,12 @@ pub struct ClientSurface {
     propose_turn_graph_request: turn_graph::ProposeTurnGraphRequest,
     turn_graph_diff: turn_graph::TurnGraphDiff,
     save_settings: settings::SaveSettingsRequest,
+    security_settings: security_settings::SecuritySettingsResponse,
+    access_status: access::AccessStatusResponse,
+    pairing_code: access::PairingCodeResponse,
+    pair_client_request: access::PairClientRequest,
+    pair_client_response: access::PairClientResponse,
+    save_security_settings: security_settings::SaveSecuritySettingsRequest,
     model_discovery: settings::ModelDiscoveryResponse,
     save_provider_settings: settings::SaveProviderSettings,
     restart_status: settings::RestartStatusResponse,
@@ -136,6 +150,12 @@ pub struct ClientSurface {
     workflow_decision_event_payload: workflow::WorkflowDecisionEventPayload,
     workflow_run_detail: workflow::WorkflowRunDetailResponse,
     workflow_run_list: workflow::WorkflowRunListResponse,
+    workflow_run_ending_notice: workflow::WorkflowRunEndingNotice,
+    answer_workflow_run_hold_response: workflow::AnswerWorkflowRunHoldResponse,
+    workflow_worker_activity: workflow::WorkflowWorkerActivity,
+    workflow_run_status_request: workflow::WorkflowRunStatusRequest,
+    delegation_start_result: workflow::DelegationStartResult,
+    workflow_run_start_result: workflow::WorkflowRunStartResult,
     workflow_run_started_event: workflow::WorkflowRunStartedEvent,
     workflow_entry_event: workflow::WorkflowEntryEvent,
     workflow_run_completed_event: workflow::WorkflowRunCompletedEvent,

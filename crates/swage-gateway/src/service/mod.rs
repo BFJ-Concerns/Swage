@@ -66,7 +66,7 @@ mod tests {
             .general_scope()
             .await
             .expect("default topic should exist");
-        let state = crate::state::AppState::new(
+        let state = crate::state::AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(MockProvider::new(vec![])),
@@ -507,7 +507,8 @@ default_effort = "high"
         let (svc, storage) = make_definition_service();
         let response = svc
             .with_config(
-                swage_config::ResolvedConfig::default(),
+                swage_config::load_running_config_from(retained_root.path())
+                    .expect("load running global configuration"),
                 retained_root.path().to_path_buf(),
             )
             .create_conversation_from_request(CreateConversationRequest::default())
@@ -827,19 +828,26 @@ default_effort = "high"
             .await
             .unwrap();
 
-        svc.storage
+        let message = svc
+            .storage
             .create_message(NewMessage {
                 thread_id,
                 attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
                 origin: swage_storage::MessageOrigin::User,
+                delivered: false,
                 content: "Hello!".to_string(),
                 position: 0,
                 agent_id: "gateway".to_string(),
             })
             .await
             .unwrap();
+
+        let running_list = svc.list_conversations().await.unwrap();
+        let running_summary = running_list.iter().find(|s| s.id == session_id).unwrap();
+        assert_eq!(running_summary.message_preview.as_deref(), Some("Hello!"));
+        assert_eq!(running_summary.last_activity, message.created_at);
 
         // Mark the turn as Interrupted so `has_interrupted_turn` is set.
         svc.storage
@@ -917,6 +925,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::User,
                 origin: swage_storage::MessageOrigin::User,
+                delivered: false,
                 content: "Hi".to_string(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -930,6 +939,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "Hello!".to_string(),
                 position: 1,
                 agent_id: "gateway".to_string(),
@@ -1028,6 +1038,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::User,
                 origin: swage_storage::MessageOrigin::User,
+                delivered: false,
                 content: "list files".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -1042,6 +1053,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "I'll run ls for you.".into(),
                 position: 1,
                 agent_id: "gateway".to_string(),
@@ -1051,6 +1063,7 @@ default_effort = "high"
 
         svc.storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: "toolu_01".into(),
@@ -1126,6 +1139,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "Ran python".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -1136,6 +1150,7 @@ default_effort = "high"
         // Native python_execute call.
         svc.storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: "py_01".into(),
@@ -1159,6 +1174,7 @@ default_effort = "high"
         // Sub-tool dispatched from within python_execute.
         svc.storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: "sub_01".into(),
@@ -1227,6 +1243,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "Hello".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),

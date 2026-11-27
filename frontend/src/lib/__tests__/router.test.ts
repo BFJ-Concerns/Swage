@@ -166,6 +166,7 @@ describe("parseRoute", () => {
       settingsMemoryPage: null,
       notFound: false,
     });
+    expect(parseRoute("/settings/topic/research/security").settingsTopicTab).toBe("security");
     expect(parseRoute("/settings/topic/research/surfaces")).toEqual({
       path: "/settings/topic/research/surfaces",
       conversationId: null,
@@ -260,6 +261,21 @@ describe("navigate", () => {
     expect(router.currentRoute.conversationId).toBeNull();
     expect(router.currentRoute.path).toBe("/");
   });
+  it.each([
+    [new ApiError(404, "not_found", "conversation missing"), "/", true],
+    [new Error("HTTP 503 gateway unavailable"), "/conversations/kept-conv", false],
+  ])("settles a failed conversation link without an unhandled rejection (%s)", async (failure, expectedPath, notFound) => {
+    window.history.replaceState(null, "", "/workflow-runs/source-run");
+    const router = createRouter({ conversationStore: {
+      activeConversationId: "kept-conv",
+      checkConversationExists: vi.fn(), clearActiveConversation: vi.fn(),
+      selectConversation: vi.fn().mockRejectedValue(failure),
+    } });
+    router.navigate("/conversations/unavailable");
+    await vi.waitFor(() => expect(window.location.pathname).toBe(expectedPath));
+    expect(router.currentRoute.notFound).toBe(notFound);
+  });
+
 });
 
 // ---------------------------------------------------------------------------

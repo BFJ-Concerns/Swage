@@ -11,6 +11,12 @@ a topic, a workspace attached to it, and trust in that workspace are
 optional steps that give agents their own memory, file access and project
 guidance, but a conversation can start without any of them.
 
+Configure a provider and choose its default model through
+[Provider setup](interfaces-and-tooling.md#provider-setup) before sending a
+message. Provider setup comes before any sandbox or tool approval. A small
+first tool request, such as asking the shell to print its working directory,
+checks that the configured route can answer and run a tool.
+
 ## The front door
 
 Opening the web UI presents the **New session** control at the top of the
@@ -138,8 +144,9 @@ global ones.
 With a conversation open, start a turn. If a trusted workspace is
 attached, the agent will have access to the workspace's files and will
 follow whatever guidance its `AGENTS.md` provides.
-Shell commands run inside the sandbox, and a tool call that runs commands,
-writes files or operates the browser asks for your approval first. The
+Shell commands run inside the sandbox. By default, `shell`, `file_edit`,
+`file_write` and `python_execute` ask for your approval first; browser
+actions do not. The
 [README's sandboxing and approvals section](../README.md#sandboxing-and-approvals)
 explains what happens if sandbox setup fails and how to change either
 default for a topic.

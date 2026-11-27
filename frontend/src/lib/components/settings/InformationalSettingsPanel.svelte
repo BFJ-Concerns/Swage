@@ -1,5 +1,5 @@
 <script lang="ts">
-  type InformationalTab = "channels" | "devices" | "account";
+  type InformationalTab = "devices" | "account";
 
   interface Props {
     tab: InformationalTab;
@@ -8,10 +8,6 @@
   let { tab }: Props = $props();
 
   const CONTENT: Record<InformationalTab, { title: string; body: string }> = {
-    channels: {
-      title: "Delivery channels",
-      body: "Channels are configured in config.toml — the Telegram channel under [channels.telegram] — and cannot be managed from here yet.",
-    },
     devices: {
       title: "Attached devices",
       body: "Devices register and pair through the API, as the documentation describes. They are not listed here yet.",

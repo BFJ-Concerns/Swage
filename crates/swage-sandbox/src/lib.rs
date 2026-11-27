@@ -36,7 +36,9 @@ pub(crate) fn resolve_agent_binary() -> Result<PathBuf, SandboxError> {
     })
 }
 
-pub use agent_loop::{apply_child_landlock_from_env, run_agent_loop};
+pub use agent_loop::{
+    apply_child_landlock_from_env, child_sandbox_config_from_env, run_agent_loop,
+};
 
 /// The binary that re-executes as the sandboxed agent and as the governor
 /// of a sandboxed program: the host's own, or `SWAGE_SANDBOX_AGENT_BINARY`.

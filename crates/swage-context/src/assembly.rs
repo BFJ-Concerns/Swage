@@ -131,6 +131,13 @@ fn default_assembly_inner(
             source,
             token_count,
             preview,
+            full_text: Some(
+                content
+                    .iter()
+                    .map(ChatMessage::text_content)
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            ),
             priority: element.priority(),
             named_assembly: None,
         });
@@ -171,6 +178,13 @@ fn default_assembly_inner(
             // Update the element report token count to reflect post-compaction cost.
             if let Some(report) = element_reports.iter_mut().find(|r| r.name == "history") {
                 report.token_count = record.tokens_after;
+                report.full_text = Some(
+                    compacted
+                        .iter()
+                        .map(ChatMessage::text_content)
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                );
             }
 
             // Splice the compacted messages back into the assembled list.
@@ -194,6 +208,7 @@ fn default_assembly_inner(
         assembly_name: "default".to_string(),
         elements: element_reports,
         total_tokens,
+        provider_attempts: Vec::new(),
         budget: config.budget,
         budget_remaining,
         compaction_applied,

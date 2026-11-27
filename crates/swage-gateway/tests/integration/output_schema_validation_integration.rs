@@ -126,7 +126,7 @@ async fn start_test_server_with_config(
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),

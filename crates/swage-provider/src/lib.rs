@@ -6,6 +6,8 @@
 
 // Concrete providers
 pub mod anthropic;
+pub mod attribution;
+pub mod credential_transport;
 pub mod google;
 pub mod http;
 pub mod openai;
@@ -27,6 +29,7 @@ mod tool_schema;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use credential_transport::{PlaintextCredentialVerdict, PlaintextExposure};
 pub use provider::{LlmProvider, ProviderConfig, UnsupportedLlmProvider};
 pub use registry::{Registry, RegistryError, ResolvedModel};
 pub use voice::{

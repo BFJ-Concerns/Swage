@@ -4,15 +4,16 @@ description: Run lifecycle, journal/replay, budget partitions (including per-rou
 
 # Workflow engine
 
-The workflow engine executes front-loaded JavaScript scripts inside a
-caged V8 isolate of their own (`swage-isolate`). Each run is a single script evaluation; the host
-(the gateway) journals every non-deterministic call so a crashed or parked
-run replays from its journal.
+Each workflow run evaluates its script in a separate V8 isolate
+(`swage-isolate`). The gateway journals calls to the host so an interrupted
+or parked run can replay them.
 
-Primary sources: `crates/swage-workflow/src/engine.rs` (the JS sandbox and
-host bindings), `crates/swage-workflow/src/host.rs` (the `WorkflowHost`
-trait), `crates/swage-gateway/src/workflow.rs` (journalling, parking,
-budget, handover, wake loop).
+Primary sources are `crates/swage-isolate/src/lib.rs` (the JS sandbox),
+`crates/swage-workflow/src/engine.rs` (the workflow API shim),
+`crates/swage-workflow/src/host_calls.rs` (host bindings),
+`crates/swage-workflow/src/host.rs` (the `WorkflowHost` trait) and
+`crates/swage-gateway/src/workflow.rs` (journalling, parking, budget,
+handover, wake loop).
 
 ## Run lifecycle
 
@@ -34,8 +35,9 @@ serialisation, so the cap is a soft admission gate on `start_run`
 callers rather than a hard gateway-wide limit.
 
 `start_run` validates the budget, creates a `NewWorkflowRun` record
-(with `source_hash` as SHA-256 of source, `engine_version` the
-`v8-<version>` string `swage_workflow::engine_version()` returns), then calls `launch_existing_run`.
+(with `source_hash` as SHA-256 of source and `engine_version` as the
+`v8-<version>` returned by `swage_workflow::engine_version()`), then calls
+`launch_existing_run`.
 
 `launch_existing_run` is the shared path for new and resumed runs:
 
@@ -61,15 +63,18 @@ Terminal state resolution:
 
 ## Scripts
 
-Scripts are JavaScript evaluated in a caged V8 isolate: `Deno`, `eval`,
-`Date`, `Intl`, `WebAssembly`, `SharedArrayBuffer`, `Atomics`, `WeakRef` and
-`FinalizationRegistry` are deleted from the global object before any script
-source is compiled, the isolate has a heap limit and a limit on uninterrupted
-execution (`EngineLimits`; crossing one is `WorkflowEngineError::Terminated`,
-recorded by the gateway as an `engine_terminated` audit event), and
-`Math.random` throws
-`NondeterministicCallError`. `Date`, `setTimeout`, `fetch`, `process` are
-absent.
+The isolate has no ambient access to I/O, timers, or clocks. `Math.random`
+and host-locale methods such as `toLocaleString()` throw
+`NondeterministicCallError`. Workflows obtain external values through the
+host API so replay can reproduce them.
+
+The heap and the combined backing stores of live buffers each have a 64 MiB
+ceiling. Programs can use fixed-length buffers and typed arrays. Resizable
+buffers are unavailable. A script can execute for up to 30 seconds without
+yielding, excluding time spent waiting for a host call. Reaching a limit
+returns `WorkflowEngineError::Terminated` and the gateway records
+`heap_limit`, `buffer_limit` or `time_limit` as the reason in an
+`engine_terminated` audit event.
 
 ### Meta header
 
@@ -98,9 +103,9 @@ override, but `undefined` at the call site falls back to the default.
 | `wait({ watches?, timerMs? })` | `Promise<WakeResult>` | Races handle completions against a journalled timer. Returns `{wake: "completion", handle, value/error}` or `{wake: "timer"}`. |
 | `workflow(name, args?)` | `Promise<Value>` | Child workflow call. Only present when `capabilities.composition` is true. |
 | `deliver(payload, options?)` | `Promise<EffectReceipt>` | Delivery effect. Only present when `capabilities.delivery` is true. |
-| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue and resolves to the stored event `{ seq, kind, payload, source }`. `kind` is any namespaced name — two or more non-empty segments joined by `.`, `:`, `/`, `_` or `-` (`worker.report`, `decision.needed`); a bare word such as `escalation` is refused with `RunEventError`. |
+| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue and resolves to the stored event `{ seq, kind, payload, source }`. `kind` is any namespaced name — two or more non-empty segments joined by `.`, `:` or `/`, each made of ASCII letters, digits, `_` and `-` (`worker.report`, `decision.needed`); a bare word such as `escalation` is refused with `RunEventError`, and so is `worker-report`, which is one segment. |
 | `awaitEvent({ kinds })` | `Promise<Value>` | Parks the run until an undelivered event whose `kind` is in `kinds` (each namespaced) arrives, and resolves to the earliest such event in the same `{ seq, kind, payload, source }` shape, marking it delivered. Replay returns the recorded event. |
-| `hold({ content, verdicts })` | `Promise<{ verdict }>` | Parks the run on a decision: `content` is the question, `verdicts` the accepted answers (at least two distinct strings, or the raise is refused). Resolves with the chosen verdict once a person at the run page or an agent holding the `workflow_hold` tool answers; see *Decision holds*. |
+| `hold({ content, verdicts })` | `Promise<{ verdict }>` | Parks the run on a decision: `content` is the question, `verdicts` the accepted answers (at least two distinct strings, or the raise is refused). Resolves with the chosen verdict once an agent holding the `workflow_hold` tool answers; see *Decision holds*. |
 | `gate(options?)` | `Promise<Value>` | Wake-gate evaluation. Options: `criteria` (string), `model` (optional override). |
 | `deliverEvents(upToSeq)` | `Promise<Value>` | Stamps pending events as delivered up to a sequence number. |
 | `parallel(thunks)` | `Promise<Array>` | `Promise.all` with per-thunk worker-failure swallowing (a failed worker collapses its slot to `null`). A pre-spawn author error propagates and fails the run. |
@@ -459,10 +464,10 @@ relaunches them by replay.
 `postEvent(kind, payload)` appends to the run's durable pending-event
 queue and resolves to the stored event `{ seq, kind, payload, source }`.
 `kind` is any namespaced name: two or more non-empty segments joined by
-`.`, `:`, `/`, `_` or `-`, drawn from letters, digits and those
-separators — `worker.report`, `decision.needed`, `device.reply`. A bare
-word (`escalation`, `completion`) is refused with `RunEventError`, as is
-an empty or malformed name. Events are journalled (exactly-once under
+`.`, `:` or `/`, each segment made of ASCII letters, digits, `_` and `-` —
+`worker.report`, `decision.needed`, `device.reply`. A bare word
+(`escalation`, `completion`) is refused with `RunEventError`, as is
+`worker-report`, which is one segment, and an empty or malformed name. Events are journalled (exactly-once under
 replay) and assigned a monotonic `seq`. Each event record links to its
 journal entry via `journal_entry_id`. The same validation applies to an
 event posted from outside the run through the `run_event_post` tool.
@@ -483,9 +488,9 @@ run must wait on is a hold (below), which validates the answer.
 `hold({ content, verdicts })` parks the run on a decision. The script names
 the question and the verdicts it accepts — at least two distinct strings; a
 hold with fewer is refused at raise and never reaches a decider. The hold is
-registered on the run: the run page lists it, and an agent granted the
-`workflow_hold` tool lists the open holds in its topic (`action: "list"`)
-and answers one (`action: "answer"` with the `hold_id` and a `verdict` from
+registered on the run: the run page shows it and takes no answer, and an
+agent granted the `workflow_hold` tool lists the open holds in its topic
+(`action: "list"`) and answers one (`action: "answer"` with the `hold_id` and a `verdict` from
 the set), the answering session recorded; the script names no decider. An
 answer outside the set is refused with feedback and the hold keeps waiting.
 The run resumes with `{ verdict }`; cancelling the run releases its holds.
@@ -546,9 +551,9 @@ would change and replay would fail.
 
 ## Cancellation
 
-The `CancellationToken` is read by the isolate's watchdog thread, which
-terminates execution when it fires (a loop that never yields included), and
-raced against the execution future via `tokio::select!`. Result: `WorkflowEngineError::Cancelled`.
+The isolate checks the cancellation token while waiting on a host call.
+Its watchdog checks the same token to stop running JavaScript, including a
+loop that never yields. The engine returns `WorkflowEngineError::Cancelled`.
 
 `cancel_run` cancels the token. For parked runs (no engine to signal),
 it directly sets state to `cancelled` in storage.

@@ -496,3 +496,52 @@ fn memory_is_carried_beside_the_skills_element() {
         "skills must appear in report"
     );
 }
+
+#[test]
+fn inspector_records_full_text_of_the_assembled_elements() {
+    let elements = vec![
+        prompts_element("First paragraph.\n\nSecond paragraph."),
+        history_element(&[("question", "answer")]),
+    ];
+    let output = default_assembly(
+        &elements,
+        &ContextConfig::default(),
+        &FixedCostTokeniser { cost: 10 },
+    );
+    let report = serde_json::to_value(&output.report).unwrap();
+    assert_eq!(
+        report["elements"][0]["full_text"],
+        "First paragraph.\n\nSecond paragraph."
+    );
+    assert_eq!(report["elements"][1]["full_text"], "question\n\nanswer");
+}
+
+#[test]
+fn inspector_full_history_text_matches_the_compacted_request() {
+    let elements = vec![
+        prompts_element("instructions"),
+        history_element(&[
+            ("old question", "old answer"),
+            ("new question", "new answer"),
+        ]),
+    ];
+    let output = default_assembly(
+        &elements,
+        &ContextConfig {
+            budget: Some(30),
+            ..Default::default()
+        },
+        &FixedCostTokeniser { cost: 10 },
+    );
+    assert!(!output.report.compaction_applied.is_empty());
+    let history = output
+        .messages
+        .iter()
+        .skip(1)
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let report = serde_json::to_value(&output.report).unwrap();
+    assert_eq!(report["elements"][1]["full_text"], history);
+    assert!(!history.contains("old question"));
+}

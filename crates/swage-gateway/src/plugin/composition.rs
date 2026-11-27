@@ -57,6 +57,22 @@ impl PluginHost for CompositionHost {
     }
 }
 
+/// What the host did on a composition's behalf, for the report to be built
+/// from: the plugin's answer is its composition, never the record of it.
+pub(super) struct HostWork {
+    /// The named assembly the host ran, when the plugin asked for it.
+    pub named: Option<AssemblyOutput>,
+    /// Each history compaction the host performed: the messages it was
+    /// given, the messages it answered with, and its record.
+    pub compactions: Vec<HostCompaction>,
+}
+
+pub(super) struct HostCompaction {
+    pub input: Vec<ChatMessage>,
+    pub output: Vec<ChatMessage>,
+    pub record: CompactionRecord,
+}
+
 /// Keep borrowed composition services on the caller while host requests are
 /// awaited by the isolate. Each invocation has its own queue; none of its
 /// authority or pending requests can carry over to a later turn.
@@ -66,7 +82,7 @@ pub(super) async fn compose(
     tokeniser: &dyn Tokeniser,
     named: impl FnOnce() -> AssemblyOutput,
     named_available: bool,
-) -> Result<(Value, Vec<CompactionRecord>), String> {
+) -> Result<(Value, HostWork), String> {
     let (requests, mut receiver) = mpsc::unbounded_channel();
     let host = Arc::new(CompositionHost {
         parent: Arc::clone(&slot.host),
@@ -77,43 +93,47 @@ pub(super) async fn compose(
         .invoke_slot("context_program", &input, &slot.context, host);
     tokio::pin!(invocation);
     let mut named = Some(named);
-    let mut named_output = None;
-    let mut compactions = Vec::new();
+    let mut work = HostWork {
+        named: None,
+        compactions: Vec::new(),
+    };
     loop {
         tokio::select! {
             answer = &mut invocation => return answer
-                .map(|output| (output, compactions))
+                .map(|output| (output, work))
                 .map_err(|error| format!("{}: {error}", slot.plugin)),
             Some(request) = receiver.recv() => {
                 let result = (|| {
                     let operation: ContextOperation = serde_json::from_value(request.value)
                         .map_err(|error| refusal(error.to_string()))?;
+                    // The messages an operation takes are the shapes the
+                    // slot's own answer may carry.
                     let messages = |values: Vec<Value>| -> Result<Vec<ChatMessage>, HostCallFailure> {
-                        values.into_iter().map(|value| serde_json::from_value(value)
-                            .map_err(|error| refusal(error.to_string()))).collect()
+                        values.iter().enumerate().map(|(index, value)| super::slot::composed_message(value)
+                            .map_err(|reason| refusal(format!("message {index} {reason}")))).collect()
                     };
                     match operation {
                         ContextOperation::NamedAssembly => {
                             if !named_available {
                                 return Err(refusal("no named assembly is selected"));
                             }
-                            if named_output.is_none() {
-                                let output = named.take().expect("once")();
-                                compactions.extend(output.report.compaction_applied.iter().cloned());
-                                named_output = Some(serde_json::to_value(output)
-                                    .map_err(|error| refusal(error.to_string()))?);
+                            if work.named.is_none() {
+                                work.named = Some(named.take().expect("once")());
                             }
-                            Ok(named_output.as_ref().expect("assembled").clone())
+                            serde_json::to_value(work.named.as_ref().expect("assembled"))
+                                .map_err(|error| refusal(error.to_string()))
                         }
                         ContextOperation::CountMessages { messages: values } =>
                             Ok(json!(tokeniser.count_messages(&messages(values)?))),
                         ContextOperation::CompactHistory { messages: values, budget } => {
-                            let (messages, record) = TruncationCompactor::new().compact(messages(values)?, budget, tokeniser);
-                            compactions.push(record.clone());
-                            serde_json::to_value(swage_protocol::plugin::ContextCompactionOutput {
-                                messages: messages.iter().map(|message| serde_json::to_value(message).expect("message")).collect(),
-                                record,
-                            }).map_err(|error| refusal(error.to_string()))
+                            let input = messages(values)?;
+                            let (output, record) = TruncationCompactor::new().compact(input.clone(), budget, tokeniser);
+                            let answer = serde_json::to_value(swage_protocol::plugin::ContextCompactionOutput {
+                                messages: output.iter().map(|message| serde_json::to_value(message).expect("message")).collect(),
+                                record: record.clone(),
+                            }).map_err(|error| refusal(error.to_string()))?;
+                            work.compactions.push(HostCompaction { input, output, record });
+                            Ok(answer)
                         }
                     }
                 })();

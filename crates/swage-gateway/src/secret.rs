@@ -26,8 +26,8 @@ use uuid::Uuid;
 
 use swage_core::{GatewayError, StorageError};
 use swage_storage::{
-    ManagedSecretEncryptionDiagnostics, NewAuditEvent, NewSecretRecord, SecretRecord,
-    managed_secret_encryption_diagnostics, store::Storage,
+    NewAuditEvent, NewSecretRecord, SecretRecord, managed_secret_encryption_diagnostics,
+    store::Storage,
 };
 
 /// Backend identifiers as stored in `secrets.backend_kind`.
@@ -70,29 +70,7 @@ pub struct GenerateSecretRequest {
     pub metadata: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SecretResponse {
-    pub id: Uuid,
-    pub name: String,
-    pub material_kind: String,
-    pub owner_kind: String,
-    pub backend_kind: String,
-    pub scope_kind: String,
-    pub scope_id: Option<String>,
-    pub reference: String,
-    pub metadata: Value,
-    pub status: String,
-    pub created_at: chrono::DateTime<Utc>,
-    pub updated_at: chrono::DateTime<Utc>,
-    pub revoked_at: Option<chrono::DateTime<Utc>>,
-    pub revealed_value: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SecretListResponse {
-    pub secrets: Vec<SecretResponse>,
-    pub managed_backend: ManagedSecretEncryptionDiagnostics,
-}
+pub use swage_protocol::hosting::{SecretListResponse, SecretResponse};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SecretValidationResponse {
@@ -122,6 +100,110 @@ struct BackendValue {
     observed_at: Option<DateTime<Utc>>,
 }
 
+/// Credential changes prepared without writing storage or audit events.
+#[derive(Default)]
+pub(crate) struct PreparedCredentialWrites {
+    creations: Vec<NewSecretRecord>,
+    rotations: Vec<(Uuid, String)>,
+    events: Vec<NewAuditEvent>,
+}
+
+impl PreparedCredentialWrites {
+    pub(crate) fn pending_rotation(&self, id: Uuid) -> Option<&str> {
+        self.rotations
+            .iter()
+            .find(|(pending_id, _)| *pending_id == id)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+fn prepare_secret_creation(request: CreateSecretRequest) -> Result<NewSecretRecord, GatewayError> {
+    validate_secret_request(&request)?;
+    Ok(NewSecretRecord {
+        id: Uuid::new_v4(),
+        name: request.name.trim().to_string(),
+        material_kind: request.material_kind.trim().to_string(),
+        owner_kind: request.owner_kind.trim().to_string(),
+        backend_kind: request.backend_kind.trim().to_string(),
+        scope_kind: request.scope_kind.trim().to_string(),
+        scope_id: request.scope_id,
+        external_reference: request.external_reference,
+        metadata: request.metadata.unwrap_or_else(|| json!({})),
+        value: request.value,
+    })
+}
+
+struct SecretAuditSubject<'a> {
+    id: Uuid,
+    reference: String,
+    material_kind: &'a str,
+    owner_kind: &'a str,
+    scope_kind: &'a str,
+    scope_id: &'a Option<String>,
+    backend_kind: &'a str,
+}
+
+impl<'a> From<&'a NewSecretRecord> for SecretAuditSubject<'a> {
+    fn from(record: &'a NewSecretRecord) -> Self {
+        Self {
+            id: record.id,
+            reference: format!("secret://{}/{}", record.backend_kind, record.id),
+            material_kind: &record.material_kind,
+            owner_kind: &record.owner_kind,
+            scope_kind: &record.scope_kind,
+            scope_id: &record.scope_id,
+            backend_kind: &record.backend_kind,
+        }
+    }
+}
+
+impl<'a> From<&'a SecretRecord> for SecretAuditSubject<'a> {
+    fn from(record: &'a SecretRecord) -> Self {
+        Self {
+            id: record.id,
+            reference: record.reference.clone(),
+            material_kind: &record.material_kind,
+            owner_kind: &record.owner_kind,
+            scope_kind: &record.scope_kind,
+            scope_id: &record.scope_id,
+            backend_kind: &record.backend_kind,
+        }
+    }
+}
+
+fn created_secret_event(subject: SecretAuditSubject<'_>) -> NewAuditEvent {
+    secret_event(subject, "created", "secret created", json!({}))
+}
+
+fn rotated_secret_event(subject: SecretAuditSubject<'_>) -> NewAuditEvent {
+    secret_event(subject, "rotated", "secret rotated", json!({}))
+}
+
+fn secret_event(
+    record: SecretAuditSubject<'_>,
+    event_kind: &str,
+    summary: &str,
+    metadata: Value,
+) -> NewAuditEvent {
+    NewAuditEvent {
+        id: format!("secret-{}-{}", event_kind, Uuid::new_v4()),
+        session_id: None,
+        entity_kind: "secret".into(),
+        entity_id: record.id.to_string(),
+        event_kind: event_kind.into(),
+        summary: summary.into(),
+        metadata: json!({
+            "reference": record.reference,
+            "material_kind": record.material_kind,
+            "owner_kind": record.owner_kind,
+            "scope_kind": record.scope_kind,
+            "scope_id": record.scope_id,
+            "backend_kind": record.backend_kind,
+            "detail": metadata
+        }),
+    }
+}
+
 impl SecretManager {
     pub fn new(storage: Arc<dyn Storage>) -> Self {
         Self { storage }
@@ -131,27 +213,57 @@ impl SecretManager {
         &self,
         request: CreateSecretRequest,
     ) -> Result<SecretResponse, GatewayError> {
-        validate_secret_request(&request)?;
-        let id = Uuid::new_v4();
+        let prepared = prepare_secret_creation(request.clone())?;
         let record = self
             .storage
-            .create_secret(NewSecretRecord {
-                id,
-                name: request.name.trim().to_string(),
-                material_kind: request.material_kind.trim().to_string(),
-                owner_kind: request.owner_kind.trim().to_string(),
-                backend_kind: request.backend_kind.trim().to_string(),
-                scope_kind: request.scope_kind.trim().to_string(),
-                scope_id: request.scope_id.clone(),
-                external_reference: request.external_reference.clone(),
-                metadata: request.metadata.unwrap_or_else(|| json!({})),
-                value: request.value.clone(),
-            })
+            .create_secret(prepared)
             .await
             .map_err(GatewayError::Storage)?;
-        self.audit_secret_event(&record, "created", "secret created", json!({}))
-            .await?;
+        self.storage
+            .create_audit_event(created_secret_event(SecretAuditSubject::from(&record)))
+            .await
+            .map_err(GatewayError::Storage)?;
         Ok(secret_response(record, request.value))
+    }
+
+    pub(crate) fn prepare_creation(
+        &self,
+        writes: &mut PreparedCredentialWrites,
+        request: CreateSecretRequest,
+    ) -> Result<String, GatewayError> {
+        let record = prepare_secret_creation(request)?;
+        let subject = SecretAuditSubject::from(&record);
+        let reference = subject.reference.clone();
+        writes.events.push(created_secret_event(subject));
+        writes.creations.push(record);
+        Ok(reference)
+    }
+
+    pub(crate) async fn prepare_rotation(
+        &self,
+        writes: &mut PreparedCredentialWrites,
+        id: Uuid,
+        value: String,
+    ) -> Result<String, GatewayError> {
+        let record = self.required_secret(id).await?;
+        // Atomic managed rotations update only material and the timestamp;
+        // the existing external reference and metadata remain intact.
+        writes
+            .events
+            .push(rotated_secret_event(SecretAuditSubject::from(&record)));
+        writes.rotations.push((id, value));
+        Ok(record.reference)
+    }
+
+    pub(crate) async fn commit_credentials(
+        &self,
+        mut writes: PreparedCredentialWrites,
+        event: NewAuditEvent,
+    ) -> Result<(), StorageError> {
+        writes.events.push(event);
+        self.storage
+            .write_credentials_with_audit(writes.creations, writes.rotations, writes.events)
+            .await
     }
 
     pub async fn generate_secret(
@@ -244,8 +356,10 @@ impl SecretManager {
             )
             .await
             .map_err(GatewayError::Storage)?;
-        self.audit_secret_event(&rotated, "rotated", "secret rotated", json!({}))
-            .await?;
+        self.storage
+            .create_audit_event(rotated_secret_event(SecretAuditSubject::from(&rotated)))
+            .await
+            .map_err(GatewayError::Storage)?;
         Ok(secret_response(rotated, request.value))
     }
 
@@ -295,11 +409,23 @@ impl SecretManager {
     }
 
     pub async fn resolve(&self, reference: &str) -> Result<ResolvedSecret, GatewayError> {
+        self.resolve_for_session(reference, None).await
+    }
+
+    /// Resolve a reference on a session's behalf — a tool call carrying a
+    /// `secret://` parameter — so the access event names the session that
+    /// used the secret.
+    pub async fn resolve_for_session(
+        &self,
+        reference: &str,
+        session_id: Option<Uuid>,
+    ) -> Result<ResolvedSecret, GatewayError> {
         let id = parse_secret_reference(reference)?;
         let record = self.required_secret(id).await?;
         if record.status != "active" {
-            self.audit_secret_event(
+            self.audit_secret_event_for_session(
                 &record,
+                session_id,
                 "access_failed",
                 "secret access failed",
                 json!({"reason": "revoked_or_inactive"}),
@@ -313,8 +439,9 @@ impl SecretManager {
 
         let BackendValue { value, observed_at } = self.read_backend_value(&record).await?;
         validate_resolved_material(&record.material_kind, &value)?;
-        self.audit_secret_event(
+        self.audit_secret_event_for_session(
             &record,
+            session_id,
             "accessed",
             "secret accessed",
             json!({"observed_at": observed_at}),
@@ -515,23 +642,29 @@ impl SecretManager {
         summary: &str,
         metadata: Value,
     ) -> Result<(), GatewayError> {
+        self.audit_secret_event_for_session(record, None, event_kind, summary, metadata)
+            .await
+    }
+
+    /// A secret event with the session it happened in, where one did: the
+    /// operator's management of secrets has none; a tool's use of one does.
+    async fn audit_secret_event_for_session(
+        &self,
+        record: &SecretRecord,
+        session_id: Option<Uuid>,
+        event_kind: &str,
+        summary: &str,
+        metadata: Value,
+    ) -> Result<(), GatewayError> {
         self.storage
             .create_audit_event(NewAuditEvent {
-                id: format!("secret-{}-{}", event_kind, Uuid::new_v4()),
-                session_id: None,
-                entity_kind: "secret".into(),
-                entity_id: record.id.to_string(),
-                event_kind: event_kind.into(),
-                summary: summary.into(),
-                metadata: json!({
-                    "reference": record.reference,
-                    "material_kind": record.material_kind,
-                    "owner_kind": record.owner_kind,
-                    "scope_kind": record.scope_kind,
-                    "scope_id": record.scope_id,
-                    "backend_kind": record.backend_kind,
-                    "detail": metadata
-                }),
+                session_id,
+                ..secret_event(
+                    SecretAuditSubject::from(record),
+                    event_kind,
+                    summary,
+                    metadata,
+                )
             })
             .await
             .map_err(GatewayError::Storage)?;
@@ -710,7 +843,7 @@ fn validate_secret_request(request: &CreateSecretRequest) -> Result<(), GatewayE
     Ok(())
 }
 
-fn parse_secret_reference(reference: &str) -> Result<Uuid, GatewayError> {
+pub(crate) fn parse_secret_reference(reference: &str) -> Result<Uuid, GatewayError> {
     let (scheme, tail) = reference.split_once("://").ok_or_else(|| {
         GatewayError::ValidationError(format!("invalid secret reference '{reference}'"))
     })?;
@@ -804,7 +937,7 @@ fn make_base32_secret(minimum_length: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     use std::sync::{Mutex, MutexGuard};
 
@@ -817,7 +950,7 @@ mod tests {
     // awaits so concurrent secret tests cannot race the managed key value.
     static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_secret_env() -> MutexGuard<'static, ()> {
+    pub(crate) fn with_secret_env() -> MutexGuard<'static, ()> {
         let guard = SECRET_ENV_LOCK.lock().unwrap();
         unsafe {
             env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([9_u8; 32]));
@@ -1115,6 +1248,63 @@ mod tests {
         assert_eq!(
             values,
             vec!["file-value".to_string(), "managed-value".to_string()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tools_secret_access_is_attributed_to_its_session() {
+        use swage_storage::store::{SessionStore, TopicStore};
+        // The managed backend needs its encryption key; each test supplies
+        // it, since the suite may run one test per process.
+        let _guard = with_secret_env();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let manager = SecretManager::new(storage.clone());
+        let managed = manager
+            .create_secret(CreateSecretRequest {
+                name: "Managed provider key".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "service".into(),
+                backend_kind: "managed".into(),
+                scope_kind: "gateway".into(),
+                scope_id: None,
+                metadata: None,
+                value: Some("managed-key".into()),
+                external_reference: None,
+            })
+            .await
+            .unwrap();
+
+        manager
+            .resolve_for_session(&managed.reference, Some(session.id))
+            .await
+            .unwrap();
+        manager.resolve(&managed.reference).await.unwrap();
+
+        let accesses: Vec<_> = storage
+            .list_audit_events()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind == "accessed")
+            .collect();
+        assert_eq!(accesses.len(), 2);
+        assert_eq!(
+            accesses
+                .iter()
+                .filter(|event| event.session_id == Some(session.id))
+                .count(),
+            1,
+            "the tool's access names its session; the operator's names none: {accesses:?}"
+        );
+        assert!(
+            accesses
+                .iter()
+                .all(|event| event.session_id.is_none() || event.session_id == Some(session.id))
         );
     }
 }

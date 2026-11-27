@@ -66,7 +66,7 @@ impl LlmProvider for MockProvider {
 }
 
 fn test_state(storage: Arc<SqliteStorage>) -> AppState {
-    AppState::new(
+    AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),
@@ -200,6 +200,7 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
             turn_id: Some(turn.id),
             role: swage_core::Role::User,
             origin: swage_storage::MessageOrigin::User,
+            delivered: false,
             content: "message needle".into(),
             agent_id: "gateway".into(),
         })

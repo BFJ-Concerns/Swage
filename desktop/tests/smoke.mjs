@@ -1,4 +1,5 @@
 import http from "node:http";
+import os from "node:os";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -396,9 +397,9 @@ async function createConversationAndWaitForReply(page, expectedRuntimeText) {
   }
 }
 
-async function runBrowserSmoke(baseUrl) {
+async function runBrowserSmoke(baseUrl, env) {
   console.log("browser smoke: start");
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ env });
   const page = await browser.newPage();
 
   try {
@@ -406,11 +407,11 @@ async function runBrowserSmoke(baseUrl) {
     await createConversationAndWaitForReply(page, null);
   } finally {
     await browser.close();
-    console.log("browser smoke: done");
   }
+  console.log("browser smoke: done");
 }
 
-async function runElectronSmoke(baseUrl) {
+async function runElectronSmoke(baseUrl, env) {
   if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
     console.log("electron smoke: skipped (no display server)");
     return;
@@ -418,10 +419,17 @@ async function runElectronSmoke(baseUrl) {
 
   console.log("electron smoke: start");
   const electronApp = await electron.launch({
-    args: [desktopMain],
+    // An X11-only display (including xvfb) must not inherit a Wayland
+    // platform choice from the shell running the suite.
+    args: [
+      ...(process.env.DISPLAY && !process.env.WAYLAND_DISPLAY
+        ? ["--ozone-platform=x11"]
+        : []),
+      desktopMain,
+    ],
     cwd: repoRoot,
     env: {
-      ...process.env,
+      ...env,
       SWAGE_DESKTOP_TARGET_URL: baseUrl,
     },
   });
@@ -445,18 +453,35 @@ async function runElectronSmoke(baseUrl) {
     await createConversationAndWaitForReply(window, "REMOTE");
   } finally {
     await electronApp.close();
-    console.log("electron smoke: done");
   }
+  console.log("electron smoke: done");
 }
 
-const gateway = createMockGateway();
-
+const scratchParent = process.env.SWAGE_TEST_SCRATCH_DIR ?? os.tmpdir();
+await fs.mkdir(scratchParent, { recursive: true });
+const scratch = await fs.mkdtemp(path.join(scratchParent, "swage-desktop-smoke-"));
 try {
-  const baseUrl = await gateway.start();
-  console.log(`mock gateway: ${baseUrl}`);
-  await runBrowserSmoke(baseUrl);
-  await runElectronSmoke(baseUrl);
+  // Electron and Chromium store certificates and crash data outside profiles.
+  const env = { ...process.env };
+  if (env.WAYLAND_DISPLAY && env.XDG_RUNTIME_DIR) {
+    // A relative Wayland socket name refers to the caller's runtime directory.
+    env.WAYLAND_DISPLAY = path.resolve(env.XDG_RUNTIME_DIR, env.WAYLAND_DISPLAY);
+  }
+  for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"]) {
+    const directory = path.join(scratch, key);
+    await fs.mkdir(directory, { mode: 0o700 });
+    env[key] = directory;
+  }
+  const gateway = createMockGateway();
+  try {
+    const baseUrl = await gateway.start();
+    console.log(`mock gateway: ${baseUrl}`);
+    await runBrowserSmoke(baseUrl, env);
+    await runElectronSmoke(baseUrl, env);
+  } finally {
+    await gateway.stop();
+    console.log("mock gateway: stopped");
+  }
 } finally {
-  await gateway.stop();
-  console.log("mock gateway: stopped");
+  await fs.rm(scratch, { recursive: true, force: true });
 }

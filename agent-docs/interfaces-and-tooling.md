@@ -1,8 +1,45 @@
 ---
-description: Settings memory view, operator history, turn context inspector, conversation branching, image attachments and reference admission, session-owned surfaces, the surface library and annotations, workspace relinking, delivery targets, devices (registration and pairing procedure, the dial-in connection, cancellation, and presence), tool-call recording and replay, turn completion states (incomplete, failed, interrupted, cancelled), hosted documentation and the docs_read tool, voice capabilities, gateway lifecycle (status and start recovery), wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, the gateway's built-in tool inventory, and workspace tool output
+description: Provider setup and credentials, protocol selection, Settings, turn inspection, conversations, surfaces, devices, gateway lifecycle, API reference, voice and tools
 ---
 
 # Interfaces and tooling
+
+CLI examples assume `swage` is on `PATH`; see the build and `PATH` steps in
+the [README quick start](../README.md#quick-start).
+
+## Access gate beyond loopback
+
+`crates/swage-gateway/src/access_gate.rs` is an axum layer on every `/api/`
+route. It applies only when the bound host is not loopback, and admits a
+request that comes from the gateway's own machine (loopback, or the one
+specific address bound) or presents the token: `Authorization: Bearer`,
+`X-Swage-Token`, the `swage_token` cookie, or `token` in a WebSocket
+upgrade's query. `/api/health`, `/api/access`, `/api/pair` and the device
+link `/api/devices/connect` (authenticated by the device's shared token in
+its hello frame) are ungated; assets outside `/api/` are never gated.
+
+- The token is `gateway-token` in the data root, created `0600` at startup
+  when absent.
+- `POST /api/pair/codes` issues a ten-minute one-time code to the
+  gateway's own machine only (`swage gateway pair`); `POST /api/pair`
+  redeems it for the token, also set as a 400-day `HttpOnly` cookie.
+- Clients remember the token per gateway origin: `swage-client`'s
+  `pairing.rs` (`$SWAGE_HOME/client-pairings.json`) for `swage run`,
+  `desktop/src/pairing.mjs` (`gateway-pairings.json` in the Electron
+  profile) for the desktop shell; the web UI shows `PairingDialog.svelte`
+  when a request is refused with `unauthorised`.
+- `[server] access` (`token`, `warn`, `off`) is read per request from the
+  active configuration, so a change from Settings → Security applies at
+  once. `swage run --pairing-code` pairs whenever the gate applies, warn
+  included.
+
+Settings → Security (`security_settings.rs`, `GET`/`PUT
+/api/settings/security` and `/api/topics/{id}/settings/security`) reads
+and writes the sandbox toggle, the approval list and, for the install
+only, the access gate; each save writes one `configuration_change` audit
+event naming the checks left relaxed. Every writer of a configuration file
+— general settings, security settings, permanent approvals — holds
+`AppState::config_updates` for its read-modify-write.
 
 ## Settings memory view
 
@@ -46,6 +83,23 @@ The whole prior and new objects are kept collapsed beneath each entry.
 
 The pane also shows variant selections (location, variant, reason, session,
 turn) and assembly decisions.
+
+Two event families record what the gateway paid for and ran. A `tool_call`
+event is written by storage triggers (migration `067_tool_call_audit`) when a
+`tool_calls` row's status is set, carrying the tool, status, arguments, result
+and duration, attributed to the turn's session. A `completion` event is
+written by `RecordingProvider` (`crates/swage-gateway/src/completion_record.rs`),
+which `startup::create_provider` wraps around each model's adapter beneath
+retry and failover, so each attempt is recorded under the model that served it:
+one event per `complete`, `complete_with_tools` or `stream` call, carrying the
+model, `max_tokens`, `finish_reason`, an `outcome` (`cut off at its length
+limit`, `interrupted` for a stream dropped before it ended, `failed`, …),
+tokens, cost and the returned content, reasoning and tool calls, masked of
+registered secret values. Its session and turn come from
+`swage_provider::attribution::COMPLETION_ATTRIBUTION`, which
+`Agent::process_turn_streaming` sets around each turn; a completion made off
+a turn's task has none. The pane shows a `result`, `content`, `tool_calls` or
+`error` field under "What it returned".
 
 ## Turn context inspector
 
@@ -201,6 +255,70 @@ column of the `messages` table (`TEXT NOT NULL DEFAULT '[]'`). The
 Text-only messages keep the plain string form on the wire; messages with
 image parts use the provider-specific typed content array.
 
+## Provider setup
+
+The gateway starts without a provider/model pair; messaging remains unavailable
+until one is configured. In **Settings → Providers**, use **Add provider**,
+choose a kind. For **OpenAI compatible**, enter **Provider name** and
+**Base URL**, then choose **Connect**. Paste the credential into **API key**.
+This tab autosaves; wait for the saved notice and stored-credential indicator
+before continuing.
+A new key becomes an encrypted managed `provider_key` secret and the saved
+provider entry receives its `api_key_secret_ref`. No shell export is needed.
+
+| Settings kind | `protocol` | Endpoint contract |
+|---|---|---|
+| OpenAI Responses | `openai-responses` | Responses API for GPT-family models; appends `/responses` to the base URL |
+| OpenAI | `openai` | Chat Completions; appends `/chat/completions` to the base URL |
+| OpenAI compatible | `openai` | Appends `/chat/completions` to the supplied base URL |
+| Anthropic | `anthropic` | Anthropic Messages |
+| Google | `google` | Google generative language API |
+| OpenRouter | `openrouter` | OpenRouter's Chat Completions endpoint |
+
+For a GPT-family Responses route choose **OpenAI Responses**. An OpenAI-family
+proxy's **Base URL** must include its API prefix (for example
+`https://api.example.com/v1`); a Responses route must serve Responses.
+Anthropic and Google base URLs precede the protocol paths the adapter adds
+(`/v1/messages` and `/v1beta/models/...`, respectively). **OpenAI compatible** selects Chat Completions; it does
+not select Responses. Native OpenAI kinds default to `https://api.openai.com/v1`.
+
+After the credential is stored, use **Discover → Refresh** and add a model,
+or enter the upstream model ID beside **Add model**. Use **Use** on its row
+(or the **Default model** selector) to choose the default; wait for autosave
+confirmation. OpenAI-family discovery with a custom base URL uses saved
+credentials for an existing provider. Other kinds may return built-in lists
+or use a public catalogue; discovery does not prove a credential works.
+Successful Settings saves apply provider/model changes to new turns without
+a gateway restart. Restart the gateway after hand-editing `config.toml`.
+
+`models.default` selects a catalogue entry; that entry's `provider_id` selects
+the provider and `model_id` names the upstream model. An interactive turn uses
+the selected entry's provider and that provider's saved URL, protocol and
+credential, including when another entry shares the upstream model ID. `[providers] default` does not select the
+provider for a model's turn. A failed selected route surfaces an error naming
+the provider and endpoint instead of silently using another configured route.
+
+For file configuration, register a governed secret first (below), then use
+the returned `reference` verbatim. The IDs below are placeholders:
+
+```toml
+[providers.entries.gpt]
+protocol = "openai-responses"
+api_key_secret_ref = "secret://file/<returned-id>"
+# base_url = "https://api.example.com/v1" # only for a Responses-serving proxy
+
+[models]
+default = "gpt"
+
+[models.entries.gpt]
+provider_id = "gpt"
+model_id = "<upstream-model-id>"
+```
+
+Configure the provider and model before starting the first turn or handling
+sandbox/tool approvals. The [first-session procedure](first-session.md)
+starts after setup.
+
 ## Provider credentials
 
 A provider entry in `config.toml` has two credential fields
@@ -208,29 +326,48 @@ A provider entry in `config.toml` has two credential fields
 
 | Field | Resolution | Audit/redaction |
 |---|---|---|
-| `api_key_secret_ref` | Resolved through the `SecretManager` by reference (`secret://{backend}/{id}`) with an audit event per access and the value registered for redaction | Yes |
-| `api_key_env` | Direct `std::env::var` read at startup; legacy path, warned at startup (`startup.rs:449`) | No |
+| `api_key_secret_ref` | Resolved through `SecretManager` using `secret://{backend}/{id}` | Secret-access audit; active values redact captured provider requests and provider-attempt errors |
+| `api_key_env` | Direct `std::env::var` read when the provider runtime is built; legacy path with a warning | No secret-access audit or value-based redaction; pattern-based safety filtering still applies |
 
-`resolve_provider_config` (`startup.rs:420`) checks `api_key_secret_ref`
-first; if absent, falls back to `api_key_env`. The resolved secret must have
-`material_kind` `"provider_key"`.
+`resolve_provider_config` in `swage-gateway/src/startup.rs` checks
+`api_key_secret_ref` first; if absent, it falls back to `api_key_env`. The
+resolved secret must have `material_kind` `"provider_key"`. OAuth-token
+records are not provider-key secrets.
+
+For credentials sent over `http://` to a non-loopback address,
+`plaintext_credentials` applies to provider requests and model discovery.
+The provider form under **Settings → Providers** exposes the policy as
+**Plaintext credentials**.
+
+- `warn` (the default) records the warning once in the audit trail
+  (`provider_credential_exposure`) and sends the request. If the audit
+  record cannot be written, the gateway logs the warning and still sends
+  the request.
+- `refuse` blocks the request and records the refusal once.
+- `allow` sends the request without a warning.
 
 The built-in Codex app server (`protocol = "codex"`, the gateway spawning
 `codex app-server` and driving it over stdio) is temporarily disabled.
-`validate_resolved_catalog_references` (`swage-config/src/validation.rs`)
+`validate_resolved_catalog_references` in `swage-config/src/validation.rs`
 refuses such a provider entry at configuration load and at settings save:
 the Codex adapter accepts Codex's command and file-change approval requests
 only for tools granted without approval, so under the default
 `require_approval` list a Codex session could neither run commands nor edit
 files. The adapter (`swage-gateway/src/codex/`) and its tests remain, and
-settings do not offer it as a provider kind. Codex models reached through an
-OpenAI-protocol provider are unaffected.
+settings do not offer it as a provider kind. Codex models reached through a
+supported API provider are unaffected. For GPT/Codex-family models served
+over Responses, use `openai-responses`; use `openai` only for an endpoint
+serving Chat Completions. Add its upstream model ID under that provider and
+select it with **Use**. A CLI sign-in does not enable the disabled app-server
+route or automatically supply an API credential for these routes.
 
 ### Secret manager and backends
 
 The `SecretManager` (`secret.rs`) resolves secrets by their `secret://`
-reference, with an audit event per access and the resolved value registered
-for redaction. A secret's `backend_kind` names where its value lives;
+reference and audits successful access. Captured provider requests and
+provider-attempt errors are redacted using the current values of active
+secrets. This is separate from pattern-based safety filtering of tool results; it does not promise general log redaction.
+A secret's `backend_kind` names where its value lives;
 resolution reads the backend on every call, so material that changes
 underneath is current at the next access.
 
@@ -239,6 +376,12 @@ underneath is current at the next access.
 | Managed | `managed` | Encrypted at rest in the gateway's SQLite store |
 | Environment | `env` | `external_reference` names an environment variable |
 | File | `file` | `external_reference` names a file path; `metadata.json_pointer` (RFC 6901) optionally selects one field of a JSON document |
+
+Startup normally creates or reuses `<data-root>/secrets/managed-secret.key`
+for managed-secret encryption; `SWAGE_MANAGED_SECRET_KEY` can supply the key
+instead. Preserve the encryption key with the database in backups: a different
+key cannot decrypt stored credentials. Never include the key's contents in
+logs or documentation.
 
 ### File backend
 
@@ -250,22 +393,24 @@ the observation stamp.
 
 ### Registering a file-backed secret
 
-Create the secret with `POST /api/secrets` (`server.rs:251`):
+Create the secret with `POST /api/secrets`:
 
 ```json
 {
-  "name": "my-service-token",
+  "name": "my-provider-key",
   "material_kind": "provider_key",
   "owner_kind": "operator",
   "backend_kind": "file",
   "scope_kind": "provider",
   "scope_id": "my-provider",
-  "external_reference": "/path/to/token-file.json",
-  "metadata": { "json_pointer": "/tokens/access_token" }
+  "external_reference": "/path/to/provider-key.json",
+  "metadata": { "json_pointer": "/api_key" }
 }
 ```
 
-The request fields (`CreateSecretRequest` in `secret.rs:43`):
+The JSON file must contain the provider API key in its `api_key` field.
+
+The request fields (`CreateSecretRequest` in `secret.rs`):
 
 | Field | Required | Purpose |
 |---|---|---|
@@ -288,10 +433,38 @@ protocol = "openai"
 api_key_secret_ref = "secret://file/<returned-id>"
 ```
 
+### Registering a managed secret
+
+Settings → Providers creates a managed secret for a new pasted key. The API
+route is `POST /api/secrets` with `backend_kind: "managed"` and the provider
+API key inline in `value`:
+
+```json
+{
+  "name": "my-provider-key",
+  "material_kind": "provider_key",
+  "owner_kind": "operator",
+  "backend_kind": "managed",
+  "scope_kind": "provider",
+  "scope_id": "my-provider",
+  "value": "<provider-api-key>"
+}
+```
+
+Replace the placeholder. The response's `reference` is used verbatim for
+`api_key_secret_ref`. Create echoes the submitted value in `revealed_value`;
+keep that response out of logs and reports.
+
 ### Codex auth store registration
 
-At startup (`startup.rs:208`) the gateway registers the Codex CLI's
-`auth.json` under the file backend as two records:
+At startup the gateway registers `<data-root>/codex/auth.json` under the
+file backend as two records. The data root is `~/.swage` or `SWAGE_HOME`;
+the normal path is `~/.swage/codex/auth.json`, not `~/.codex/auth.json`.
+The retained supervisor uses this directory as its `CODEX_HOME`. Registration
+still occurs while the integration is disabled; it does not enable sign-in
+or turns through `protocol = "codex"`.
+
+The records select:
 
 | Name | Material kind | JSON pointer |
 |---|---|---|
@@ -675,61 +848,15 @@ Handlers construct refusals through `ApiError` rather than hand-built bodies.
   the `code` field. The generated TypeScript client's request helper raises
   `ApiError` on non-ok responses.
 
-## Wire-contract architecture
+## API reference
 
-All types that cross a process boundary live in `swage-protocol`
-(`crates/swage-protocol/`). Gateway modules consume or re-export those Rust
-types, and frontend wire types come from generated projections under
-`frontend/src/lib/protocol/`.
-
-The crate is organised into four surface modules:
-
-| Surface | Module | Anchor type | Scope |
-|---|---|---|---|
-| Client | `src/client/` | `ClientSurface` | Conversations, streaming, approvals, schedules, knowledge, voice, workflows, channels, delivery, topics, settings, materials, recovery, context reports, provider sign-in |
-| Hosting | `src/hosting.rs` | `HostingSurface` | Presence, operator overview, agent definitions, approvals, configuration |
-| Device | `src/device.rs` | `DeviceSurface` | Device registration, remote tool execution |
-| Channel | `src/channel.rs` | `ChannelSurface` | Inbound messages (DM/thread), delivery log, channel status |
-
-Each manually maintained anchor struct must reference every wire type on its
-surface. A `schemars::schema_for!` call walks only the type graph reachable from
-that anchor, so a new top-level type must be added to the anchor unless an
-existing field already reaches it.
-
-### Route manifest
-
-`routes.rs` (`swage-protocol::client::routes`) carries a growing manifest of
-client-surface HTTP routes: method, path template, path parameters, request
-body schema name, and response body schema name. The manifest does not yet
-cover the full client surface — the topic CRUD routes are the first entries;
-routes not yet in the manifest are registered directly on the router and are
-not covered by the OpenAPI or generated-client projections. Failures are not
-listed per route — every route answers a failure with `ApiErrorBody`,
-projected once as the shared error response.
-
-Adding a manifested route is one entry in the `routes()` function; the
-OpenAPI document, the generated TypeScript client, and the router-coverage
-test all read this table. The router test (`server.rs:418`) proves every
-manifest route is registered on the axum router — a manifest entry with no
-matching handler fails the test.
-
-### Projections
-
-| Projection | Output | Mechanism |
-|---|---|---|
-| TypeScript types (ts-rs) | `frontend/src/lib/protocol/` | `projections.rs` test manually calls `export_all` for each top-level export, then trims trailing whitespace |
-| JSON Schema (schemars) | `crates/swage-protocol/schema/{client,hosting,device,channel}.json` | `projections.rs` tests per surface, via the anchor type |
-| OpenAPI 3.1 (from route manifest) | `crates/swage-protocol/schema/client-openapi.json` | `projections.rs` test renders `openapi::document()`, which walks the manifest and reuses the client surface's JSON Schema as its `components/schemas` |
-| TypeScript client (from route manifest) | `frontend/src/lib/protocol/client.ts` | `projections.rs` test renders `typescript_client::generate()` — one typed function per manifest route over a shared `request` helper that raises `ApiError` on non-ok responses |
-
-Running `cargo test -p swage-protocol` regenerates all projections in place.
-New top-level wire types must be added to the appropriate anchor for JSON
-Schema and to the explicit `export_all` list for TypeScript unless already
-reachable from an existing entry. New routes must be added to the `routes()`
-manifest for the OpenAPI and client projections. Drift shows as uncommitted
-changes, caught by the verify gate's projection-freshness check; an
-unregistered type or unmanifested route creates no drift for that check to
-detect.
+The published client OpenAPI reference is
+[`client-openapi.json`](../crates/swage-protocol/schema/client-openapi.json).
+It covers a subset of client routes; secret operations are not included.
+See [Provider credentials](#provider-credentials) for those requests.
+JSON Schema contracts for the client, hosting, device and channel surfaces
+are in [`crates/swage-protocol/schema/`](../crates/swage-protocol/schema/).
+HTTP failures use the [wire error contract](#wire-error-contract).
 
 ## Verification gate
 
@@ -771,11 +898,11 @@ tests), followed by a separate `cargo test --workspace --doc` stage for
 doctests (nextest cannot run doctests). When set to `cargo`, Rust tests run
 under `cargo test --workspace --no-fail-fast`.
 
-Gateway integration tests (`scratch_tempdir` in
-`crates/swage-gateway/tests/integration/support.rs`) and the browser E2E
-launchers (`frontend/e2e/scratch-root.mjs`) create their disposable roots
-under `SWAGE_TEST_SCRATCH_DIR` when it is set, otherwise under the system
-temporary directory.
+`just verify` clears any inherited `SWAGE_HOME`. Gateway test state owns a
+temporary data root, and tests of discovery set their own roots explicitly.
+Gateway integration tests, browser E2E runs and desktop smoke tests create
+disposable browser state under `SWAGE_TEST_SCRATCH_DIR` when it is set.
+Otherwise they use the system temporary directory.
 
 When both tests and projections fail, both errors surface in one message.
 The test suite aggregates Rust, frontend, and desktop-smoke failures rather
@@ -787,14 +914,9 @@ budget.
 
 ## Client-side route preservation
 
-The SPA router (`frontend/src/lib/router.ts`) is framework-free: `parseRoute`
-pattern-matches the URL (`/`, `/conversations/{id}`,
-`/conversations/{id}/surfaces/{surface_id}`, `/library`,
-`/workflow-runs/{id}`, `/settings/...`, `/settings/topic/{slug}/...`);
-`createRouter` manages `pushState` navigation and `popstate` listening.
-
-`applyLocation()` runs on every URL change. When the URL contains a
-conversation ID:
+Conversation links use `/conversations/{id}` and
+`/conversations/{id}/surfaces/{surface_id}`. Browser back/forward navigation
+to a conversation behaves as follows:
 
 - **Already active:** calls `checkConversationExists` — a lightweight `GET`
   that confirms the conversation exists without re-fetching it. On 404,
@@ -804,21 +926,14 @@ conversation ID:
 - **Different conversation:** calls `selectConversation`, which fully loads
   it. On 404, falls back to root. On other errors, the error propagates.
 
-The `conversationStore` dependency is injected as a four-member interface,
-wired in `App.svelte`. `clearActiveConversation` disconnects the WebSocket
-before clearing the store, preventing orphaned connections.
-
 Route changes propagate `notFound` state to the UI, so the "conversation not
 found" notice appears for `popstate`-triggered navigations and initial surface
 loads alike. When a scope was in view, `App.svelte` keeps a pending start in
 it (the composer stays open; the next message creates a session there);
 otherwise the front door serves.
 
-Session creation is fenced against a scope change: `createAndNavigate`
-captures a scope generation before the request and hands the store a
-`shouldInstall` check, so a session created for one scope is neither listed
-nor activated once the user has moved to another (it exists in the scope it
-was asked for, and the recent list finds it).
+A session requested before a scope change remains in the requested scope;
+it does not become active in the newly selected scope.
 
 ## Tool-call recording and replay
 
@@ -990,6 +1105,7 @@ two sandbox-eligible tools.
 |---|---|
 | `workflow_run` | `workflow_run.rs` |
 | `workflow_list` | `workflow_list.rs` |
+| `model_list` | `model_list.rs` — the session's model catalogue: ids, aliases, provider model name, vendor family (`ModelFamily` in `swage-context`), and the effort levels each serves unclamped (`served_effort_capability`). |
 | `workflow_save` | `workflow_save.rs` |
 | `workflow_run_account` | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session topic; a run in another topic reads as absent. |
 | `workflow_run_status` | `workflow_run_status.rs` — lists the topic's runs that have not ended, each with its undelivered events (a pipeline's pending hold among them), or reads one named run in any state. Same topic scoping as `workflow_run_account`. |
@@ -1010,6 +1126,13 @@ two sandbox-eligible tools.
 | `schedule` | `schedule.rs` |
 | `wake_me_later` | `schedule.rs` |
 
+### Definition authoring
+
+| Tool | Purpose |
+|---|---|
+| `agent_definition` | Create, update, list or delete named agents selectable for future sessions; see [Creating and editing definitions](agents-and-permissions.md#creating-and-editing-definitions) for the grant, fields and limits |
+| `task_definition` | Create or replace (`upsert`), list or delete reusable delegated work contracts; these do not appear in the new-session picker. An upsert replaces the whole definition, so omitted fields are cleared. |
+
 ### Session and memory
 
 | Tool | Source |
@@ -1018,7 +1141,6 @@ two sandbox-eligible tools.
 | `agent_memory` | `agent_memory.rs` |
 | `memory` | `memory.rs` — sandbox-eligible; reads and writes the shared memory files of the session's scope — the topic's memory when a topic is selected, the general memory otherwise |
 | `tool_result_read` | `tool_result_read.rs` |
-| `task_definition` | `task_definition.rs` |
 
 ### Delegation
 
@@ -1041,13 +1163,14 @@ two sandbox-eligible tools.
 
 ### Workspace tool output
 
-Tools that produce file artefacts write them into the attached workspace at:
+Local gateway sessions store tool artefacts in managed session scratch,
+independently of attached workspace write permission:
 
 ```
-.swage/tool-output/<turn_id>/<call_id>/<filename>
+<session scratch directory>/.swage/tool-output/<turn_id>/<call_id>/<filename>
 ```
 
-`shell` writes stdout and stderr artefacts only when the stream was truncated;
+`shell` retains stdout and stderr artefacts only when the stream was truncated;
 a non-truncated stream is reported inline and the artefact file is removed.
 `browser_click`, `browser_select`, and `browser_scroll` write a post-action
 screenshot when the browser screenshot policy is not `Off`; `browser_type`
@@ -1057,18 +1180,17 @@ inline with no artefact. `url_fetch` writes `raw-body.html` only when the
 HTML body exceeds its capture limit; a body that fits is reported inline and
 the artefact file is removed.
 
-The tool result reports the artefact's relative path (e.g.
-`.swage/tool-output/turn/call/stdout.txt`). `file_read` can open text
+The local tool result reports the artefact's full path. `file_read` can open text
 artefacts directly; it refuses binary content, so screenshots are not
 readable through `file_read`. The `<turn_id>/<call_id>` structure prevents
 repeated calls from overwriting each other.
 
-On first write, the gateway creates `.swage/tool-output/` and writes a
-`.gitignore` containing `*` into it, so tool output never appears as
-untracked files in the workspace's Git repository.
+On first write, the gateway creates `.swage/tool-output/` in session scratch
+and writes a `.gitignore` containing `*` into it. Local gateway tool output
+does not create files or directories in an attached workspace.
 
-Sessions without an attached workspace write tool output into the session's
-scratch directory instead.
+Paired-device execution still stores artefacts in its working directory at
+`.swage/tool-output/` and reports relative paths.
 
 Plugin tools come from installed plugins (`crates/swage-plugin`, the kernel;
 `crates/swage-gateway/src/plugin/`, the install records, enablement and the

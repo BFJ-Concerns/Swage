@@ -44,62 +44,69 @@ pub const CURATION_POSITION_METADATA_KEY: &str = "memory_curation_position";
 /// conversation, so successive passes share one context.
 pub const CURATOR_SESSION_METADATA_KEY: &str = "memory_curator_session_id";
 
-/// The curator's instructions. Instruction text: they steer every pass over
-/// the operator's words, so edits are drafting-tier work. The first variant
-/// at `prompts.memory_curator`.
+/// The curator's instructions: the default at `prompts.memory_curator`, and
+/// the curator definition's standing instructions. Instruction text: it
+/// steers every pass over the operator's words, so edits are drafting-tier
+/// work. The citation forms are the briefs' to state, where the conversation
+/// id and the date are in hand; this text only says a source follows each
+/// fact.
 pub const CURATOR_INSTRUCTIONS: &str = "\
-You are the curator of your operator's memory. Memory holds what the operator \
-has stated — about themselves, the people and pets in their life, their \
-interests and the areas they are involved in, and, inside a topic, that \
-topic's decisions, conventions, constraints and current state — one entry \
-per subject, each a page a person will read later and an agent will act on. \
-You are the only writer; conversing agents read what you record.
+You keep your operator's memory: the record of what they have stated about \
+themselves and their work. Every other agent on this installation reads it \
+and none of them writes it. An entry is a page about one subject, which a \
+person will read later and an agent will act on as fact, so an entry holds \
+only what the operator said and reads as what is true now.
 
-Each brief you receive is either a stretch of conversation the operator was \
-in, or an instruction from the operator about their memory. Your job is to \
-distil from it what belongs in memory and to leave everything else alone.
+Each message you are sent is one of two things: a stretch of a conversation \
+the operator took part in, or an instruction from the operator about their \
+memory. Take from it what belongs in memory, write that, and leave the rest. \
+Often nothing belongs, and saying so is a correct result.
 
-Record only what the operator stated. A statement is theirs when they said \
-it in their own turn — never what the assistant inferred, suggested or \
-summarised, never what you conclude from their question. Leave out what \
-they quoted from elsewhere, posed as a hypothetical, pasted for analysis, \
-or asked not to be remembered. Keep the operator's own wording for each \
-fact where the transcript holds it; your one sentence is the entry's \
-summary line, and only there do you write in your own words.
+What belongs is the operator's own statements about themselves, the people \
+and pets in their life, their interests, the areas of life and work they are \
+involved in and, in a conversation inside a topic, that topic's decisions, \
+conventions, constraints and current state. A statement is theirs when they \
+made it in a message of their own. Leave out what an assistant said, \
+inferred, suggested or summarised, and anything you would be concluding for \
+yourself from a question or request of theirs. Leave out what they quoted \
+from someone else, posed as a hypothetical, pasted in to be worked on, or \
+asked not to have remembered.
 
-Put each fact under the entry for its subject, in the scope it belongs to: \
-general memory for facts about the operator — their profile and \
-preferences, their interests, areas, people and pets — wherever they said \
-it; topic memory — the topic your session belongs to, which is the \
-conversation's — for what they said about that topic while inside it; a \
-brief from a conversation with no topic reaches general memory only. \
-The index in your context lists every entry you can see. Before writing, \
-read the entry that covers the subject with memory_read and rewrite it \
-whole with memory_write, carrying forward what still holds, appending the \
-new facts, and replacing a fact the operator has changed so the entry reads \
-as what is currently true. Open a new entry only for a subject no existing \
-entry covers, and prefer a broader subject to a narrower one: a person is \
-one entry, not one per fact about them. Read every message from where the \
-brief begins to where it ends; record each statement the operator made once, \
-and none of them more than once.
+General memory holds what is about the operator, wherever they said it: \
+general/profile for who they are and what they prefer, and entries for their \
+interests, their areas, and the people and pets in their life. An interest \
+is a standing fact about them; an area is something they are engaged in that \
+has a state and can finish. Topic memory holds what they stated about the \
+conversation's topic while in it, and a conversation with no topic reaches \
+general memory only. Each fact goes in the entry for its subject. The index \
+in your context lists the entries that exist: add to the one that covers the \
+subject, and open a new entry only when none does, choosing the broader \
+subject over the narrower, so that a person is one entry and not one for \
+each fact about them. Spell a reference as the index does: general/<entry> \
+or topic/<entry>, in segments of letters, digits, hyphens and underscores.
 
-Every fact carries its reference inside the entry's body, written after the \
-fact in the form the brief gives you — `(conversation <id>, message <n>)` for \
-a conversation, `(settings instruction, <date>)` for an instruction from \
-Settings; memory_write has no other place for it. The entry's summary is one \
-sentence that lets an agent pick the entry from the index alone.
+`memory_write` replaces an entry whole, so read the entry with `memory_read` \
+first and write back everything that still holds together with what is new. \
+Where the operator has changed a fact, the new one takes the old one's \
+place. Keep the operator's wording for each fact where you have it. After \
+each fact give its source, in the form the message you were sent states, \
+because the body is the only place a source is kept. The summary is the one \
+part in your own words: a single sentence from which an agent reading only \
+the index can tell that this is the entry it needs. Cover the whole of what \
+you were sent: every statement in it that belongs in memory is recorded, and \
+none is recorded twice.
 
-Reference entries as the index spells them: general/<entry> or \
-topic/<entry>, path segments of letters, digits, hyphens and underscores. \
-The operator's profile and preferences live at general/profile.
+An instruction from the operator is applied under these same rules, and it \
+stands against whatever conversations say afterwards. Nothing can be \
+deleted: to remove a fact, write its entry without it, and to empty an \
+entry, write it with a summary saying that it holds nothing. Write the entry \
+so that a later pass can see what the instruction settled: a fact the \
+operator corrected keeps its settings source, and a removal leaves a line \
+saying that the operator had that subject removed. Only another instruction \
+changes either.
 
-When the brief is an instruction from the operator, apply it under these \
-same rules. To remove a fact, rewrite its entry without it; to empty an \
-entry, rewrite it to a summary saying what it no longer holds — there is no \
-delete. What the operator instructs stands against anything you gather \
-later: a later conversation does not restore what an instruction removed. \
-Then reply, briefly, with what you changed and why — or that nothing in the \
-brief belonged in memory, which is a frequent and correct outcome.";
+When you have finished, reply in a few lines: which entries you changed and \
+what changed in each, or that nothing you were sent belonged in memory.";
 
 /// Why a pass ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,6 +589,7 @@ mod tests {
     use swage_storage::store::{
         AuditStore, MessageStore, SessionStore, Storage, ThreadStore, TopicStore,
     };
+    use swage_storage::{ContextSnapshotStore, TurnStore};
     use swage_storage::{
         MessageOrigin, NewSession, NewThread, SessionOrigin, SqliteStorage, model::AppendMessage,
     };
@@ -644,6 +652,7 @@ mod tests {
                     } else {
                         MessageOrigin::Assistant
                     },
+                    delivered: false,
                     content: (*content).into(),
                     attachments: Vec::new(),
                     agent_id: "gateway".into(),
@@ -948,6 +957,43 @@ mod tests {
             apply_instruction(&state, topic.id, "   ").await.is_err(),
             "an empty instruction is refused before any session opens"
         );
+
+        // The curator's own session holds the write tool, so its memory
+        // element says it keeps memory and never that it cannot write.
+        let thread = storage
+            .list_by_session(pass.curator_session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("the curator's thread");
+        let turn = storage
+            .list_turns_by_thread(thread.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("the curator's turn");
+        let report: serde_json::Value = serde_json::from_str(
+            &storage
+                .get_snapshot(turn.id)
+                .await
+                .unwrap()
+                .expect("the turn's context record"),
+        )
+        .unwrap();
+        let memory = report["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|element| element["name"] == "memory")
+            .and_then(|element| element["full_text"].as_str())
+            .expect("the memory element's text");
+        assert!(
+            memory.contains(swage_context::memory::KEEPER_STANDING),
+            "{memory}"
+        );
+        assert!(!memory.contains(swage_context::memory::READ_ROUTE));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1016,6 +1062,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: MessageOrigin::Schedule,
+                delivered: false,
                 content: "Summarise the inbox.".into(),
                 attachments: Vec::new(),
                 position: 4,
@@ -1030,6 +1077,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: MessageOrigin::User,
+                delivered: false,
                 content: "I take Fridays off.".into(),
                 attachments: Vec::new(),
                 position: 5,

@@ -56,16 +56,27 @@ async fn session_memory_scope(
 // memory_read
 // ---------------------------------------------------------------------------
 
+/// The read tool's name, as the standing memory text names it and the
+/// context assembly asks after it.
+pub(crate) const MEMORY_READ_TOOL: &str = "memory_read";
+pub(crate) const MEMORY_WRITE_TOOL: &str = "memory_write";
+
 pub struct MemoryReadTool;
 
 #[async_trait]
 impl Tool for MemoryReadTool {
     fn name(&self) -> &str {
-        "memory_read"
+        MEMORY_READ_TOOL
     }
 
     fn description(&self) -> &str {
-        "Read one entry of your operator's memory by the reference the memory index in your context gives it — general/<entry> for what the operator has stated about themselves, topic/<entry> for what they have stated about this topic. Returns the entry's summary and body as the curator recorded them. Read an entry when its index summary bears on the conversation; the index is the only list there is, so a reference not in it does not exist."
+        "Read one entry of the operator's memory and return its one-sentence summary and \
+         its body as they are recorded. An entry is named by its reference: \
+         `general/<entry>` for what the operator has stated about themselves, \
+         `topic/<entry>` for what they have stated about this session's topic. References \
+         come from the memory index in your context, or from a notice in the conversation \
+         that an entry changed. A reference with no entry behind it fails saying so, and a \
+         `topic/` reference fails in a session that has no topic. Reading changes nothing."
     }
 
     fn parameters(&self) -> Value {
@@ -74,7 +85,7 @@ impl Tool for MemoryReadTool {
             "properties": {
                 "reference": {
                     "type": "string",
-                    "description": "The entry's reference as the memory index spells it, such as general/people/alice or topic/conventions."
+                    "description": "The entry's reference, copied as the index or the notice gives it."
                 }
             },
             "required": ["reference"]
@@ -116,11 +127,18 @@ pub struct MemoryWriteTool;
 #[async_trait]
 impl Tool for MemoryWriteTool {
     fn name(&self) -> &str {
-        "memory_write"
+        MEMORY_WRITE_TOOL
     }
 
     fn description(&self) -> &str {
-        "Record or replace one entry of the operator's memory, whole: its reference (general/<entry> for a fact about the operator, topic/<entry> for a fact about this topic), the one-sentence summary the index will show, and the body. Writing replaces the entry's summary and body entirely, so read the entry first and carry forward what still holds. Record only what the operator stated, in their words, each fact with a reference to the conversation it came from."
+        "Write one entry of the operator's memory, whole: its reference, its one-sentence \
+         summary and its body. A reference that already has an entry has that entry's \
+         summary and body replaced entirely, and nothing of the old text remains unless it \
+         is written again; a new reference opens a new entry. `general/<entry>` is memory \
+         about the operator, and `topic/<entry>` is memory about this session's topic, which \
+         a session with no topic cannot write. `memory_read` returns what an entry holds \
+         now. The memory index every session reads shows each entry's reference and \
+         summary, and every write is recorded."
     }
 
     fn parameters(&self) -> Value {
@@ -129,15 +147,15 @@ impl Tool for MemoryWriteTool {
             "properties": {
                 "reference": {
                     "type": "string",
-                    "description": "The entry's reference: general/<entry> or topic/<entry>; path segments use letters, digits, hyphens and underscores."
+                    "description": "The entry's reference: `general/<entry>` or `topic/<entry>`, where `<entry>` is one or more segments joined by `/`, each of letters, digits, hyphens and underscores."
                 },
                 "summary": {
                     "type": "string",
-                    "description": "One sentence the index shows for this entry — enough to pick it from the index alone."
+                    "description": "One sentence, on a single line, saying what the entry covers. It is all the index shows of the entry, so it has to be enough to pick the entry out by."
                 },
                 "body": {
                     "type": "string",
-                    "description": "The entry's whole body: what is currently true about the subject, each fact with its conversation reference."
+                    "description": "The entry's whole body as it should now read."
                 }
             },
             "required": ["reference", "summary", "body"]

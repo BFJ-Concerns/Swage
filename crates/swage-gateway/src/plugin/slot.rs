@@ -236,13 +236,19 @@ impl PluginSlot {
     /// neither shape, or a `tool` message without its call, is the slot's
     /// failure, never a silent recast. Elements also carry priority, rendered
     /// messages and safe report metadata. Under the context grant the plugin
-    /// can count tokens, compact history or run the configured named assembly.
-    /// It may return element accounting in a composition report; otherwise
-    /// the report accounts for the supplied elements. The host always records
-    /// the configured budget and every compaction it performed, in order:
-    /// direct history compactions and the records of a named assembly it ran
-    /// on the plugin's behalf. Plugin claims cannot add compaction records.
-    /// Token totals, remaining budget and elapsed duration are host-computed.
+    /// can count tokens, compact history or run the configured named assembly;
+    /// those operations take messages in the same shapes as the answer.
+    ///
+    /// The report is the host's: a composition carrying the named assembly is
+    /// reported as that assembly; otherwise each element is reported as the
+    /// host supplied it, and a history compaction is recorded, and the
+    /// element it was asked of carries the compacted text, only when the
+    /// composition carries what the compaction answered in place of what it
+    /// was given. A plugin's own
+    /// report selects which supplied elements it carried and what it
+    /// declared left out (an element it was not supplied is dropped), and
+    /// adds its warnings and errors. Token totals, remaining budget and
+    /// elapsed duration are host-computed.
     ///
     /// The assembly runs on the turn's thread synchronously, so the isolate
     /// is awaited from here through `block_in_place`, which the
@@ -284,6 +290,7 @@ impl PluginSlot {
                     preview: element.report_preview().or_else(|| {
                         swage_context::assembly::safe_metadata_preview(element.name(), &source)
                     }),
+                    full_text: Some(message_text(&messages)),
                     named_assembly: None,
                 };
                 swage_protocol::plugin::ContextProgramElement {
@@ -309,7 +316,7 @@ impl PluginSlot {
             budget: config.budget,
         })
         .expect("context input");
-        let (output, compactions) = tokio::task::block_in_place(|| {
+        let (output, work) = tokio::task::block_in_place(|| {
             handle.block_on(super::composition::compose(
                 self,
                 input,
@@ -338,19 +345,72 @@ impl PluginSlot {
         if messages.is_empty() {
             return Err(format!("{}: the slot composed no messages", self.plugin));
         }
-        let mut report = match output.report {
-            Some(report) => report,
-            None => {
-                let mut report = swage_context::report::AssemblyReport::new(assembly_name);
-                report.elements = descriptors
-                    .into_iter()
-                    .map(|element| element.report)
-                    .collect();
-                report
+        let composed = message_values(&messages);
+        // The report is built from what the host supplied and did: a
+        // plugin's account names which supplied elements it carried and what
+        // it declared left out, and nothing it claims about where an element
+        // came from, what it held or what was compacted stands.
+        let mut report = swage_context::report::AssemblyReport::new(assembly_name);
+        // A composition that carries the named assembly the host ran is
+        // that assembly's account — the assembly that actually served, its
+        // compactions included.
+        if let Some(named) = work.named
+            && contains_run(&composed, &message_values(&named.messages))
+        {
+            report = named.report;
+        } else {
+            let mut supplied: Vec<_> = descriptors
+                .into_iter()
+                .map(|element| (element.report, element.rendered_messages))
+                .collect();
+            // A history compaction is applied when the composition carries
+            // what it answered in place of what it was given; the element it
+            // was asked of then carries the compacted text.
+            for compaction in &work.compactions {
+                let input = message_values(&compaction.input);
+                let output = message_values(&compaction.output);
+                if !contains_run(&composed, &output)
+                    || (input != output && contains_run(&composed, &input))
+                {
+                    continue;
+                }
+                if let Some((element, _)) =
+                    supplied.iter_mut().find(|(_, rendered)| *rendered == input)
+                {
+                    element.token_count = tokeniser.count_messages(&compaction.output);
+                    element.full_text = Some(message_text(&compaction.output));
+                }
+                report.compaction_applied.push(compaction.record.clone());
             }
-        };
+            let supplied: Vec<_> = supplied.into_iter().map(|(element, _)| element).collect();
+            match output.report {
+                Some(account) => {
+                    report.elements = account
+                        .elements
+                        .iter()
+                        .filter_map(|claimed| {
+                            supplied
+                                .iter()
+                                .find(|element| element.name == claimed.name)
+                                .cloned()
+                        })
+                        .collect();
+                    report.declared_omissions = account
+                        .declared_omissions
+                        .into_iter()
+                        .filter(|omission| {
+                            supplied
+                                .iter()
+                                .any(|element| element.name == omission.element)
+                        })
+                        .collect();
+                    report.warnings = account.warnings;
+                    report.errors = account.errors;
+                }
+                None => report.elements = supplied,
+            }
+        }
         report.budget = config.budget;
-        report.compaction_applied = compactions;
         report.total_tokens = tokeniser.count_messages(&messages);
         report.budget_remaining = report
             .budget
@@ -398,6 +458,29 @@ impl PluginSlot {
     }
 }
 
+/// Messages as the JSON the plugin saw and answered with, for comparing a
+/// composition with what the host supplied.
+fn message_values(messages: &[ChatMessage]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|message| serde_json::to_value(message).expect("message"))
+        .collect()
+}
+
+/// An element's messages as the inspector shows its text.
+fn message_text(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Whether `run` appears in `messages` as one unbroken stretch.
+fn contains_run(messages: &[Value], run: &[Value]) -> bool {
+    run.is_empty() || messages.windows(run.len()).any(|window| window == run)
+}
+
 fn role_name(role: Role) -> &'static str {
     match role {
         Role::System => "system",
@@ -409,7 +492,7 @@ fn role_name(role: Role) -> &'static str {
 
 /// A message of a plugin's composition: one of the conversation's own
 /// handed back whole, or a fresh text message under a conversational role.
-fn composed_message(message: &Value) -> Result<ChatMessage, String> {
+pub(super) fn composed_message(message: &Value) -> Result<ChatMessage, String> {
     if let Ok(whole) = serde_json::from_value::<ChatMessage>(message.clone()) {
         return Ok(whole);
     }
@@ -1041,6 +1124,7 @@ mod tests {
                 elements.push(Box::new(swage_context::memory::MemoryIndexElement::new(
                     Some("memory content".into()),
                     vec![],
+                    swage_context::memory::MemoryReach::EntriesByReference,
                 )));
                 elements.push(Box::new(Element("surfaces", "surface content")));
                 elements.push(Box::new(BriefingElement::new(ResolvedNamedElement {
@@ -1174,6 +1258,46 @@ mod tests {
             serde_json::to_value(&output.report.compaction_applied).unwrap(),
             serde_json::to_value([first, second]).unwrap(),
             "the report records every host compaction in call order, even without a plugin report"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_compaction_the_composition_discards_is_not_recorded() {
+        // The plugin compacts, then composes over the uncompacted history
+        // with a message of its own, which the host counts as it would
+        // count the answer.
+        let composer = context_report_slot(
+            r#"swage.provide.slot("context_program", async (input) => {
+                const history = input.elements[0].messages;
+                await swage.context({ operation: "compact_history", messages: history, budget: 1 });
+                const messages = [{ role: "system", content: "composed afresh" }, ...history];
+                await swage.context({ operation: "count_messages", messages });
+                return { messages };
+            });"#,
+        )
+        .await;
+        let history = vec![
+            ChatMessage::new(Role::User, "old question"),
+            ChatMessage::new(Role::Assistant, "old answer"),
+            ChatMessage::new(Role::User, "recent question"),
+            ChatMessage::new(Role::Assistant, "recent answer"),
+        ];
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let output = composer
+            .context_program(
+                &[Box::new(History(history))],
+                &Default::default(),
+                &tokeniser,
+                "default",
+                &Default::default(),
+                || panic!("no named assembly requested"),
+            )
+            .unwrap();
+        assert_eq!(output.messages.len(), 5);
+        assert!(output.report.compaction_applied.is_empty());
+        assert_eq!(
+            output.report.elements[0].full_text.as_deref(),
+            Some("old question\n\nold answer\n\nrecent question\n\nrecent answer")
         );
     }
 

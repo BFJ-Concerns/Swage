@@ -72,6 +72,15 @@ export async function deleteConversation(id: string): Promise<void> {
   await generated.deleteConversation(id);
 }
 
+/**
+ * Stop the conversation's running turn. Reaches the turn whichever client
+ * holds the conversation's socket; throws with the gateway's reason when
+ * nothing is running there or the gateway cannot be reached.
+ */
+export async function stopConversationTurn(id: string): Promise<void> {
+  await generated.cancelConversationTurn(id);
+}
+
 // ---------------------------------------------------------------------------
 // Branches — sibling threads taken from an earlier message
 // ---------------------------------------------------------------------------

@@ -26,6 +26,9 @@ pub enum ErrorCode {
     /// The body parsed but failed validation — a missing or unknown field,
     /// a value outside its contract.
     ValidationError,
+    /// The request reached a gateway bound beyond loopback without its
+    /// token; a client pairs once and is admitted thereafter.
+    Unauthorised,
     /// The caller may not perform this operation from where it is.
     Forbidden,
     /// The addressed entity does not exist.
@@ -45,6 +48,10 @@ pub enum ErrorCode {
     SignInFailed,
     /// The provider runtime could not be started or reached.
     ProviderRuntimeUnavailable,
+    /// The gateway could not deliver output to its destination.
+    DeliveryFailed,
+    /// Automated execution did not produce its required result.
+    RuntimeError,
     /// An unexpected failure inside the gateway.
     InternalError,
 }
@@ -54,13 +61,14 @@ impl ErrorCode {
     pub const fn status(self) -> u16 {
         match self {
             Self::MalformedBody => 400,
+            Self::Unauthorised => 401,
             Self::Forbidden => 403,
             Self::NotFound => 404,
             Self::Conflict | Self::TurnInProgress | Self::AlreadyConnected => 409,
             Self::UnsupportedMediaType => 415,
             Self::ValidationError | Self::SignInUnsupported => 422,
-            Self::InternalError => 500,
-            Self::ProviderError | Self::SignInFailed => 502,
+            Self::InternalError | Self::RuntimeError => 500,
+            Self::ProviderError | Self::SignInFailed | Self::DeliveryFailed => 502,
             Self::ProviderRuntimeUnavailable => 503,
         }
     }
@@ -108,6 +116,8 @@ mod tests {
             ErrorCode::SignInUnsupported,
             ErrorCode::SignInFailed,
             ErrorCode::ProviderRuntimeUnavailable,
+            ErrorCode::DeliveryFailed,
+            ErrorCode::RuntimeError,
             ErrorCode::InternalError,
         ];
         for code in codes {

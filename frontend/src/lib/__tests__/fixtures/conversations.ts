@@ -26,6 +26,7 @@ export function makeConversationDetail(
     id: "conv-1",
     agent_id: "gateway",
     topic_id: "proj-default",
+    agent_display_name: "Swage default",
     created_at: "2026-04-07T12:00:00Z",
     last_activity: "2026-04-07T12:00:00Z",
     messages: [],

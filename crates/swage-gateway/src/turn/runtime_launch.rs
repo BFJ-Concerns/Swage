@@ -15,10 +15,10 @@ use tokio::task::JoinHandle;
 use super::{
     AgentBuilder, AgentConfig, AgentError, AgentEvent, AppState, Arc, CancellationToken,
     ChatMessage, GatewayDelegationHandler, GatewayError, SandboxGuard, ServerEvent, ToolDispatcher,
-    TurnRequest, TurnState, Uuid, WorkflowAgentCallResolution, build_approval_registrar,
+    TurnRequest, TurnState, Uuid, WorkflowAttemptResolution, build_approval_registrar,
     build_permission_config, mpsc, record_agent_call_attempt_before_execution,
-    record_effort_snapshot, record_terminal_state_and_release, resolve_model_catalogue_entry,
-    shutdown_sandbox_guard,
+    record_effort_snapshot, record_output_limit_snapshot, record_terminal_state_and_release,
+    resolve_model_catalogue_entry, shutdown_sandbox_guard,
 };
 use swage_agent::OutboundMessage;
 
@@ -39,9 +39,81 @@ pub(crate) fn effort_capability_for_model(
         .unwrap_or(swage_core::EffortCapability::None)
 }
 
+/// The effort control a Codex-protocol model accepts: the catalogue's own
+/// declaration when the entry carries one, otherwise the app-server's account
+/// of the model, otherwise no control at all.
+fn codex_effort_capability(
+    config: &swage_config::ResolvedConfig,
+    model_name: &str,
+) -> swage_core::EffortCapability {
+    config
+        .models
+        .entries
+        .get(&config.models.default)
+        .and_then(|model| model.capabilities.effort.clone())
+        .or_else(|| crate::codex::effort_capability(model_name))
+        .unwrap_or(swage_core::EffortCapability::None)
+}
+
+/// The effort control `config`'s selected model accepts, as the runtime that
+/// would serve a turn on it declares it — the same capability the turn's
+/// launch resolves against, so a check made before a turn starts agrees with
+/// the turn.
+pub(crate) async fn served_effort_capability(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+) -> swage_core::EffortCapability {
+    let declared = config
+        .models
+        .entries
+        .get(&config.models.default)
+        .and_then(|model| model.capabilities.effort.clone());
+    match declared {
+        Some(declared) => declared,
+        None if config.default_provider_protocol() == swage_config::Protocol::Codex => {
+            codex_effort_capability(config, config.default_model_id())
+        }
+        // Only a model the catalogue declares nothing for needs the adapter
+        // that would serve it asked.
+        None => {
+            let provider = crate::startup::selected_model_provider(state, config).await;
+            effort_capability_for_model(config, &config.models.default, provider.as_ref())
+        }
+    }
+}
+
+/// The effort a turn on `config`'s selected model would be served at when it
+/// asks for `requested`.
+pub(crate) async fn served_effort(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    requested: swage_core::Effort,
+) -> swage_core::ResolvedEffort {
+    swage_core::resolve_effort(requested, &served_effort_capability(state, config).await)
+}
+
+/// The output limit a turn's request carries: the caller's own value (a
+/// generation preset's `max_tokens`), else the catalogue entry's declaration,
+/// else the provider adapter's account of the documented limit for the
+/// effective model; `None` where no source declares one, and the adapter
+/// chooses what to send on the wire.
+pub(crate) fn output_limit_for_model(
+    caller: Option<u32>,
+    config: &swage_config::ResolvedConfig,
+    catalogue_entry: &str,
+    provider: &dyn swage_provider::LlmProvider,
+) -> Option<swage_core::ResolvedOutputLimit> {
+    let model = config.models.entries.get(catalogue_entry);
+    swage_core::resolve_output_limit(
+        caller,
+        model.and_then(|model| model.capabilities.output_limit),
+        provider.output_limit(model.map_or(catalogue_entry, |model| &model.model_id)),
+    )
+}
+
 /// The effort a turn asks for: the caller's override, else the session's
 /// recorded effort, else the selected (or default) model's default effort.
-pub(super) fn requested_effort(
+pub(crate) fn requested_effort(
     effort_override: Option<swage_core::Effort>,
     session_metadata: Option<&serde_json::Value>,
     selected_model_id: Option<&str>,
@@ -129,19 +201,12 @@ pub(super) async fn launch_turn_runtime(
     } = launch;
     let handle = if is_codex_turn {
         let effort = requested_effort.map(|requested| {
-            let capability = config
-                .models
-                .entries
-                .get(&config.models.default)
-                .and_then(|model| model.capabilities.effort.clone())
-                .or_else(|| crate::codex::effort_capability(model_name))
-                .unwrap_or(swage_core::EffortCapability::None);
-            swage_core::resolve_effort(requested, &capability)
+            swage_core::resolve_effort(requested, &codex_effort_capability(config, model_name))
         });
         if let Some(resolved) = effort.as_ref() {
             record_effort_snapshot(report_json, resolved);
         }
-        let resolution = WorkflowAgentCallResolution {
+        let resolution = WorkflowAttemptResolution {
             model: Some(model_name.to_owned()),
             effort: effort
                 .as_ref()
@@ -190,6 +255,20 @@ pub(super) async fn launch_turn_runtime(
         tokio::spawn(async move { crate::codex::run_turn(codex_state, codex_request).await })
     } else {
         let provider = crate::startup::selected_model_provider(state, config).await;
+        // The output limit is resolved once, here, against the effective
+        // model: the agent's request carries it as its own `max_tokens`, so
+        // the adapter sends it and the per-round request record shows it,
+        // and the source is written into the turn's audit snapshot.
+        let mut agent_config = agent_config;
+        if let Some(resolved) = output_limit_for_model(
+            agent_config.max_tokens,
+            config,
+            &config.models.default,
+            provider.as_ref(),
+        ) {
+            agent_config.max_tokens = Some(resolved.tokens);
+            record_output_limit_snapshot(report_json, resolved);
+        }
         let mut agent_builder = AgentBuilder::new()
             .config(agent_config)
             .provider(Arc::clone(&provider))
@@ -250,12 +329,12 @@ pub(super) async fn launch_turn_runtime(
             record_effort_snapshot(report_json, resolved);
         }
         // The dispatch record names what the call *asked* for; what the
-        // turn actually resolved is only known here, so it is stamped onto
-        // the same journal entry as a second field rather than by rewriting
-        // the dispatch one. Each turn appends its own attempt, so a call
+        // turn actually resolved is only known here, so it is written over
+        // the attempt the run opened for this turn rather than into the
+        // dispatch record. Each turn resolves its own attempt, so a call
         // replay re-dispatched keeps the interrupted attempt beside the one
         // that follows it.
-        let resolution = WorkflowAgentCallResolution {
+        let resolution = WorkflowAttemptResolution {
             model: Some(model_name.to_owned()),
             effort: effort
                 .as_ref()

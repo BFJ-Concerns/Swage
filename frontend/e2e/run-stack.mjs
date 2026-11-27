@@ -14,8 +14,16 @@ const resultsDir = process.env.SWAGE_E2E_RESULTS_DIR ?? join(invocationDir, "pla
 const gatewayPort = Number(process.env.SWAGE_E2E_GATEWAY_PORT ?? "33100");
 const providerPort = Number(process.env.SWAGE_E2E_PROVIDER_PORT ?? "33101");
 await mkdir(invocationDir, { recursive: true });
+// The gateway reads and writes memory beneath SWAGE_HOME, including
+// general/memory and topics/*/memory. Give both scopes this run's root.
 const swageRoot = join(invocationDir, "state");
 await mkdir(swageRoot, { recursive: true });
+const gatewayEnvironment = { ...process.env, SWAGE_HOME: swageRoot };
+for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"]) {
+  const directory = join(swageRoot, "gateway-environment", key);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  gatewayEnvironment[key] = directory;
+}
 
 await writeFile(join(swageRoot, "config.toml"), `
 [server]
@@ -36,6 +44,10 @@ default = "e2e-model"
 [models.entries.e2e-model]
 provider_id = "e2e"
 model_id = "e2e-model"
+
+[models.entries.preferred-model]
+provider_id = "e2e"
+model_id = "preferred-model"
 
 [sandbox]
 enabled = false
@@ -65,7 +77,7 @@ async function stop(code = 0) {
   if (stopping) return;
   stopping = true;
   for (const child of children) child.kill("SIGTERM");
-  await Promise.all(children.map((child) => child.exitCode !== null
+  await Promise.all(children.map((child) => (child.exitCode !== null || child.signalCode !== null)
     ? Promise.resolve()
     : new Promise((done) => child.once("exit", done))));
   await rm(swageRoot, { recursive: true, force: true });
@@ -88,13 +100,13 @@ start(process.execPath, [join(frontendDir, "e2e/mock-provider.mjs")], {
     SWAGE_E2E_PROVIDER_REQUESTS: join(invocationDir, "provider-requests.jsonl"),
   },
 });
-start(join(repoDir, "target/debug/swage"), [
+const targetDir = resolve(repoDir, process.env.CARGO_TARGET_DIR ?? "target");
+start(join(targetDir, "debug/swage"), [
   "--server-mode", "gateway", "start", "--host", "127.0.0.1", "--port", String(gatewayPort),
 ], {
   cwd: repoDir,
   env: {
-    ...process.env,
-    SWAGE_HOME: swageRoot,
+    ...gatewayEnvironment,
     SWAGE_E2E_PROVIDER_KEY: "test-only",
     SWAGE_MANAGED_SECRET_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   },

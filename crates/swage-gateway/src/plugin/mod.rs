@@ -874,6 +874,7 @@ pub(crate) fn refresh_tool_dispatcher(state: &AppState) {
         &config,
         state.storage.clone(),
         &state.config_root,
+        &state.browser_host,
         state.plugins.tools(),
     );
     state.replace_tool_dispatcher(dispatcher);

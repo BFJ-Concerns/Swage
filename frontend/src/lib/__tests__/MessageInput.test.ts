@@ -4,7 +4,13 @@ import { flushSync, mount, unmount } from "svelte";
 import { createClassComponent } from "svelte/legacy";
 
 import MessageInput from "../components/MessageInput.svelte";
+import { createStreamingStore } from "../stores/streaming";
+import { createConversationStore } from "../stores/conversations";
+import * as conversationsApi from "../api/conversations";
+import type { ConversationDetail } from "../types";
 import type { StreamingStore } from "../stores/streaming";
+
+vi.mock("../api/conversations");
 
 type MountedComponent = ReturnType<typeof mount>;
 
@@ -36,7 +42,8 @@ function makeStreamingStore(isStreaming = false): StreamingStore {
     },
     handleServerEvent: vi.fn(),
     startTurn: vi.fn(),
-    cancelTurn: vi.fn(),
+    cancelTurn: vi.fn(async () => {}),
+    clearConnectionError: () => {},
     reconcileAfterReconnect: vi.fn(),
   };
 }
@@ -80,6 +87,27 @@ describe("MessageInput", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
   }
+
+  it.each(["delegation", "schedule"])("offers Stop for an opened processing %s turn and settles its cancellation", async (origin) => {
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue({
+      id: "external", topic_id: null, created_at: "2026-10-20T00:00:00Z", last_activity: "2026-10-20T00:00:00Z",
+      messages: [{ role: "user", origin, content: "Work in progress", timestamp: "2026-10-20T00:00:00Z", turn_state: "processing" }],
+    } as ConversationDetail);
+    const conversations = createConversationStore();
+    await conversations.selectConversation("external");
+    const stopTurn = vi.fn(async () => {});
+    const store = createStreamingStore({ conversationStore: conversations, connectionStore: { sendMessage: vi.fn() }, stopTurn });
+    component = mount(MessageInput, { target: document.body, props: { store, sessionId: "external" } });
+    flushSync();
+    const stop = document.querySelector<HTMLButtonElement>(".action.stop");
+    expect(stop?.textContent?.trim()).toBe("Stop");
+    flushSync(() => stop!.click());
+    expect(stopTurn).toHaveBeenCalledWith("external");
+    flushSync(() => store.handleServerEvent({ type: "cancelled" }, "external"));
+    expect(conversations.activeConversation?.messages[0].turn_state).toBe("cancelled");
+    expect(document.querySelector(".action.stop")).toBeNull();
+    expect(document.querySelector(".action.send")).not.toBeNull();
+  });
 
   it("trims whitespace before sending", () => {
     const store = mountComponent();
@@ -280,6 +308,35 @@ describe("MessageInput", () => {
     input.$destroy();
   });
 
+  it("follows a changed session default while retaining a manual choice within that session", () => {
+    const store = makeStreamingStore();
+    const input = createClassComponent({
+      component: MessageInput, target: document.body, props: {
+        store, modelOptions: ["global", "topic-a", "topic-b"], selectedModelId: "global",
+        modelCatalogueReady: false, sessionId: null as string | null,
+      },
+    });
+    try {
+      flushSync();
+      input.$set({ selectedModelId: "topic-a" });
+      flushSync();
+      const picker = document.querySelector('[aria-label="Model"]') as HTMLSelectElement;
+      expect(picker.value).toBe("topic-a");
+      flushSync(() => { picker.value = "topic-b"; picker.dispatchEvent(new Event("change", { bubbles: true })); });
+      input.$set({ modelCatalogueReady: true });
+      flushSync();
+      expect(picker.value).toBe("topic-b");
+      input.$set({ selectedModelId: "global", sessionId: "new-session" });
+      flushSync();
+      expect(picker.value).toBe("global");
+      setTextareaValue("New default");
+      flushSync(() => (document.querySelector(".action.send") as HTMLButtonElement).click());
+      expect(store.startTurn).toHaveBeenCalledWith("New default", "global", null, null);
+    } finally {
+      input.$destroy();
+    }
+  });
+
   it("clears the draft and re-focuses the textarea after send", () => {
     mountComponent();
 
@@ -306,5 +363,16 @@ describe("MessageInput", () => {
     });
 
     expect(store.cancelTurn).toHaveBeenCalledOnce();
+  });
+
+  it("says why a refused Stop did not reach the turn and keeps Stop offered", async () => {
+    const streaming = makeStreamingStore(true);
+    vi.mocked(streaming.cancelTurn).mockRejectedValue(new Error("the gateway could not be reached"));
+    mountComponent(streaming);
+
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.stop")!.click());
+    await vi.waitFor(() => expect(document.querySelector('.stop-notice[role="alert"]')?.textContent)
+      .toContain("the gateway could not be reached"));
+    expect(document.querySelector(".action.stop")).not.toBeNull();
   });
 });

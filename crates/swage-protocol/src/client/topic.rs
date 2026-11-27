@@ -41,6 +41,10 @@ pub struct TopicResponse {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub tags: Vec<String>,
+    /// Default model selected by the topic's configuration cascade.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub effective_default_model: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

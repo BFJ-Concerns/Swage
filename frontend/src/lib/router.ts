@@ -14,6 +14,7 @@ export type SettingsTab =
   | "commands"
   | "skills"
   | "generation"
+  | "security"
   | "automation"
   | "plugins"
   | "turn-graph"
@@ -25,7 +26,7 @@ export type SettingsTab =
   | "display"
   | "account";
 
-export type TopicSettingsTab = "overview" | "workspaces" | "sessions" | "surfaces";
+export type TopicSettingsTab = "overview" | "workspaces" | "sessions" | "surfaces" | "security";
 
 export interface Route {
   path: string;
@@ -85,6 +86,7 @@ export interface RouterOptions {
     selectConversation(id: string): Promise<void>;
   };
   onRouteChange?: (route: Route) => void;
+  onNavigationError?: (error: unknown) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +140,7 @@ export function parseRoute(location: string): Route {
     };
   }
   const topicSettingsMatch = pathname.match(
-    /^\/settings\/topic\/([^/]+)(?:\/(overview|workspaces|sessions|surfaces))?$/,
+    /^\/settings\/topic\/([^/]+)(?:\/(overview|workspaces|sessions|surfaces|security))?$/,
   );
   if (topicSettingsMatch) {
     return {
@@ -148,7 +150,7 @@ export function parseRoute(location: string): Route {
     };
   }
   const settingsMatch = pathname.match(
-    /^\/settings(?:\/(providers|agents|commands|skills|generation|automation|plugins|turn-graph|channels|devices|voice|memory|recovery|display|account))?$/,
+    /^\/settings(?:\/(providers|agents|commands|skills|generation|automation|security|plugins|turn-graph|channels|devices|voice|memory|recovery|display|account))?$/,
   );
   if (settingsMatch) {
     const settingsTab = (settingsMatch[1] as SettingsTab | undefined) ?? "providers";
@@ -226,11 +228,32 @@ export function createRouter(options?: RouterOptions): Router {
           // A transient existence-check failure must not evict a working
           // conversation or reject from the asynchronous popstate listener.
           return;
+        } else if (options?.onNavigationError) {
+          options.onNavigationError(error);
+          const fallback = options.conversationStore.activeConversationId;
+          const fallbackPath = fallback ? conversationPath(fallback) : "/";
+          window.history.replaceState(null, "", fallbackPath);
+          updateRoute(parseRoute(fallbackPath));
         } else {
           throw error;
         }
       }
     }
+  }
+
+  // A navigation that loads a conversation can fail after the URL changes.
+  // Restore the active conversation on a transient failure; applyLocation
+  // handles a missing conversation with its own not-found route.
+  function followLocation(generation: number): void {
+    void applyLocation(generation).catch(() => {
+      if (generation !== navigationGeneration) return;
+      const activeConversationId = options?.conversationStore?.activeConversationId;
+      const fallbackPath = activeConversationId
+        ? conversationPath(activeConversationId)
+        : "/";
+      window.history.replaceState(null, "", fallbackPath);
+      updateRoute(parseRoute(fallbackPath));
+    });
   }
 
   return {
@@ -243,10 +266,18 @@ export function createRouter(options?: RouterOptions): Router {
       if (currentLocation() !== path) {
         window.history.pushState(null, "", path);
       }
-      // navigate() is always intentional — no async store call needed here.
-      // The calling code (e.g. selectConversation in conversation list) has
-      // already updated the store; we just sync the URL.
-      updateRoute(parseRoute(path));
+      const route = parseRoute(path);
+      if (
+        options?.conversationStore &&
+        route.conversationId &&
+        route.conversationId !== options.conversationStore.activeConversationId
+      ) {
+        followLocation(navigationGeneration);
+      } else {
+        // Session selectors install their conversation before navigating;
+        // links to other sessions use the same loading path as a deep link.
+        updateRoute(route);
+      }
     },
 
     async init(): Promise<void> {
@@ -255,17 +286,7 @@ export function createRouter(options?: RouterOptions): Router {
         // popstate is synchronous in terms of the URL update; async selection
         // runs in the background and updates currentRoute when it settles.
         const generation = ++navigationGeneration;
-        void applyLocation(generation).catch(() => {
-          if (generation !== navigationGeneration) {
-            return;
-          }
-          const activeConversationId = options?.conversationStore?.activeConversationId;
-          const fallbackPath = activeConversationId
-            ? `/conversations/${activeConversationId}`
-            : "/";
-          window.history.replaceState(null, "", fallbackPath);
-          updateRoute(parseRoute(fallbackPath));
-        });
+        followLocation(generation);
       });
 
       // Apply the initial URL — this kicks off conversation selection if

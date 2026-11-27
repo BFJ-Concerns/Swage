@@ -37,13 +37,49 @@ fn event_value(event: &WorkflowRunEventRecord) -> Value {
     })
 }
 
-async fn run_value(state: &AppState, run: &WorkflowRunRecord) -> Result<Value, String> {
+async fn run_value(
+    state: &AppState,
+    run: &WorkflowRunRecord,
+    detailed: bool,
+) -> Result<Value, String> {
     let pending = state
         .storage
         .list_pending_workflow_run_events(run.id)
         .await
         .map_err(|error| error.to_string())?;
+    let entries = state
+        .storage
+        .list_workflow_journal(run.id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let workers = crate::workflow::journal_with_live_workers(state, run.id, entries)
+        .await?
+        .into_iter()
+        .filter(|entry| entry.agent_call.is_some())
+        .collect::<Vec<_>>();
+    let workers = if detailed {
+        serde_json::to_value(workers)
+    } else {
+        serde_json::to_value(
+            workers
+                .into_iter()
+                .map(|entry| {
+                    let call = entry.agent_call.expect("filtered worker entry");
+                    swage_protocol::client::workflow::WorkflowWorkerActivity {
+                        id: entry.id,
+                        seq: entry.seq,
+                        label: entry.label,
+                        status: entry.status,
+                        agent_definition_id: call.agent_definition_id,
+                        liveness: call.liveness,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+    .map_err(|error| error.to_string())?;
     Ok(json!({
+        "workers": workers,
         "run_id": run.id,
         "script_name": run.script_name,
         "carrying_skill": run.carrying_skill,
@@ -96,9 +132,20 @@ pub async fn status_for_session(
 
     let mut values = Vec::with_capacity(runs.len());
     for run in &runs {
-        values.push(run_value(state, run).await?);
+        values.push(run_value(state, run, run_id.is_some()).await?);
     }
-    Ok(json!({ "runs": values }))
+    let mut ended = state
+        .storage
+        .list_unacknowledged_workflow_runs(session.topic_id, &format!("lead:{session_id}"), 101)
+        .await
+        .map_err(|error| error.to_string())?;
+    let more = ended.len() > 100;
+    ended.truncate(100);
+    let ended_runs = ended
+        .into_iter()
+        .map(crate::workflow::ending_notice)
+        .collect::<Vec<_>>();
+    Ok(json!({ "runs": values, "ended_runs": ended_runs, "more_ended_runs": more }))
 }
 
 pub struct WorkflowRunStatusTool;
@@ -110,26 +157,27 @@ impl Tool for WorkflowRunStatusTool {
     }
 
     fn description(&self) -> &str {
-        "See which workflow runs in this topic are still going and what each is waiting on. \
-         Without a run_id, lists every run that has not ended — running, parked, or \
-         interrupted — with its undelivered events: a pipeline holding for a decision shows \
+        "Read the state of the workflow runs in this session's topic. Without a `run_id` \
+         it lists every run that has not ended, whether running, parked or interrupted, \
+         with its undelivered events: a pipeline holding for a decision shows \
          the hold's content and the verdicts it accepts, and you answer it with \
-         run_event_post. With a run_id, reads that one run in any state. Use this at the \
+         run_event_post. With a `run_id` it reads that one run, whatever its state. Either \
+         way the result also names, in `ended_runs`, the runs that have ended and not yet \
+         been acknowledged; `acknowledge_run_ids` takes the ones that have been dealt with \
+         off that list. Use this at the \
          start of a wake to find the decisions waiting for you, and after acting to confirm \
          a run moved on."
     }
 
     fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "run_id": {
-                    "type": "string",
-                    "description": "Optional. Omit it (or leave it empty) to list every open run in the topic. Give a run's UUID to read that one run in any state.",
-                },
-            },
-            "additionalProperties": false,
-        })
+        let mut schema = swage_protocol::client::workflow::WorkflowRunStatusRequest::json_schema();
+        schema["properties"]["run_id"]["description"] = json!(
+            "The id of one run to read, whatever its state, as `workflow_run` or an earlier listing gave it. Omitted or empty, every run that has not ended is listed."
+        );
+        schema["properties"]["acknowledge_run_ids"]["description"] = json!(
+            "The ids of ended runs that have been dealt with, at most 100 in a call. An acknowledged run is not named in `ended_runs` again."
+        );
+        schema
     }
 
     fn requires_device_execution(&self) -> bool {
@@ -141,11 +189,11 @@ impl Tool for WorkflowRunStatusTool {
             name: WORKFLOW_RUN_STATUS_TOOL.into(),
             message,
         };
+        let request: swage_protocol::client::workflow::WorkflowRunStatusRequest =
+            serde_json::from_value(params).map_err(|error| invalid(error.to_string()))?;
         // Models routinely send an optional field as "" rather than
         // omitting it; an empty or blank run_id means "list the open runs".
-        let run_id = params
-            .get("run_id")
-            .and_then(Value::as_str)
+        let run_id = request.run_id.as_deref()
             .map(str::trim)
             .filter(|raw| !raw.is_empty())
             .map(|raw| {
@@ -166,6 +214,24 @@ impl Tool for WorkflowRunStatusTool {
                 name: WORKFLOW_RUN_STATUS_TOOL.into(),
                 message: format!("{WORKFLOW_RUN_STATUS_TOOL} requires gateway execution"),
             })?;
+        if let Some(ids) = request.acknowledge_run_ids {
+            if ids.len() > 100 {
+                return Err(invalid(
+                    "at most 100 endings can be acknowledged together".into(),
+                ));
+            }
+            let session = state
+                .storage
+                .get_session(session_id)
+                .await
+                .map_err(|error| invalid(error.to_string()))?
+                .ok_or_else(|| invalid("session was not found".into()))?;
+            state
+                .storage
+                .acknowledge_workflow_runs(session.topic_id, &format!("lead:{session_id}"), &ids)
+                .await
+                .map_err(|error| invalid(error.to_string()))?;
+        }
         status_for_session(state, session_id, run_id)
             .await
             .map_err(|message| ToolError::ExecutionFailed {
@@ -186,6 +252,19 @@ mod tests {
         Storage, TopicStore, WorkflowStore,
     };
     use swage_tool::context::MockToolContext;
+
+    #[test]
+    fn each_parameter_of_the_wire_request_is_described_to_the_agent() {
+        let schema = WorkflowRunStatusTool.parameters();
+        for (parameter, spec) in schema["properties"].as_object().expect("properties") {
+            assert!(
+                spec["description"]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty()),
+                "{parameter} is described"
+            );
+        }
+    }
 
     fn context_for(
         state: AppState,
@@ -274,6 +353,29 @@ mod tests {
         assert_eq!(
             runs[0]["pending_events"][0]["payload"]["nonce"],
             "restate-1"
+        );
+
+        assert_eq!(
+            result["ended_runs"][0]["run_id"],
+            json!(ended),
+            "unseen endings accompany the open listing"
+        );
+        let again = WorkflowRunStatusTool
+            .execute(json!({}), &context)
+            .await
+            .expect("unacknowledged read");
+        assert_eq!(
+            again["ended_runs"], result["ended_runs"],
+            "reading alone must not acknowledge an ending"
+        );
+        let acknowledged = WorkflowRunStatusTool
+            .execute(json!({"acknowledge_run_ids": [ended]}), &context)
+            .await
+            .expect("acknowledge");
+        assert_eq!(
+            acknowledged["ended_runs"],
+            json!([]),
+            "durable acknowledgement consumes the notice"
         );
 
         let one = WorkflowRunStatusTool

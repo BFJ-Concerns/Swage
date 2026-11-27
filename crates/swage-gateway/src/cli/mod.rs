@@ -8,6 +8,7 @@
 pub mod completions;
 pub mod device;
 pub mod install;
+pub mod pair;
 pub mod recovery;
 pub mod restart;
 pub mod run;
@@ -29,7 +30,7 @@ use clap::Parser;
 ///
 /// Run prompts and manage the gateway or connected devices.
 #[derive(Debug, Parser)]
-#[command(name = "swage", version, about = "Swage AI assistant platform")]
+#[command(name = "swage", version)]
 pub struct Cli {
     // None causes callers to show help.
     /// The command to run.
@@ -80,6 +81,10 @@ pub enum Command {
 /// Arguments for `swage run`.
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
+    /// One-time code from `swage gateway pair`; remembered for this gateway.
+    #[arg(long)]
+    pub pairing_code: Option<String>,
+
     /// Gateway URL to connect to.
     ///
     /// Defaults to the running gateway's address found via runtime metadata,
@@ -141,6 +146,8 @@ pub enum GatewayCommand {
     Stop(StopArgs),
     /// Check whether the gateway is running.
     Status,
+    /// Issue a one-time code that pairs a device on the network with this gateway.
+    Pair,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,12 +164,6 @@ pub struct StartArgs {
     /// Host address to bind (overrides config).
     #[arg(long)]
     pub host: Option<String>,
-
-    /// Topic whose configuration layer the gateway runs under; the general
-    /// scope when absent. The data root itself comes from SWAGE_HOME, or
-    /// ~/.swage when that is unset.
-    #[arg(long)]
-    pub config: Option<String>,
 
     /// Run in the foreground, leaving output attached to this terminal.
     #[arg(long)]
@@ -183,8 +184,6 @@ pub struct InstallArgs {
     pub port: Option<u16>,
     #[arg(long)]
     pub host: Option<String>,
-    #[arg(long)]
-    pub config: Option<String>,
 }
 
 /// Arguments for `swage gateway stop`.
@@ -206,8 +205,6 @@ pub struct RestartArgs {
     pub port: Option<u16>,
     #[arg(long)]
     pub host: Option<String>,
-    #[arg(long)]
-    pub config: Option<String>,
     #[arg(long)]
     pub foreground: bool,
     /// Write detached gateway output to this file.
@@ -254,7 +251,6 @@ mod tests {
         };
         assert!(args.port.is_none());
         assert!(args.host.is_none());
-        assert!(args.config.is_none());
         assert!(!args.foreground);
         assert!(args.log_file.is_none());
     }
@@ -314,8 +310,6 @@ mod tests {
             "8080",
             "--host",
             "0.0.0.0",
-            "--config",
-            "/tmp/config.toml",
             "--foreground",
             "--log-file",
             "/var/log/swage-gateway.log",
@@ -329,7 +323,6 @@ mod tests {
         };
         assert_eq!(args.port, Some(8080u16));
         assert_eq!(args.host.as_deref(), Some("0.0.0.0"));
-        assert_eq!(args.config.as_deref(), Some("/tmp/config.toml"));
         assert!(args.foreground);
         assert_eq!(args.log_file.as_deref(), Some("/var/log/swage-gateway.log"));
     }
@@ -358,7 +351,6 @@ mod tests {
         };
         assert!(args.port.is_none());
         assert!(args.host.is_none());
-        assert!(args.config.is_none());
     }
 
     #[test]
@@ -434,14 +426,40 @@ mod tests {
                     "help exposes developer commentary {internal_note:?}:\n{help}"
                 );
             }
-            assert!(help.contains("Swage AI assistant platform"));
+            assert_eq!(
+                help.matches("Swage AI assistant platform").count(),
+                1,
+                "{help}"
+            );
+            let commands = help
+                .split_once("Commands:")
+                .expect("command list")
+                .1
+                .split_once("Options:")
+                .expect("options section")
+                .0;
             for user_command in ["run", "gateway", "device", "generate-completion"] {
                 assert!(
-                    help.contains(user_command),
-                    "help omits user command {user_command:?}:\n{help}"
+                    commands
+                        .lines()
+                        .any(|line| line.split_whitespace().next() == Some(user_command)),
+                    "help omits command entry {user_command}: {help}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn long_help_has_one_product_description() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.starts_with("Swage AI assistant platform."), "{help}");
+        assert_eq!(
+            help.matches("Run prompts and manage the gateway or connected devices.")
+                .count(),
+            1,
+            "{help}"
+        );
     }
 
     #[test]

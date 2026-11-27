@@ -131,6 +131,10 @@ impl ToolContext for GatewayToolContext {
         self.base.allowed_paths()
     }
 
+    fn tool_output_directory(&self) -> Option<&std::path::Path> {
+        self.base.tool_output_directory()
+    }
+
     fn user_info(&self) -> Option<&swage_tool::context::UserInfo> {
         self.base.user_info()
     }
@@ -274,7 +278,13 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         let resolved_params = if tool.device_secret_keys().is_empty() {
             params.clone()
         } else {
-            resolve_secret_params(params, tool.device_secret_keys(), &self.secret_manager).await?
+            resolve_secret_params(
+                params,
+                tool.device_secret_keys(),
+                &self.secret_manager,
+                ctx.session_id().parse().ok(),
+            )
+            .await?
         };
         let gateway_ctx =
             GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage))
@@ -291,6 +301,7 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
                 tool_name,
                 &resolved_params,
                 &gateway_ctx,
+                true,
             )
             .await?;
             let state = self
@@ -300,30 +311,47 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
                     name: tool_name.to_string(),
                     message: "device execution needs the live gateway state".to_string(),
                 })?;
+            ctx.mark_execution_started();
+            // Gateway runtime storage is not a path on the paired machine.
+            let mut device_ctx = serialise_tool_context(ctx);
+            device_ctx.tool_output_directory = None;
             return crate::device::execute_on_remote_device(
                 state,
                 device,
                 tool_name,
                 &resolved_params,
-                ctx,
+                &device_ctx,
             )
             .await;
         }
 
         if tool.requires_device_execution() {
-            tool.execute(resolved_params, &gateway_ctx).await
+            ctx.mark_execution_started();
+            tool.execute(resolved_params, &gateway_ctx)
+                .await
+                .map_err(ToolError::execution_uncertain)
         } else {
             // Secret-aware tools run on the host so raw values never enter sandbox IPC.
             if !tool.device_secret_keys().is_empty() {
-                return tool.execute(resolved_params, &gateway_ctx).await;
+                ctx.mark_execution_started();
+                return tool
+                    .execute(resolved_params, &gateway_ctx)
+                    .await
+                    .map_err(ToolError::execution_uncertain);
             }
             match &self.inner {
                 Some(strategy) => {
+                    ctx.mark_execution_started();
                     strategy
                         .execute(tool, tool_name, &resolved_params, &gateway_ctx)
                         .await
                 }
-                None => tool.execute(resolved_params, &gateway_ctx).await,
+                None => {
+                    ctx.mark_execution_started();
+                    tool.execute(resolved_params, &gateway_ctx)
+                        .await
+                        .map_err(ToolError::execution_uncertain)
+                }
             }
         }
     }
@@ -333,6 +361,7 @@ async fn resolve_secret_params(
     params: &Value,
     keys: &[&str],
     secret_manager: &SecretManager,
+    session_id: Option<uuid::Uuid>,
 ) -> Result<Value, ToolError> {
     let mut resolved = params.clone();
     let Some(object) = resolved.as_object_mut() else {
@@ -348,12 +377,13 @@ async fn resolve_secret_params(
         if !reference.starts_with("secret://") {
             continue;
         }
-        let secret = secret_manager.resolve(reference).await.map_err(|error| {
-            ToolError::ExecutionFailed {
+        let secret = secret_manager
+            .resolve_for_session(reference, session_id)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
                 name: "secret_resolution".into(),
                 message: error.to_string(),
-            }
-        })?;
+            })?;
         *value = Value::String(secret.value);
     }
     Ok(resolved)
@@ -536,10 +566,6 @@ mod tests {
                 },
                 "required": ["secret"]
             })
-        }
-
-        fn sensitive_keys(&self) -> &[&str] {
-            &["secret"]
         }
 
         fn device_secret_keys(&self) -> &[&str] {

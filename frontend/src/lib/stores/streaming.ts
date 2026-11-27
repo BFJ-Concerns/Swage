@@ -6,6 +6,7 @@
 import { fromStore, get, writable, type Writable } from "svelte/store";
 
 import type { MessageAttachment } from "../protocol/MessageAttachment";
+import { stopConversationTurn } from "../api/conversations";
 import type { MessageView, ServerEvent, ToolCallView } from "../types";
 
 /**
@@ -48,6 +49,8 @@ export interface ProviderRetryState {
  * outside this projection so callers can select the state for the surface
  * they are rendering. */
 export interface ConversationStreamState {
+  /** Destination of the live reply; null denotes the root thread. */
+  readonly threadId: string | null;
   readonly isStreaming: boolean;
   readonly activeTurnGeneration: number;
   readonly streamedContent: string;
@@ -78,19 +81,24 @@ export interface StreamingStore {
   // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent, conversationId?: string): void;
+  /** Clear an ownership refusal once that conversation connects successfully. */
+  clearConnectionError(conversationId: string): void;
   reconcileAfterReconnect(
     recoveredTurnGeneration: number,
     conversationId?: string | null,
     recoveredMessages?: MessageView[],
   ): void;
   startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
-  cancelTurn(): void;
+  /**
+   * Stop the running turn in the current conversation. Resolves once the
+   * gateway has accepted the stop; rejects with the gateway's reason when it
+   * refused or could not be reached. The turn's ending arrives on its stream.
+   */
+  cancelTurn(): Promise<void>;
 }
 
-// The outcome an interrupted call shows: the result recovery records for a
-// started call (swage-storage `INTERRUPTED_TOOL_RESULT`), so a stopped row
-// reads the same live as it does after a reload.
-const INTERRUPTED_TOOL_RESULT = "tool call did not report a result; its outcome is unknown";
+// Cancellation records the stop decision without asserting completed effects.
+const CANCELLED_TOOL_RESULT = "tool call was cancelled when its turn was stopped";
 
 // ---------------------------------------------------------------------------
 // Injected dependencies
@@ -117,7 +125,7 @@ export interface StreamingStoreOptions {
       timestamp: string;
       turn_state: Extract<
         MessageView["turn_state"],
-        "completed" | "refused" | "incomplete" | "failed" | "interrupted"
+        "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled"
       >;
       thread_id?: string;
       turn_id?: string;
@@ -129,7 +137,7 @@ export interface StreamingStoreOptions {
      */
     settleUnansweredRequest?(
       settlement: {
-        turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted">;
+        turn_state: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled">;
         tool_calls: ToolCallView[];
       },
       conversationId?: string | null,
@@ -147,7 +155,12 @@ export interface StreamingStoreOptions {
     /** The held messages became the next turn's input. */
     clearQueuedMessages?(conversationId: string, queuedIds: string[]): void;
   };
-  /** Sends WebSocket events for outgoing user messages and cancellation. */
+  /**
+   * Stops a conversation's running turn through the gateway's HTTP route,
+   * which reaches the turn whichever client holds its socket.
+   */
+  stopTurn?: (conversationId: string) => Promise<void>;
+  /** Sends WebSocket events for outgoing user messages. */
   connectionStore?: {
     sendMessage(
       conversationId: string,
@@ -157,7 +170,6 @@ export interface StreamingStoreOptions {
       threadId?: string | null,
       clientId?: string,
     ): void;
-    cancelTurn(conversationId: string): void;
     setStreamActive?(conversationId: string, active: boolean): void;
   };
 }
@@ -191,6 +203,7 @@ export function createStreamingStore(
 
   const streams = new Map<string | null, InternalStreamState>();
   const emptyStream: ConversationStreamState = {
+    threadId: null,
     isStreaming: false,
     activeTurnGeneration: 0,
     streamedContent: "",
@@ -202,6 +215,8 @@ export function createStreamingStore(
   };
 
   function createStreamState(): InternalStreamState {
+    const threadIdStore = writable<string | null>(null);
+    const threadIdState = fromStore(threadIdStore);
     const isStreamingStore = writable(false);
     const streamedContentStore = writable("");
     const turnErrorStore = writable<{ code: string; message: string } | null>(null);
@@ -225,7 +240,8 @@ export function createStreamingStore(
       providerRetryState: fromStore(providerRetryStore),
       pendingApprovalState: fromStore(pendingApprovalStore),
       activeTurnGeneration: 0,
-      threadId: null,
+      get threadId() { return threadIdState.current; },
+      set threadId(value: string | null) { threadIdStore.set(value); },
     };
   }
 
@@ -241,14 +257,22 @@ export function createStreamingStore(
     return options?.conversationStore?.activeConversation?.id ?? null;
   }
 
+  function hasProcessingRequest(conversationId: string | null): boolean {
+    const conversation = options?.conversationStore?.activeConversation;
+    if (!conversationId || conversation?.id !== conversationId) return false;
+    const latest = conversation.messages.at(-1);
+    return ["pending", "processing", "delegating", "awaiting_approval"].includes(latest?.turn_state ?? "");
+  }
+
   function currentStreamState(): InternalStreamState | undefined {
     return streams.get(currentConversationId());
   }
 
-  function streamView(stream: InternalStreamState | undefined): ConversationStreamState {
+  function streamView(stream: InternalStreamState | undefined, conversationId: string | null = currentConversationId()): ConversationStreamState {
     if (!stream) return emptyStream;
     return {
-      get isStreaming() { return stream.isStreamingState.current; },
+      get threadId() { return stream.threadId; },
+      get isStreaming() { return stream.isStreamingState.current || hasProcessingRequest(conversationId); },
       get activeTurnGeneration() { return stream.activeTurnGeneration; },
       get streamedContent() { return stream.streamedContentState.current; },
       get turnError() { return stream.turnErrorState.current; },
@@ -271,7 +295,7 @@ export function createStreamingStore(
     content: string,
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "refused" | "incomplete" | "failed" | "interrupted"
+      "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled"
     >,
     turn_id?: string,
     tool_calls?: ToolCallView[],
@@ -293,13 +317,17 @@ export function createStreamingStore(
   function settleResponse(
     conversationId: string | null,
     stream: InternalStreamState,
-    turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted">,
+    turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled">,
     turnId?: string,
     toolCalls?: ToolCallView[],
   ): void {
     const streamedContent = get(stream.streamedContentStore);
     if (streamedContent || (toolCalls?.length ?? 0) > 0) {
       pushAssistantMessage(conversationId, streamedContent, turnState, turnId, toolCalls);
+    } else if (get(stream.activeToolCallsStore).length === 0) {
+      options?.conversationStore?.settleUnansweredRequest?.(
+        { turn_state: turnState, tool_calls: [] }, conversationId,
+      );
     }
     stream.streamedContentStore.set("");
   }
@@ -313,7 +341,7 @@ export function createStreamingStore(
     streamFor(conversationId: string | null): ConversationStreamState {
       // Create the projection when a surface first reads it, so the Svelte
       // derivation subscribes before a later turn starts for that conversation.
-      return streamView(streamStateFor(conversationId));
+      return streamView(streamStateFor(conversationId), conversationId);
     },
     get activeTurnGeneration(): number {
       return currentStreamState()?.activeTurnGeneration ?? 0;
@@ -401,6 +429,7 @@ export function createStreamingStore(
                               ...sub,
                               result: event.result,
                               status: event.status,
+                              execution: event.execution,
                               duration_ms: event.duration_ms,
                               truncated: event.truncated,
                               total_bytes: event.total_bytes ?? null,
@@ -420,6 +449,7 @@ export function createStreamingStore(
                       ...call,
                       result: event.result,
                       status: event.status,
+                              execution: event.execution,
                       duration_ms: event.duration_ms,
                       truncated: event.truncated,
                       total_bytes: event.total_bytes ?? null,
@@ -441,38 +471,56 @@ export function createStreamingStore(
           stream.providerRetryStore.set(null);
           break;
 
-        case "error": {
-          // Turn failed mid-stream. Preserve whatever the user saw so the
-          // conversation history reflects the partial response.
-          const refused = event.code === "provider_refused";
-          settleResponse(
-            ownerId, stream, refused ? "refused" : "failed", undefined,
-            refused ? get(stream.activeToolCallsStore) : undefined,
-          );
-          stream.turnErrorStore.set({ code: event.code, message: event.message });
+        case "error":
+        case "shutdown": {
+          if (event.type === "shutdown" && !get(stream.isStreamingStore)) break;
+          if (
+            event.type === "error" &&
+            (event.code === "request_failed" ||
+              event.code === "invalid_frame" ||
+              // A message that could not be delivered to a turn this tab only
+              // reads (another tab holds its socket) started nothing here.
+              (event.code === "not_connected" && !get(stream.isStreamingStore)))
+          ) {
+            // A request this client sent failed, or a frame could not be
+            // read; any running turn carries on, so only the reason is shown.
+            stream.turnErrorStore.set({ code: event.code, message: event.message });
+            break;
+          }
+
+          const code = event.type === "shutdown" ? "gateway_shutdown" : event.code;
+          const message = event.type === "shutdown" ? event.reason : event.message;
+          // An interruption the gateway names (a shutdown stopping a delegated
+          // child) ends the turn interrupted, like an expired approval.
+          const interrupted =
+            code === "approval_timeout" || code === "gateway_shutdown" || code === "turn_interrupted";
+          const refused = code === "provider_refused";
+          const toolCalls = get(stream.activeToolCallsStore);
+          const settleCalls = interrupted || refused || code === "agent_error";
+          if (interrupted && !get(stream.streamedContentStore) && options?.conversationStore?.settleUnansweredRequest) {
+            options.conversationStore.settleUnansweredRequest(
+              { turn_state: "interrupted", tool_calls: toolCalls }, ownerId,
+            );
+          } else {
+            settleResponse(
+              ownerId, stream, interrupted ? "interrupted" : refused ? "refused" : "failed", undefined,
+              settleCalls ? toolCalls : undefined,
+            );
+          }
+          stream.turnErrorStore.set({ code, message });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
-          // Refused turns own their calls in history; other errors retain
-          // live calls so the UI can show what was in flight.
-          if (refused) stream.activeToolCallsStore.set([]);
+          if (settleCalls) stream.activeToolCallsStore.set([]);
           stream.providerRetryStore.set(null);
           break;
         }
 
         case "output_schema_failed": {
-          settleResponse(ownerId, stream, "failed");
-          const details = event.errors
-            .map((error) =>
-              error.path
-                ? `${error.path}: ${error.message}`
-                : error.message,
-            )
-            .join("; ");
+          settleResponse(ownerId, stream, "failed", event.turn_id, get(stream.activeToolCallsStore));
+          stream.activeToolCallsStore.set([]);
           stream.turnErrorStore.set({
             code: "output_schema_failed",
-            message: details
-              ? `Structured output validation failed after ${event.attempts} attempts: ${details}`
-              : `Structured output validation failed after ${event.attempts} attempts.`,
+            message: event.failure_message,
           });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
@@ -481,26 +529,21 @@ export function createStreamingStore(
         }
 
         case "cancelled": {
-          // User-initiated cancel. A call still running when the turn
-          // stopped has no result — whether it is still pending or the
-          // gateway already ended it as cancelled — so its outcome is
-          // interrupted, as recovery records it. Calls that finished keep
-          // the outcome they reported.
           const settledCalls = get(stream.activeToolCallsStore).map((call) =>
             call.status === null || (call.status === "cancelled" && call.result == null)
-              ? { ...call, status: "interrupted", result: INTERRUPTED_TOOL_RESULT }
+              ? { ...call, status: "cancelled", result: CANCELLED_TOOL_RESULT }
               : call,
           );
           if (get(stream.streamedContentStore)) {
             // Preserve partial content (they may want to read what was
             // generated before they stopped it); the calls stay beside it.
-            settleResponse(ownerId, stream, "interrupted");
+            settleResponse(ownerId, stream, "cancelled");
             stream.activeToolCallsStore.set(settledCalls);
           } else if (options?.conversationStore?.settleUnansweredRequest) {
             // No reply: the turn's account rides on its request, where the
             // conversation shows it after a reload too.
             options.conversationStore.settleUnansweredRequest(
-              { turn_state: "interrupted", tool_calls: settledCalls },
+              { turn_state: "cancelled", tool_calls: settledCalls },
               ownerId,
             );
             stream.activeToolCallsStore.set([]);
@@ -512,17 +555,6 @@ export function createStreamingStore(
           stream.providerRetryStore.set(null);
           break;
         }
-
-        case "shutdown":
-          // The gateway is shutting down. Preserve any partial content and
-          // surface the shutdown as a turn error so the UI can notify the user.
-          // The WebSocket will close shortly after this event arrives.
-          settleResponse(ownerId, stream, "failed");
-          stream.turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
-          setStreamActive(ownerId, stream, false);
-          stream.turnStartedAtStore.set(null);
-          stream.providerRetryStore.set(null);
-          break;
 
         case "provider_retry_started":
           stream.providerRetryStore.set({
@@ -591,6 +623,7 @@ export function createStreamingStore(
           // starting, as far as this view is concerned — no client called
           // startTurn for it.
           options?.conversationStore?.clearQueuedMessages?.(event.session_id, event.queued_ids);
+          stream.threadId = event.thread_id;
           stream.streamedContentStore.set("");
           stream.turnErrorStore.set(null);
           stream.activeToolCallsStore.set([]);
@@ -626,6 +659,13 @@ export function createStreamingStore(
       }
     },
 
+    clearConnectionError(conversationId: string): void {
+      const stream = streams.get(conversationId);
+      if (stream && get(stream.turnErrorStore)?.code === "already_connected") {
+        stream.turnErrorStore.set(null);
+      }
+    },
+
     reconcileAfterReconnect(
       recoveredTurnGeneration: number,
       conversationId = currentConversationId(),
@@ -639,7 +679,7 @@ export function createStreamingStore(
         !get(stream.isStreamingStore) ||
         stream.activeTurnGeneration !== recoveredTurnGeneration ||
         (lastMessage?.role !== "assistant" && lastMessage?.origin !== "platform") ||
-        !["completed", "refused", "failed", "interrupted"].includes(lastMessage?.turn_state ?? "")
+        !["completed", "refused", "failed", "interrupted", "cancelled"].includes(lastMessage?.turn_state ?? "")
       ) return;
 
       // The HTTP refresh recovered the terminal reply or platform account that the
@@ -659,7 +699,7 @@ export function createStreamingStore(
       const conversationId = currentConversationId();
       const stream = streamStateFor(conversationId);
       const clientId = newClientId();
-      if (stream.isStreamingState.current) {
+      if (stream.isStreamingState.current || hasProcessingRequest(conversationId)) {
         // A turn is running: the message is sent and the gateway holds it
         // for the next turn, announcing it as queued. The live stream and
         // the message list are left as they are.
@@ -695,10 +735,10 @@ export function createStreamingStore(
       }
     },
 
-    cancelTurn(): void {
+    async cancelTurn(): Promise<void> {
       const conversationId = currentConversationId();
-      if (conversationId && streams.get(conversationId)?.isStreamingState.current) {
-        options?.connectionStore?.cancelTurn(conversationId);
+      if (conversationId && (streams.get(conversationId)?.isStreamingState.current || hasProcessingRequest(conversationId))) {
+        await (options?.stopTurn ?? stopConversationTurn)(conversationId);
       }
     },
   };
@@ -739,6 +779,7 @@ export function withConversationAutoCreate(
     },
     streamFor(conversationId): ConversationStreamState {
       const stream = base.streamFor?.(conversationId) ?? {
+        threadId: null,
         isStreaming: base.isStreaming,
         activeTurnGeneration: base.activeTurnGeneration,
         streamedContent: base.streamedContent,
@@ -773,6 +814,7 @@ export function withConversationAutoCreate(
       return base.pendingApproval;
     },
     handleServerEvent: (event, conversationId) => base.handleServerEvent(event, conversationId),
+    clearConnectionError: (conversationId) => base.clearConnectionError(conversationId),
     reconcileAfterReconnect: (turnGeneration, conversationId, recoveredMessages) =>
       base.reconcileAfterReconnect(turnGeneration, conversationId, recoveredMessages),
     cancelTurn: () => base.cancelTurn(),
