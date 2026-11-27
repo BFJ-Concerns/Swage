@@ -55,6 +55,7 @@
     // The memory page a notice link names, opened on the memory tab.
     memoryPage?: MemoryPageAddress | null;
     onSettingsSaved?: () => void | Promise<void>;
+    onNavigate?: (path: string) => void;
   }
 
   let {
@@ -63,6 +64,7 @@
     topics = [],
     memoryPage = null,
     onSettingsSaved,
+    onNavigate,
   }: Props = $props();
 
   // settings is the working copy — bind:value mutates it freely. saveSettings
@@ -617,6 +619,7 @@
           </div>
           <AutomationSettingsPanel
             bind:settings
+            {onNavigate}
             {archiveDelayError}
             onValidation={(bundlesInvalid) => {
               hasInvalidBundlesJson = bundlesInvalid;

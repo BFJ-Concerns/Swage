@@ -564,6 +564,17 @@ describe("SettingsPage", () => {
     expect(settingsApi.saveSettings).not.toHaveBeenCalled();
   });
 
+  it("opens Security from the Automation link without leaving the app", async () => {
+    const onNavigate = vi.fn();
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation", onNavigate } });
+    await flushUi();
+    const link = Array.from(document.querySelectorAll("a")).find((a) => a.textContent === "Security settings")!;
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    link.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+    expect(onNavigate).toHaveBeenCalledWith("/settings/security");
+  });
+
   it("edits install security through its own reading and saves picker timeouts and removals", async () => {
     expect(parseRoute("/settings/security").settingsTab).toBe("security");
     const reading: SecuritySettingsResponse = {

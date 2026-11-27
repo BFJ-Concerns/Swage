@@ -1,8 +1,8 @@
 <script lang="ts">
   import { SETTINGS_LABELS } from "../../settings-labels";
   import type { SettingsResponse } from "../../types";
-  interface Props { archiveDelayError?: string | null; settings: SettingsResponse; onValidation?: (bundlesInvalid: boolean) => void; }
-  let { archiveDelayError = null, settings = $bindable(), onValidation }: Props = $props();
+  interface Props { archiveDelayError?: string | null; settings: SettingsResponse; onValidation?: (bundlesInvalid: boolean) => void; onNavigate?: (path: string) => void; }
+  let { archiveDelayError = null, settings = $bindable(), onValidation, onNavigate }: Props = $props();
   const BUNDLES_SHAPE_MESSAGE = "Tool bundles must be a JSON object of string arrays.";
   const id = $props.id();
   let bundlesError = $state<string | null>(null);
@@ -59,7 +59,7 @@
 <div class="field"><div class="key"><label for={`${id}-allow`}>{SETTINGS_LABELS["tool_permissions.allow"]}</label><small>One rule per line. Use * for broad availability.</small></div><div class="val"><textarea class="text" rows="4" id={`${id}-allow`} value={lines(settings.tool_permissions.allow)} oninput={(event)=>{settings.tool_permissions.allow=parseLines(event.currentTarget.value);changed();}}></textarea></div></div>
 <div class="field"><div class="key"><label for={`${id}-deny`}>{SETTINGS_LABELS["tool_permissions.deny"]}</label><small>One denied tool name or pattern per line.</small></div><div class="val"><textarea class="text" rows="4" id={`${id}-deny`} value={lines(settings.tool_permissions.deny)} oninput={(event)=>{settings.tool_permissions.deny=parseLines(event.currentTarget.value);changed();}}></textarea></div></div>
 <div class="field"><div class="key"><label for={`${id}-bundles`}>{SETTINGS_LABELS["tool_permissions.bundles"]}</label><small>JSON object mapping bundle names to tool arrays.</small></div><div class="val val-stack"><textarea class="text code" rows="7" id={`${id}-bundles`} value={invalidBundlesDraft ?? JSON.stringify(settings.tool_permissions.bundles,null,2)} spellcheck="false" aria-label={SETTINGS_LABELS["tool_permissions.bundles"]} aria-invalid={bundlesError ? "true" : undefined} aria-describedby={bundlesError ? "tool-bundles-error" : undefined} oninput={(event)=>updateBundles(event.currentTarget.value)}></textarea>{#if bundlesError}<small id="tool-bundles-error" role="alert">{bundlesError}</small>{/if}</div></div>
-<p>Sandbox and approval-gated tools are configured in <a href="/settings/security">Security settings</a>.</p>
+<p>Sandbox and approval-gated tools are configured in <a href="/settings/security" onclick={(event) => { if (!onNavigate || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); onNavigate("/settings/security"); }}>Security settings</a>.</p>
 
 <style>
   .search-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
