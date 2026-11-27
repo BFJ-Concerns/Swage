@@ -803,6 +803,9 @@ fn ssh_configuration_substitutes(roots: &PolicyRoots) -> Vec<swage_sandbox::Subs
             continue;
         };
         for pattern in ssh_includes(&String::from_utf8_lossy(&content)) {
+            let Some(pattern) = expand_ssh_environment(&pattern) else {
+                continue;
+            };
             let pattern = if let Some(rest) = pattern.strip_prefix("~/") {
                 roots.home.join(rest)
             } else {
@@ -835,24 +838,65 @@ fn ssh_configuration_substitutes(roots: &PolicyRoots) -> Vec<swage_sandbox::Subs
     substitutes
 }
 
-/// The patterns of every `Include` directive in an ssh configuration.
+/// The patterns of every `Include` directive in an ssh configuration, each
+/// a word as ssh splits it: quotes group, a backslash escapes, and an
+/// unquoted `#` starting a word ends the line.
 fn ssh_includes(configuration: &str) -> Vec<String> {
     configuration
         .lines()
-        .filter_map(|line| {
+        .flat_map(|line| {
             let line = line.trim_start();
             let (keyword, rest) = line.split_at(line.find([' ', '\t', '=']).unwrap_or(line.len()));
-            keyword
-                .eq_ignore_ascii_case("include")
-                .then(|| rest.trim_start_matches([' ', '\t', '=']))
-        })
-        .flat_map(|patterns| {
-            patterns
-                .split_whitespace()
-                .map(|pattern| pattern.trim_matches('"').to_owned())
-                .collect::<Vec<_>>()
+            if keyword.eq_ignore_ascii_case("include") {
+                ssh_words(rest.trim_start_matches([' ', '\t', '=']))
+            } else {
+                Vec::new()
+            }
         })
         .collect()
+}
+
+fn ssh_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote: Option<char> = None;
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        match (quote, character) {
+            (None, ' ' | '\t') => words.extend(word.take()),
+            (None, '#') if word.is_none() => break,
+            (None, '"' | '\'') => {
+                quote = Some(character);
+                word.get_or_insert_default();
+            }
+            (Some(open), _) if character == open => quote = None,
+            (Some('\''), _) => word.get_or_insert_default().push(character),
+            (_, '\\') => {
+                if let Some(escaped) = characters.next() {
+                    word.get_or_insert_default().push(escaped);
+                }
+            }
+            _ => word.get_or_insert_default().push(character),
+        }
+    }
+    words.extend(word);
+    words
+}
+
+/// An `Include` pattern with its `${NAME}` references replaced from the
+/// gateway's environment, as ssh replaces them from its own; `None` where a
+/// reference names an unset variable, which ssh refuses.
+fn expand_ssh_environment(pattern: &str) -> Option<String> {
+    let mut expanded = String::new();
+    let mut rest = pattern;
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let end = rest[start..].find('}')? + start;
+        expanded.push_str(&std::env::var(&rest[start + 2..end]).ok()?);
+        rest = &rest[end + 1..];
+    }
+    expanded.push_str(rest);
+    Some(expanded)
 }
 
 /// Write `content` to `path` as a file the user owns that only they may
@@ -2354,10 +2398,17 @@ mod tests {
             std::fs::create_dir_all(directory).unwrap();
         }
         // The system's configuration is root-owned, and includes its
-        // drop-ins: an include the sandbox must show as the user's.
+        // drop-ins: an include the sandbox must show as the user's, here
+        // reached through a link at a quoted path with a space in it.
+        // In the workspace, so the sandbox sees the link itself.
+        let linked = workspace.join("system ssh");
+        std::os::unix::fs::symlink(SYSTEM_SSH_CONFIGURATION, &linked).unwrap();
         std::fs::write(
             dotfiles.join("ssh_config"),
-            format!("Host forge\n  Port 2222\nInclude {SYSTEM_SSH_CONFIGURATION}\n"),
+            format!(
+                "Host forge\n  Port 2222\nInclude \"{}\"\n",
+                linked.display()
+            ),
         )
         .unwrap();
         std::os::unix::fs::symlink(dotfiles.join("ssh_config"), home.join(".ssh/config")).unwrap();
@@ -2438,6 +2489,23 @@ mod tests {
                  Host forge\n  include=\"config.d/a\" ~/b\nIncludeFoo x\n"
             ),
             vec!["/etc/ssh/ssh_config.d/*.conf", "config.d/a", "~/b"]
+        );
+        assert_eq!(
+            ssh_includes("Include \"/opt/my configs/a.conf\" 'b c' d\\ e ${HOME}/f # g\n"),
+            vec!["/opt/my configs/a.conf", "b c", "d e", "${HOME}/f"]
+        );
+    }
+
+    #[test]
+    fn an_ssh_include_reads_environment_references_from_the_environment() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            expand_ssh_environment("${HOME}/.config/ssh").as_deref(),
+            Some(format!("{home}/.config/ssh").as_str())
+        );
+        assert_eq!(
+            expand_ssh_environment("${SWAGE_SURELY_UNSET_VARIABLE}/x"),
+            None
         );
     }
 }
