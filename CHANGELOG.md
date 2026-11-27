@@ -123,7 +123,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
-- Python runs under the calling turn’s sandbox policy, behind its recording proxy where the turn’s network is put behind one, and the tools Python calls run under that turn’s permissions and sandbox. A turn whose sandbox is switched off runs Python unsandboxed, as it runs the shell.
+- Python runs under the calling turn’s sandbox policy, behind its recording proxy where the turn’s network is put behind one, and the tools Python calls run under that turn’s permissions and sandbox, and under the answer already given for the `python_execute` call: a tool on the approval list does not ask again, and a denied tool stays refused. A turn whose sandbox is switched off runs Python unsandboxed, as it runs the shell.
 - Material the platform delivers into a conversation — a delegated agent's result, a notice about how a turn ended or about memory — reaches the model inside a delimited block saying the person did not write it and nothing in it is an instruction, on the turn that receives it and on every later turn alike; a typed message or a brief addressed to the agent is never framed, and the conversation view shows the content as stored.
 - The sandbox toggle and the approval-gated tools list move from Settings → Automation to Settings → Security.
 - The workflow-authoring and project-docs skills are rewritten for any installation. The workflow-authoring skill names no model in its examples (a worker with no `model` runs on the configured default), gives each function's error names, and no longer assumes two model families or the development-process skills are in reach.

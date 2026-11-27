@@ -1002,7 +1002,11 @@ two sandbox-eligible tools.
 built-ins and standard-library imports. It starts in the session's working
 directory under the turn's own sandbox, as `shell` runs: the same files
 writable, the same private paths masked and the same network. The supplied `swage` module
-can call the file, shell and web tools available to the turn.
+can call the file, shell and web tools available to the turn. Those calls run
+under the answer already given for the `python_execute` call — the person's
+approval, or the turn's pass where it asks nothing — so a tool on the approval
+list does not ask again; a tool the turn is denied stays refused, and every
+call keeps the turn's grants and sandbox.
 
 **Browser** — `browser_navigate`, `browser_snapshot`, `browser_click`,
 `browser_type`, `browser_select`, and `browser_scroll`.

@@ -1047,9 +1047,17 @@ pub(crate) async fn build_gateway_dispatcher(
                 message: error.to_string(),
             })?;
     }
+    // A Python program's calls run under the answer already given for the
+    // `python_execute` call that runs it — the person's approval, or the
+    // turn's pass that asked nothing — so they keep the turn's grants and
+    // denials and ask nothing again.
+    let nested_permissions = swage_tool::permission::PermissionConfig {
+        require_approval: Vec::new(),
+        ..permissions
+    };
     let nested_dispatcher = ToolDispatcher::new(
         Arc::new(nested_registry),
-        permissions,
+        nested_permissions,
         Arc::new(RateLimiter::new()),
         RateLimitConfig::default(),
         Arc::new(LeakDetector::default()),

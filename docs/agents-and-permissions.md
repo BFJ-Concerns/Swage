@@ -302,7 +302,9 @@ this setting is false in both configurations.
 A fresh configuration allows all tools (`allow: ["*"]`), denies none, and
 requires approval for four tools: `shell`, `file_edit`, `file_write` and
 `python_execute`. In an attended session each call to one of these pauses
-until you approve or reject it. Browser actions do not require approval by
+until you approve or reject it. A Python program's own calls to these tools
+through the `swage` module run under the answer given for the `python_execute`
+call that runs it and do not ask again. Browser actions do not require approval by
 default. This default is defined in `ToolPermissionConfig::default()` and
 applies unless a config
 file replaces the approval list — a `require_approval` list in a global,
