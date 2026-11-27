@@ -93,7 +93,12 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
     let startup_secret_manager = crate::secret::SecretManager::new(
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>
     );
-    let provider = create_provider(&config, &startup_secret_manager, raw_storage.as_ref()).await;
+    let provider = create_provider(
+        &config,
+        &startup_secret_manager,
+        &(Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>),
+    )
+    .await;
     let voice_provider =
         create_voice_provider(&config, &startup_secret_manager, raw_storage.as_ref()).await;
     let telegram = create_telegram_client(&config, &startup_secret_manager).await;
@@ -1026,7 +1031,7 @@ pub(crate) async fn selected_model_provider(
     {
         return runtime;
     }
-    create_provider(config, &state.secret_manager, state.storage.as_ref()).await
+    create_provider(config, &state.secret_manager, &state.storage).await
 }
 
 fn runtime_serves_selected_route(
@@ -1083,11 +1088,12 @@ pub(crate) fn selected_provider_route(config: &swage_config::ResolvedConfig) -> 
 }
 
 /// Create the LLM provider from resolved configuration. `storage` takes the
-/// audit record of a credential that would travel in plaintext.
+/// audit record of a credential that would travel in plaintext, and of every
+/// completion made through the provider (`completion_record`).
 pub(crate) async fn create_provider(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
-    storage: &dyn swage_storage::store::Storage,
+    storage: &Arc<dyn swage_storage::store::Storage>,
 ) -> Arc<dyn swage_provider::LlmProvider> {
     create_provider_with_retry(
         config,
@@ -1101,7 +1107,7 @@ pub(crate) async fn create_provider(
 async fn create_provider_with_retry(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
-    storage: &dyn swage_storage::store::Storage,
+    storage: &Arc<dyn swage_storage::store::Storage>,
     retry: swage_provider::retry::RetryConfig,
 ) -> Arc<dyn swage_provider::LlmProvider> {
     use swage_provider::ProviderConfig;
@@ -1176,7 +1182,7 @@ async fn create_provider_with_retry(
         };
         providers.push(
             match crate::provider_credential_exposure::judge(
-                storage,
+                storage.as_ref(),
                 &model_endpoint.provider_id,
                 provider_config
                     .plaintext_credential_verdict(provider_endpoint.plaintext_credentials),
@@ -1201,7 +1207,11 @@ async fn create_provider_with_retry(
         ));
     }
 
-    build_provider_chain(providers, retry)
+    Arc::new(crate::completion_record::RecordingProvider::new(
+        build_provider_chain(providers, retry),
+        Arc::clone(storage),
+        secret_manager.clone(),
+    ))
 }
 
 fn ordered_runtime_model_ids(config: &swage_config::ResolvedConfig) -> Vec<String> {
@@ -1836,8 +1846,13 @@ mod tests {
             max_backoff: std::time::Duration::ZERO,
         };
 
-        let provider =
-            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), retry).await;
+        let provider = create_provider_with_retry(
+            &config,
+            &secret_manager,
+            &(std::sync::Arc::clone(&storage) as std::sync::Arc<dyn swage_storage::store::Storage>),
+            retry,
+        )
+        .await;
         let response = provider
             .complete(swage_core::CompletionRequest {
                 effort: None,
@@ -1904,8 +1919,13 @@ mod tests {
                     .build()
                     .unwrap()
                     .block_on(async {
-                        let provider =
-                            create_provider(&config, &secret_manager, storage.as_ref()).await;
+                        let provider = create_provider(
+                            &config,
+                            &secret_manager,
+                            &(std::sync::Arc::clone(&storage)
+                                as std::sync::Arc<dyn swage_storage::store::Storage>),
+                        )
+                        .await;
                         let provider_model = provider.model_id().to_string();
                         let completion_error = provider
                             .complete(swage_core::CompletionRequest {
@@ -1956,7 +1976,12 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(create_provider(&config, &secret_manager, storage.as_ref()));
+                .block_on(create_provider(
+                    &config,
+                    &secret_manager,
+                    &(std::sync::Arc::clone(&storage)
+                        as std::sync::Arc<dyn swage_storage::store::Storage>),
+                ));
         });
 
         let events = captured.lock().unwrap();
@@ -2013,7 +2038,12 @@ mod tests {
             ..Default::default()
         };
         let _subscriber = tracing::subscriber::set_default(Registry::default().with(events));
-        create_provider(&config, &secret_manager, storage.as_ref()).await;
+        create_provider(
+            &config,
+            &secret_manager,
+            &(std::sync::Arc::clone(&storage) as std::sync::Arc<dyn swage_storage::store::Storage>),
+        )
+        .await;
         create_voice_provider(&config, &secret_manager, storage.as_ref()).await;
         let telegram_token = resolve_telegram_token(&telegram, &secret_manager)
             .await
@@ -2205,9 +2235,13 @@ mod tests {
             .insert("local-model".into(), model("local", "local-wire"));
         config.models.default = "local-model".into();
 
-        let provider =
-            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
-                .await;
+        let provider = create_provider_with_retry(
+            &config,
+            &secret_manager,
+            &(std::sync::Arc::clone(&storage) as std::sync::Arc<dyn swage_storage::store::Storage>),
+            no_retry(),
+        )
+        .await;
         let error = provider
             .complete(selected_model_request("lan-wire"))
             .await
@@ -2232,9 +2266,13 @@ mod tests {
             swage_config::PlaintextCredentialPolicy::Refuse,
         );
 
-        let provider =
-            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
-                .await;
+        let provider = create_provider_with_retry(
+            &config,
+            &secret_manager,
+            &(std::sync::Arc::clone(&storage) as std::sync::Arc<dyn swage_storage::store::Storage>),
+            no_retry(),
+        )
+        .await;
         let response = provider
             .complete(selected_model_request("lan-model"))
             .await
@@ -2264,9 +2302,14 @@ mod tests {
         );
 
         for _ in 0..2 {
-            let provider =
-                create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
-                    .await;
+            let provider = create_provider_with_retry(
+                &config,
+                &secret_manager,
+                &(std::sync::Arc::clone(&storage)
+                    as std::sync::Arc<dyn swage_storage::store::Storage>),
+                no_retry(),
+            )
+            .await;
             let error = provider
                 .complete(selected_model_request("lan-model"))
                 .await
@@ -2316,9 +2359,14 @@ mod tests {
             swage_config::PlaintextCredentialPolicy::Warn,
         );
         for _ in 0..2 {
-            let provider =
-                create_provider_with_retry(&warn, &secret_manager, storage.as_ref(), no_retry())
-                    .await;
+            let provider = create_provider_with_retry(
+                &warn,
+                &secret_manager,
+                &(std::sync::Arc::clone(&storage)
+                    as std::sync::Arc<dyn swage_storage::store::Storage>),
+                no_retry(),
+            )
+            .await;
             let response = provider
                 .complete(selected_model_request("lan-model"))
                 .await
@@ -2344,9 +2392,14 @@ mod tests {
             "SWAGE_PLAINTEXT_ALLOW_TEST_KEY",
             swage_config::PlaintextCredentialPolicy::Allow,
         );
-        let provider =
-            create_provider_with_retry(&allow, &secret_manager, allow_storage.as_ref(), no_retry())
-                .await;
+        let provider = create_provider_with_retry(
+            &allow,
+            &secret_manager,
+            &(std::sync::Arc::clone(&allow_storage)
+                as std::sync::Arc<dyn swage_storage::store::Storage>),
+            no_retry(),
+        )
+        .await;
         provider
             .complete(selected_model_request("lan-model"))
             .await
@@ -2472,9 +2525,13 @@ mod tests {
             ..Default::default()
         };
 
-        let provider =
-            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
-                .await;
+        let provider = create_provider_with_retry(
+            &config,
+            &secret_manager,
+            &(std::sync::Arc::clone(&storage) as std::sync::Arc<dyn swage_storage::store::Storage>),
+            no_retry(),
+        )
+        .await;
 
         let completion = provider
             .complete(selected_model_request("gpt-6-luna"))
@@ -2561,9 +2618,13 @@ mod tests {
             ..Default::default()
         };
 
-        let provider =
-            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
-                .await;
+        let provider = create_provider_with_retry(
+            &config,
+            &secret_manager,
+            &(std::sync::Arc::clone(&storage) as std::sync::Arc<dyn swage_storage::store::Storage>),
+            no_retry(),
+        )
+        .await;
         let request = selected_model_request("gpt-6.1-sol");
         let _failed = provider.complete(request.clone()).await;
 
@@ -2954,7 +3015,12 @@ mod tests {
             },
         );
 
-        let provider = create_provider(&config, &secret_manager, storage.as_ref()).await;
+        let provider = create_provider(
+            &config,
+            &secret_manager,
+            &(std::sync::Arc::clone(&storage) as std::sync::Arc<dyn swage_storage::store::Storage>),
+        )
+        .await;
         let result = provider
             .complete(swage_core::CompletionRequest {
                 effort: None,

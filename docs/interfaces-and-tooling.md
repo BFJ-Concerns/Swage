@@ -81,7 +81,13 @@ is no direct page-editing interface — every change runs through the curator.
 
 The operator history pane shows a timeline of configuration changes,
 variant selections, and assembly decisions, all read from the gateway's
-local audit trail.
+local audit trail, above the audit record itself: every event the trail
+holds, filterable by session, entity and event kind. Among them is each
+tool call that ran (`tool_call`), with its arguments and result, and each
+completion the gateway asked a model provider for (`completion`), with the
+model, why it stopped — a response cut off at its length limit included —
+the tokens used and what it returned. Both name the session they ran in, and
+an entry that returned something shows it as text under "What it returned".
 
 Each configuration change entry names the changed fields with their prior
 and new values. Nested settings appear by their path — for example,

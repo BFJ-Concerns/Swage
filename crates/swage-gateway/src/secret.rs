@@ -659,7 +659,12 @@ impl SecretManager {
         self.storage
             .create_audit_event(NewAuditEvent {
                 session_id,
-                ..secret_event(SecretAuditSubject::from(record), event_kind, summary, metadata)
+                ..secret_event(
+                    SecretAuditSubject::from(record),
+                    event_kind,
+                    summary,
+                    metadata,
+                )
             })
             .await
             .map_err(GatewayError::Storage)?;
