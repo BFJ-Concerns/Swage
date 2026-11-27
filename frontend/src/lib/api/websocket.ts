@@ -5,11 +5,10 @@
 // reconnection with exponential backoff.
 
 import {
-  KNOWN_SERVER_EVENT_TYPES,
+  isKnownServerEventType,
   type ClientEvent,
   type ConnectionStatus,
   type KnownServerEvent,
-  type KnownServerEventType,
   type ServerEvent,
 } from "../types";
 
@@ -36,10 +35,6 @@ export interface WebSocketClientOptions {
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function isKnownServerEventType(type: string): type is KnownServerEventType {
-  return (KNOWN_SERVER_EVENT_TYPES as readonly string[]).includes(type);
 }
 
 function parseServerEventFrame(raw: unknown): ServerEvent {
