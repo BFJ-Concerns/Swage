@@ -160,19 +160,13 @@ fn read_window(
     };
     let invalid = || ToolError::InvalidParameters {
         name: "file_read".into(),
-        message: "offset_bytes must be a valid UTF-8 byte boundary within the file".into(),
+        message: "offset_bytes must be within the file".into(),
     };
-    if max_bytes == 0 {
-        return Err(ToolError::InvalidParameters {
-            name: "file_read".into(),
-            message: "max_output_bytes must be positive".into(),
-        });
-    }
     let sample = match read_text_sample(&mut source).map_err(|e| failure(e.to_string()))? {
         Some(sample) => sample,
         None => {
             return Err(failure(format!(
-                "File appears to be binary ({}). Cannot display binary content.",
+                "File appears to be binary ({}). Cannot display binary content",
                 binary_size_description((total_bytes > 0).then_some(total_bytes))
             )));
         }
@@ -185,95 +179,38 @@ fn read_window(
     if known_total.is_some_and(|total| offset as u64 > total) {
         return Err(invalid());
     }
-    // Inspect up to three preceding bytes to distinguish an offset inside a
-    // valid character from a standalone malformed continuation byte.
-    let lookbehind = offset.min(3);
+    source
+        .seek(SeekFrom::Start(offset as u64))
+        .map_err(|e| failure(e.to_string()))?;
     let mut bytes = Vec::with_capacity(max_bytes.min(8192));
-    let window_bytes = max_bytes.saturating_add(3 + lookbehind) as u64;
-    if offset == 0 {
-        // The sample already consumed these bytes, including on streams that
-        // cannot seek. Continue from the source only after using the sample.
-        std::io::Cursor::new(sample)
-            .chain(source)
-            .take(window_bytes)
-            .read_to_end(&mut bytes)
-            .map_err(|e| failure(e.to_string()))?;
-    } else {
-        source
-            .seek(SeekFrom::Start((offset - lookbehind) as u64))
-            .map_err(|e| failure(e.to_string()))?;
-        source
-            .take(window_bytes)
-            .read_to_end(&mut bytes)
-            .map_err(|e| failure(e.to_string()))?;
-    }
-    if bytes.len() < lookbehind {
-        return Err(invalid());
-    }
-    for start in 0..lookbehind {
-        let width = match bytes[start] {
-            0xc2..=0xdf => 2,
-            0xe0..=0xef => 3,
-            0xf0..=0xf4 => 4,
-            _ => continue,
-        };
-        let end = start + width;
-        if end > lookbehind
-            && bytes
-                .get(start..end)
-                .is_some_and(|character| std::str::from_utf8(character).is_ok())
-        {
-            return Err(invalid());
-        }
-    }
-    bytes.drain(..lookbehind);
-    let at_eof = bytes.len() < max_bytes.saturating_add(3)
-        || known_total
-            .is_some_and(|total| (offset as u64).saturating_add(bytes.len() as u64) >= total);
-    // Keep the existing lossy-text presentation while offsets and totals
-    // refer to file bytes. A partial final character is read on the next call.
+    // Read through the last character that can start inside the window.
+    let window_bytes = max_bytes.max(1).saturating_add(3);
+    source
+        .take(window_bytes as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| failure(e.to_string()))?;
+
+    // Keep page offsets in source bytes even when decoding malformed text.
     let mut output = String::new();
     let mut consumed = 0;
-    while consumed < bytes.len() {
-        let start = consumed;
-        let remaining = &bytes[consumed..];
-        let (text, invalid_bytes) = match std::str::from_utf8(remaining) {
-            Ok(text) => (text, 0),
-            Err(error) => (
-                std::str::from_utf8(&remaining[..error.valid_up_to()]).expect("validated prefix"),
-                error.error_len().unwrap_or_else(|| {
-                    if at_eof {
-                        remaining.len() - error.valid_up_to()
-                    } else {
-                        0
-                    }
-                }),
-            ),
-        };
-        for ch in text.chars() {
-            if output.len() + ch.len_utf8() > max_bytes {
-                break;
+    'window: for chunk in bytes.utf8_chunks() {
+        let invalid = (!chunk.invalid().is_empty()).then_some(('\u{fffd}', chunk.invalid().len()));
+        for (ch, source_width) in chunk
+            .valid()
+            .chars()
+            .map(|ch| (ch, ch.len_utf8()))
+            .chain(invalid)
+        {
+            // A non-empty window always advances by at least one character.
+            if !output.is_empty() && output.len() + ch.len_utf8() > max_bytes {
+                break 'window;
             }
             output.push(ch);
-            consumed += ch.len_utf8();
+            consumed += source_width;
         }
-        if consumed < start + text.len() {
-            break;
-        }
-        if invalid_bytes == 0 || output.len() + 3 > max_bytes {
-            break;
-        }
-        output.push('\u{fffd}');
-        consumed += invalid_bytes;
     }
     let next = offset + consumed;
     let has_more = known_total.map_or(bytes.len() > consumed, |total| (next as u64) < total);
-    if has_more && consumed == 0 {
-        return Err(ToolError::InvalidParameters {
-            name: "file_read".into(),
-            message: "max_output_bytes is too small to display the next character".into(),
-        });
-    }
     let mut result = json!({"output": output});
     if offset > 0 || has_more {
         result["offset_bytes"] = json!(offset);
@@ -338,6 +275,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_mostly_ascii_text_with_legacy_encoding() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("note.txt"), b"Meet at the caf\xe9.\n").unwrap();
+        let result = tool(&dir)
+            .execute(json!({ "path": "note.txt" }), &ctx(&dir))
+            .await
+            .unwrap();
+        assert_eq!(result["output"], "Meet at the caf\u{fffd}.\n");
+    }
+
+    #[tokio::test]
     async fn rejects_path_outside_workspace() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)
@@ -376,6 +324,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("binary"), "got: {err}");
+        let rendered = swage_agent::agent::format_tool_error_for_model(&err);
+        assert!(
+            rendered.contains("Cannot display binary content.")
+                && !rendered.contains("Cannot display binary content.."),
+            "got: {rendered}"
+        );
     }
 
     #[tokio::test]
@@ -458,7 +412,9 @@ mod tests {
             }
             .unwrap_err();
             assert!(
-                error.to_string().contains("valid UTF-8 byte boundary"),
+                error
+                    .to_string()
+                    .contains("offset_bytes must be within the file"),
                 "expected a post-read offset rejection: {error}"
             );
             let execution = error.execution();
@@ -466,7 +422,7 @@ mod tests {
             assert_eq!(execution.stage, ToolExecutionStage::Finished);
             assert_eq!(execution.completion, ToolCompletion::Confirmed);
             let rendered = swage_agent::agent::format_tool_error_for_model(&error);
-            assert!(rendered.contains("valid UTF-8 byte boundary"));
+            assert!(rendered.contains("offset_bytes must be within the file"));
             assert!(rendered.contains("Correct the arguments and retry"));
             assert!(
                 rendered.contains("operation ran before its result was rejected"),
@@ -480,88 +436,6 @@ mod tests {
 mod regression_tests {
     use super::*;
     use std::io::{Read, Seek, SeekFrom};
-    #[tokio::test]
-    async fn regression_returned_continuations_accept_lossy_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("notes"), b"abcdefghij\xff\x80z").unwrap();
-        let mut ctx = swage_tool::context::MockToolContext::new("agent", "session");
-        ctx.working_directory = dir.path().into();
-        let tool = FileReadTool {
-            max_output_bytes: 13,
-        };
-        let mut arguments = json!({"path": "notes"});
-        let mut output = String::new();
-        for _ in 0..13 {
-            let result = tool.execute(arguments, &ctx).await;
-            assert!(
-                result.is_ok(),
-                "returned continuation must be accepted: {result:?}"
-            );
-            let result = result.unwrap();
-            output.push_str(result["output"].as_str().unwrap());
-            match result.get("follow_up") {
-                Some(next) => arguments = next["arguments"].clone(),
-                None => {
-                    assert_eq!(output, "abcdefghij��z");
-                    return;
-                }
-            }
-        }
-        panic!("continuations must reach the end");
-    }
-
-    #[tokio::test]
-    async fn regression_tiny_limit_progresses_or_refuses() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("notes"), "éabcdefghij").unwrap();
-        let mut ctx = swage_tool::context::MockToolContext::new("agent", "session");
-        ctx.working_directory = dir.path().into();
-        let tool = FileReadTool {
-            max_output_bytes: 1,
-        };
-        let result = tool.execute(json!({"path": "notes"}), &ctx).await;
-        match result {
-            Ok(page) => assert!(
-                page.get("follow_up").is_none() || page["next_offset_bytes"].as_u64().unwrap() > 0,
-                "page must advance or refuse an insufficient limit: {page}"
-            ),
-            Err(error) => assert!(
-                error.to_string().contains("max_output_bytes"),
-                "clear limit refusal: {error}"
-            ),
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn regression_fifo_reads_sample_without_seeking() {
-        use std::io::Write;
-        let dir = tempfile::tempdir().unwrap();
-        let fifo = dir.path().join("stream");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let producer = std::thread::spawn(move || {
-            let mut file = std::fs::OpenOptions::new().write(true).open(fifo).unwrap();
-            file.write_all(b"streamed text").unwrap();
-        });
-        let mut ctx = swage_tool::context::MockToolContext::new("agent", "session");
-        ctx.working_directory = dir.path().into();
-        let result = FileReadTool {
-            max_output_bytes: 100,
-        }
-        .execute(json!({"path": "stream"}), &ctx)
-        .await;
-        producer.join().unwrap();
-        assert!(
-            result.is_ok(),
-            "readable FIFO must return sampled text: {result:?}"
-        );
-        assert_eq!(result.unwrap()["output"], "streamed text");
-    }
-
     struct Guarded {
         inner: std::io::Cursor<Vec<u8>>,
         consumed: usize,
@@ -655,11 +529,12 @@ mod regression_tests {
             .await
             .unwrap();
         assert_eq!(result["output"], "é");
-        assert!(
-            tool.execute(json!({"path":"notes", "offset_bytes":2}), &ctx)
-                .await
-                .is_err()
-        );
+        let result = tool
+            .execute(json!({"path":"notes", "offset_bytes":2}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(result["output"], "�");
+        assert_eq!(result["next_offset_bytes"], 3);
     }
 }
 

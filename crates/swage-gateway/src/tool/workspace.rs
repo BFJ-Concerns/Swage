@@ -12,7 +12,7 @@ use swage_tool::context::ToolContext;
 
 const TOOL_OUTPUT_ROOT: &str = ".swage/tool-output";
 
-/// How many leading bytes of a file decide whether it is text or binary.
+/// The text classification sample size, before completing a split character.
 const BINARY_SAMPLE_BYTES: usize = 8192;
 
 // ---------------------------------------------------------------------------
@@ -540,40 +540,38 @@ pub fn binary_size_description(len: Option<u64>) -> String {
 }
 
 /// Reads the classification sample from the start of `source`, returning it
-/// when the content is text and `None` when it is binary. Nothing past the
-/// sample is read, so the caller decides whether the rest is worth reading.
+/// for text and `None` for binary content. A NUL in the sample marks binary
+/// content. Valid UTF-8 is text. For malformed UTF-8, the rounded-down
+/// percentage of non-ASCII bytes must be 30 or less for the sample to be text.
 pub fn read_text_sample(source: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     let mut sample = Vec::with_capacity(BINARY_SAMPLE_BYTES);
     source
         .by_ref()
         .take(BINARY_SAMPLE_BYTES as u64)
         .read_to_end(&mut sample)?;
-    Ok((!is_binary_content(&sample)).then_some(sample))
-}
-
-/// Heuristic check: returns `true` if `bytes` appears to be binary content.
-///
-/// Scans the first 8 KiB for null bytes (reliable binary indicator) and
-/// checks the ratio of non-UTF-8 bytes. Plain text files may contain a few
-/// high bytes, but binary files tend to have many.
-fn is_binary_content(bytes: &[u8]) -> bool {
-    // Only inspect the first 8 KiB — enough to classify most files quickly.
-    let sample = &bytes[..bytes.len().min(BINARY_SAMPLE_BYTES)];
-
-    if sample.is_empty() {
-        return false;
+    if sample.contains(&0) {
+        return Ok(None);
+    }
+    let sample_len = sample.len();
+    let error = match std::str::from_utf8(&sample) {
+        Ok(_) => return Ok(Some(sample)),
+        Err(error) => error,
+    };
+    if error.error_len().is_none() && sample_len == BINARY_SAMPLE_BYTES {
+        // The sample ends inside a character. Read just enough to finish it.
+        let incomplete = &sample[error.valid_up_to()..];
+        let remaining = incomplete[0].leading_ones() as usize - incomplete.len();
+        source.take(remaining as u64).read_to_end(&mut sample)?;
+        if std::str::from_utf8(&sample[error.valid_up_to()..]).is_ok() {
+            return Ok(Some(sample));
+        }
     }
 
-    // Null byte is a reliable indicator of binary content.
-    if sample.contains(&0u8) {
-        return true;
-    }
-
-    // High ratio of non-UTF-8 bytes also suggests binary.
-    let non_utf8 = sample.iter().filter(|&&b| b >= 0x80).count();
-
-    // Threshold: more than 30% non-ASCII bytes → binary.
-    non_utf8 * 100 / sample.len() > 30
+    let non_ascii = sample[..sample_len]
+        .iter()
+        .filter(|b| !b.is_ascii())
+        .count();
+    Ok((non_ascii * 100 / sample_len <= 30).then_some(sample))
 }
 
 /// Truncates `content` to at most `max_bytes` bytes at a valid UTF-8 boundary.
@@ -833,15 +831,14 @@ fn approval_root_for_request(
             .ok()?
             .join(requested)
     };
-    let normalised = normalise_path(&raw);
+    let resolved = resolve_existing_prefix(&normalise_path(&raw), requested).ok()?;
     // Missing parents are part of the requested location, not a reason to
     // grant access to a broader existing ancestor.
-    let root = if normalised.is_dir() || (directory_target && !normalised.exists()) {
-        normalised.as_path()
+    if resolved.is_dir() || (directory_target && !resolved.exists()) {
+        Some(resolved)
     } else {
-        normalised.parent()?
-    };
-    resolve_existing_prefix(root, requested).ok()
+        resolved.parent().map(Path::to_path_buf)
+    }
 }
 
 /// Follows every symlink before appending missing path components, including
@@ -1074,6 +1071,34 @@ mod tests {
         symlinked_working_directory_sibling_grant(true);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn file_symlink_approval_grants_the_targets_parent() {
+        use swage_tool::context::MockToolContext;
+
+        let files = tmp_workspace();
+        let project = files.path().join("project");
+        let sibling = files.path().join("project-Annexe");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        let target = sibling.join("plan");
+        std::fs::write(&target, "sibling plan").unwrap();
+        std::os::unix::fs::symlink(&target, project.join("plan")).unwrap();
+
+        let mut ctx = MockToolContext::new("agent", "session");
+        ctx.working_directory = project;
+        assert!(resolve_context_path(&ctx, "plan").is_err());
+
+        let ToolError::RequiresLocationApproval { path, .. } =
+            location_approval_error("file_read", &ctx, "plan", "read", false)
+        else {
+            panic!("location approval expected");
+        };
+        assert_eq!(Path::new(&path), sibling);
+        ctx.allowed_paths.push(path.into());
+        assert_eq!(resolve_context_path(&ctx, "plan").unwrap().path, target);
+    }
+
     // --- validate_path ---
 
     #[test]
@@ -1157,28 +1182,79 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // --- is_binary_content ---
+    #[tokio::test(flavor = "multi_thread")]
+    async fn file_tools_read_search_and_edit_unicode_notes() {
+        use crate::tool::{
+            Tool, file_edit::FileEditTool, file_read::FileReadTool, file_search::FileSearchTool,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = writable_test_context(dir.path(), vec![]);
+        let notes = dir.path().join("notes");
+        let prefix = "न".repeat(BINARY_SAMPLE_BYTES / "न".len() + 1);
+        let text = format!("{prefix}\nनमस्ते दुनिया\n");
+        std::fs::write(&notes, &text).unwrap();
+
+        let read = FileReadTool {
+            max_output_bytes: 16_384,
+        }
+        .execute(json!({"path": "notes"}), &ctx)
+        .await
+        .unwrap();
+        assert_eq!(read["output"], text);
+
+        let search = FileSearchTool {
+            max_output_bytes: 1024,
+        }
+        .execute(json!({"pattern": "दुनिया"}), &ctx)
+        .await
+        .unwrap();
+        assert!(search["output"].as_str().unwrap().contains("नमस्ते दुनिया"));
+
+        FileEditTool
+            .execute(
+                json!({"changes": [{"path": "notes", "edits": [
+                    {"type": "replace", "old_text": "दुनिया", "new_text": "दोस्त"}
+                ]}]}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(notes).unwrap(),
+            format!("{prefix}\nनमस्ते दोस्त\n")
+        );
+    }
+
+    // --- text classification ---
 
     #[test]
-    fn is_binary_detects_null_byte() {
-        assert!(is_binary_content(b"hello\x00world"));
+    fn text_sample_refuses_nul() {
+        assert!(
+            read_text_sample(&mut &b"hello\x00world"[..])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
-    fn is_binary_accepts_utf8_text() {
-        assert!(!is_binary_content(b"Hello, world!\nAnother line.\n"));
+    fn text_sample_accepts_ascii() {
+        let text = b"Hello, world!\nAnother line.\n";
+        assert_eq!(
+            read_text_sample(&mut text.as_slice()).unwrap().as_deref(),
+            Some(text.as_slice())
+        );
     }
 
     #[test]
-    fn is_binary_accepts_empty() {
-        assert!(!is_binary_content(b""));
+    fn text_sample_accepts_empty_input() {
+        assert_eq!(read_text_sample(&mut &b""[..]).unwrap(), Some(Vec::new()));
     }
 
     #[test]
-    fn is_binary_detects_high_non_utf8_ratio() {
-        // A byte sequence that is not valid UTF-8 in bulk
-        let bytes: Vec<u8> = (128u8..255u8).collect();
-        assert!(is_binary_content(&bytes));
+    fn text_sample_refuses_mostly_non_ascii_malformed_bytes() {
+        let binary = b"\xff\xfe\xfd\xfc";
+        assert!(read_text_sample(&mut binary.as_slice()).unwrap().is_none());
     }
 
     // --- truncate_output ---

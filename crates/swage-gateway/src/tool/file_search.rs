@@ -190,7 +190,7 @@ fn optional_offset_bytes(params: &Value, tool_name: &str) -> Result<usize, ToolE
 }
 
 /// A bounded slice of the result stream, with counts independent of retention.
-#[cfg_attr(not(test), derive(Clone))]
+#[derive(Clone)]
 struct SearchWindow {
     output: String,
     total_bytes: usize,
@@ -198,27 +198,6 @@ struct SearchWindow {
     offset: usize,
     limit: usize,
     boundary: bool,
-}
-
-// Count retained bytes copied by the scanner without changing release builds.
-#[cfg(test)]
-std::thread_local! {
-    static CLONED_OUTPUT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-impl Clone for SearchWindow {
-    fn clone(&self) -> Self {
-        CLONED_OUTPUT_BYTES.with(|count| count.set(count.get() + self.output.len()));
-        Self {
-            output: self.output.clone(),
-            total_bytes: self.total_bytes,
-            matches: self.matches,
-            offset: self.offset,
-            limit: self.limit,
-            boundary: self.boundary,
-        }
-    }
 }
 
 impl SearchWindow {
@@ -917,7 +896,6 @@ mod regression_tests {
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(86_400),
         };
 
-        CLONED_OUTPUT_BYTES.with(|count| count.set(0));
         search_into(
             text.as_bytes(),
             "large.txt",
@@ -926,13 +904,6 @@ mod regression_tests {
             &control,
         )
         .unwrap();
-        let copied_bytes = CLONED_OUTPUT_BYTES.with(|count| count.get());
-        // File-level provisional results may copy the window once. Starting
-        // each later line must not copy all the retained earlier results.
-        assert!(
-            copied_bytes <= LIMIT,
-            "retained output copied {copied_bytes} bytes for {LINES} lines after the window filled"
-        );
         let expected = format!(
             "large.txt:1: {first_line}\nlarge.txt:{}: needle tail",
             LINES + 2

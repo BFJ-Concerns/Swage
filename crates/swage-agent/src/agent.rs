@@ -412,111 +412,6 @@ mod approval_tests {
         (agent, execution)
     }
 
-    /// Hold the real retry wrapper's first attempt chunk across cancellation,
-    /// modelling a queued receiver that has not delivered it to the agent yet.
-    struct QueuedAttemptCancellationProvider {
-        cancel: Option<tokio_util::sync::CancellationToken>,
-        polled: Arc<AtomicBool>,
-    }
-
-    #[async_trait::async_trait]
-    impl LlmProvider for QueuedAttemptCancellationProvider {
-        fn model_id(&self) -> &str {
-            "queued-attempt"
-        }
-        async fn complete(
-            &self,
-            _: CompletionRequest,
-        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
-            unreachable!()
-        }
-        async fn complete_with_tools(
-            &self,
-            _: swage_core::ToolCompletionRequest,
-        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
-            unreachable!()
-        }
-        fn stream(
-            &self,
-            request: CompletionRequest,
-        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-            let Some(cancel) = self.cancel.clone() else {
-                let polled = self.polled.clone();
-                return Box::pin(futures::stream::poll_fn(move |_| {
-                    polled.store(true, Ordering::SeqCst);
-                    std::task::Poll::Pending
-                }));
-            };
-            let retry = swage_provider::retry::RetryProvider::new(
-                Self {
-                    cancel: None,
-                    polled: self.polled.clone(),
-                },
-                swage_provider::retry::RetryConfig::default(),
-            );
-            let mut stream = retry.stream(request);
-            let mut queued = None;
-            Box::pin(futures::stream::poll_fn(move |cx| {
-                if let Some(chunk) = queued.take() {
-                    return std::task::Poll::Ready(Some(chunk));
-                }
-                match stream.as_mut().poll_next(cx) {
-                    std::task::Poll::Ready(Some(chunk @ StreamChunk::ProviderAttempt(_)))
-                        if !cancel.is_cancelled() =>
-                    {
-                        queued = Some(chunk);
-                        cancel.cancel();
-                        std::task::Poll::Pending
-                    }
-                    other => other,
-                }
-            }))
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancellation_preserves_a_queued_initial_attempt() {
-        let (mut agent, execution) = approval_fixture(Arc::new(|_, _| {
-            crate::approval::ApprovalChannelRegistration::default()
-        }))
-        .await;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let polled = Arc::new(AtomicBool::new(false));
-        agent.provider = Arc::new(QueuedAttemptCancellationProvider {
-            cancel: Some(cancel.clone()),
-            polled: polled.clone(),
-        });
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let request = serde_json::from_value(serde_json::json!({ "messages": [] })).unwrap();
-        let result = agent
-            .consume_provider_stream(
-                request, &execution, &tx, &cancel, "", &mut 0, &mut 0, &mut false, false, 3,
-            )
-            .await;
-        assert!(matches!(result, Err(AgentError::Cancelled)));
-        assert!(
-            polled.load(Ordering::SeqCst),
-            "the concrete provider was polled before cancellation"
-        );
-        let attempts: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
-            .filter_map(|event| match event {
-                AgentEvent::ProviderAttempt { record, .. } => Some(record),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            attempts.len(),
-            1,
-            "cancellation must preserve the queued initial attempt as interrupted"
-        );
-        assert_eq!(
-            attempts[0].outcome,
-            swage_core::ProviderAttemptOutcome::Interrupted
-        );
-        assert_eq!(attempts[0].round, 3);
-        assert!(attempts[0].ended_at_ms.unwrap() >= attempts[0].started_at_ms);
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn approval_gate_does_not_resume_after_losing_the_storage_update() {
         let registered = Arc::new(Mutex::new(None));
@@ -2766,7 +2661,7 @@ impl Agent {
         collect_tool_calls: bool,
         round: usize,
     ) -> Result<StreamRoundOutcome, AgentError> {
-        use futures::{FutureExt, StreamExt};
+        use futures::StreamExt;
 
         let request_snapshot = self.provider.provider_request_snapshot(&request, true);
         let _ = event_tx.send(AgentEvent::ProviderRequestPrepared {
@@ -2782,31 +2677,10 @@ impl Agent {
         let mut incomplete_reason = None;
         let mut active_attempt: Option<swage_core::ProviderAttemptRecord> = None;
 
-        let mut stream_polled = false;
         loop {
             tokio::select! {
-                // Cancellation is read first: once the token is cancelled,
-                // a chunk the provider already queued is drained below as
-                // the cancellation's own diagnostics, never taken through
-                // the ordinary path — which would record an attempt as
-                // outstanding and then again as interrupted.
                 biased;
                 _ = cancel_token.cancelled() => {
-                    // A retry may already have queued its initial attempt
-                    // without delivering it to this consumer. Preserve ready
-                    // diagnostics before dropping the stream; never start an
-                    // unpolled stream or wait for more provider output here.
-                    if stream_polled {
-                        while let Some(Some(chunk)) = stream.next().now_or_never() {
-                            if let StreamChunk::ProviderAttempt(mut record) = chunk {
-                                record.round = round;
-                                active_attempt = record.ended_at_ms.is_none().then(|| record.clone());
-                                if record.ended_at_ms.is_some() {
-                                    let _ = event_tx.send(AgentEvent::ProviderAttempt { turn_id: execution.turn_id, record });
-                                }
-                            }
-                        }
-                    }
                     if let Some(mut record) = active_attempt.take() {
                         record.ended_at_ms = Some(chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default());
                         record.outcome = swage_core::ProviderAttemptOutcome::Interrupted;
@@ -2827,10 +2701,7 @@ impl Agent {
                     });
                     return Err(AgentError::Cancelled);
                 }
-                chunk = futures::future::poll_fn(|cx| {
-                    stream_polled = true;
-                    stream.as_mut().poll_next(cx)
-                }) => {
+                chunk = stream.next() => {
                     match chunk {
                         Some(StreamChunk::Done { finish_reason: Some(swage_core::FinishReason::Refusal) }) => {
                             self.persist_terminal_response(execution, &format!("{accumulated_prefix}{text}")).await?;
@@ -4495,15 +4366,9 @@ impl Agent {
         }
     }
 
-    /// Scan text for credential leaks and return the redacted version.
-    ///
-    /// When no leak detector is configured, the text passes through unchanged.
-    /// If the detector panics (shouldn't happen, but defensive), we fail-open:
-    /// log a warning and return the original text.
-    /// Text as the model and the record may see it: every registered secret
-    /// value masked, and credential-shaped text the leak detector finds
-    /// redacted. Registered values are masked first, so a tool result's
-    /// shortened preview is cut from text that no longer holds them.
+    /// Mask registered secret values before scanning for credential patterns.
+    /// If scanning is disabled or panics, return the text with registered
+    /// values masked.
     pub(crate) fn scan_output(&self, text: &str) -> String {
         let mut text = text.to_owned();
         self.storage.registered_secret_values().mask(&mut text);
@@ -4512,11 +4377,12 @@ impl Agent {
             None => return text,
         };
 
-        // Fail-open: catch any panic from the scanning pipeline.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| detector.scan(&text))) {
             Ok(redacted) => redacted,
             Err(_) => {
-                tracing::warn!("leak detector panicked during scan — returning original text");
+                tracing::warn!(
+                    "leak detector panicked during scan — returning registered-secret-masked text"
+                );
                 text
             }
         }

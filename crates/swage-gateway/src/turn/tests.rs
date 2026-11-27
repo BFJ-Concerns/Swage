@@ -24464,6 +24464,7 @@ async fn settlement_preflight_refusal_agrees_in_record_event_and_model_result() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settlement_post_read_rejection_agrees_in_record_event_and_model_result() {
+    let refusal = "offset_bytes must be within the file";
     let (storage, turn, events, requests) = operation_outcome_turn(vec![
         (
             "write-text",
@@ -24483,10 +24484,7 @@ async fn settlement_post_read_rejection_agrees_in_record_event_and_model_result(
         .find(|call| call.call_id == "reject-offset")
         .unwrap();
     assert!(
-        call.result
-            .as_deref()
-            .unwrap()
-            .contains("valid UTF-8 byte boundary"),
+        call.result.as_deref().unwrap().contains(refusal),
         "expected a rejection based on the file length: {call:?}"
     );
     let expected = swage_protocol::client::conversation::ToolExecution {
@@ -24508,7 +24506,7 @@ async fn settlement_post_read_rejection_agrees_in_record_event_and_model_result(
     assert!(requests.last().unwrap().messages.iter()
         .flat_map(|message| message.tool_replay().unwrap_or_default())
         .any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, is_error: true }
-            if call_id == "reject-offset" && content.contains("valid UTF-8 byte boundary"))),
+            if call_id == "reject-offset" && content.contains(refusal))),
         "the next provider request must carry the file reader's rejection");
 }
 
