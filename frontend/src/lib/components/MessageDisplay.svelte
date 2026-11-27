@@ -401,6 +401,7 @@
   {:else}
     <!-- ---- Committed messages from conversation history ---- -->
     {#each messages as message (message.id ?? message.timestamp)}
+      {@const isReply = message.role === "assistant"}
       <div
         class="message"
         class:user={isPersonsMessage(message)}
@@ -438,8 +439,9 @@
           <!-- Assistant messages render as markdown. -->
           <div
             class="message-content assistant-content markdown-body riso-tables"
-            class:interrupted={message.turn_state === "interrupted" || message.turn_state === "cancelled" ||
-              message.turn_state === "failed" || message.turn_state === "incomplete"}
+            class:interrupted={isReply &&
+              (message.turn_state === "interrupted" || message.turn_state === "cancelled" ||
+                message.turn_state === "failed" || message.turn_state === "incomplete")}
           >
             {#if shouldRenderMarkdown}
               <!-- marked output is trusted (server-generated content only). -->
@@ -449,15 +451,19 @@
               <div class="plain-body">{message.content}</div>
             {/if}
 
-            {#if message.turn_state === "cancelled"}
-              <p class="interrupted-notice">Response cancelled</p>
-            {:else if message.turn_state === "interrupted"}
-              <!-- Subtle notice below the partial response. -->
-              <p class="interrupted-notice">↩ Response interrupted</p>
-            {:else if message.turn_state === "incomplete"}
-              <p class="interrupted-notice">⚠ Response incomplete</p>
-            {:else if message.turn_state === "failed"}
-              <p class="interrupted-notice">⚠ Response failed</p>
+            <!-- How the turn ended is said on its reply. A platform account
+                 of the same turn says it in its own words. -->
+            {#if isReply}
+              {#if message.turn_state === "cancelled"}
+                <p class="interrupted-notice">Response cancelled</p>
+              {:else if message.turn_state === "interrupted"}
+                <!-- Subtle notice below the partial response. -->
+                <p class="interrupted-notice">↩ Response interrupted</p>
+              {:else if message.turn_state === "incomplete"}
+                <p class="interrupted-notice">⚠ Response incomplete</p>
+              {:else if message.turn_state === "failed"}
+                <p class="interrupted-notice">⚠ Response failed</p>
+              {/if}
             {/if}
           </div>
         {/if}

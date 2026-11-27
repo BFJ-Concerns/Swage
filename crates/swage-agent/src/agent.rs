@@ -2841,7 +2841,7 @@ impl Agent {
                         origin: swage_storage::MessageOrigin::Platform,
                         delivered: true,
                         content: format!(
-                            "Response incomplete: {} ({reason}).",
+                            "{STOPPED_EARLY_ACCOUNT_PREFIX} {} ({reason}).",
                             if reason == "content_filter" {
                                 "the provider's content filter stopped the response"
                             } else {
@@ -3309,6 +3309,11 @@ pub fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
 /// Producers that put structured guidance in errors must fit it within this
 /// budget themselves, so compaction never silently changes its meaning.
 pub const MAX_MODEL_TOOL_ERROR_DETAIL_CHARS: usize = 320;
+
+/// How the account a reply cut short leaves on its thread begins. The reply
+/// itself is marked incomplete, so the account says only why it stopped;
+/// recovery finds the account by this opening.
+pub const STOPPED_EARLY_ACCOUNT_PREFIX: &str = "The reply stopped early:";
 
 fn compact_tool_error_detail(message: &str) -> String {
     let lines = message
