@@ -102,8 +102,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
 /// and the result it returned, so the record lists a session's tool calls
 /// beside its state transitions and configuration changes. A call settles
 /// when its status is written: ordinarily an update after the row was
-/// created with no status, or an insert that already carries one (a call
-/// recorded whole once it has run).
+/// created with no status, or an insert that already carries one into a turn
+/// still in flight (a call recorded whole once it has run). A settled row
+/// inserted into a turn that has already ended is a copy of a call that ran
+/// before — a branch carrying its ancestor's history — and is no event.
 const CREATE_TOOL_CALL_AUDIT_TRIGGERS: &str = "
     CREATE TRIGGER IF NOT EXISTS trg_tool_calls_settled_audit
     AFTER UPDATE OF status ON tool_calls
@@ -140,6 +142,8 @@ const CREATE_TOOL_CALL_AUDIT_TRIGGERS: &str = "
     CREATE TRIGGER IF NOT EXISTS trg_tool_calls_inserted_settled_audit
     AFTER INSERT ON tool_calls
     WHEN NEW.status IS NOT NULL
+        AND (SELECT state FROM turns WHERE id = NEW.turn_id)
+            IN ('pending', 'processing', 'awaiting_approval', 'delegating')
     BEGIN
         INSERT INTO audit_events (
             id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
