@@ -2513,6 +2513,7 @@ mod tests {
                 turn_id: None,
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "The queue was empty at last check. ".repeat(20),
                 position: 0,
                 agent_id: "gateway".into(),

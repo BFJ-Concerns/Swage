@@ -631,6 +631,7 @@ async fn run_turn_inner(
                     turn_id: Some(request.turn_id),
                     role: Role::Assistant,
                     origin: swage_storage::MessageOrigin::Assistant,
+                    delivered: false,
                     content: response_text.clone(),
                     agent_id: request.agent_id.clone(),
                 })
@@ -675,6 +676,7 @@ async fn run_turn_inner(
             turn_id: Some(request.turn_id),
             role: Role::Assistant,
             origin: swage_storage::MessageOrigin::Assistant,
+            delivered: false,
             content: response_text.clone(),
             agent_id: request.agent_id.clone(),
         })

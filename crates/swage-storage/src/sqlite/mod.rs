@@ -325,6 +325,7 @@ mod tests {
                 origin: MessageOrigin::User,
                 content: text.clone(),
                 agent_id: crate::fixtures::FIXTURE_AGENT_ID.into(),
+                delivered: false,
             })
             .await
             .unwrap();
