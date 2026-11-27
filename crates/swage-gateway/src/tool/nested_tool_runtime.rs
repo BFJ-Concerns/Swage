@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use swage_core::{compact_tool_arguments_for_model, extract_tool_result_metadata};
+use swage_core::extract_tool_result_metadata;
 use swage_python::worker_protocol::WorkerToolError;
 use swage_storage::model::NewToolCall;
 use swage_storage::store::Storage;
@@ -74,7 +74,6 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
             call_id: call_id.clone(),
             tool: tool_name.to_string(),
             arguments: serde_json::to_string(&arguments).unwrap_or_default(),
-            model_arguments: compact_tool_arguments_for_model(&arguments),
             result: None,
             model_result: None,
             status: None,
@@ -228,9 +227,13 @@ impl NestedToolRuntime {
         duration_ms: u64,
         execution: swage_protocol::client::conversation::ToolExecution,
     ) -> Result<(), swage_core::StorageError> {
-        let result_text = serde_json::to_string(result).unwrap_or_else(|_| result.to_string());
-        // History can replay this result to the provider. Scan it before
-        // compaction, as the ordinary agent call path does.
+        let mut result_text = serde_json::to_string(result).unwrap_or_else(|_| result.to_string());
+        // History can replay this result to the provider. Mask and scan it
+        // before compaction, as the ordinary agent call path does, so the
+        // shortened preview never ends inside a registered value.
+        self.storage
+            .registered_secret_values()
+            .mask(&mut result_text);
         let safe_result = swage_safety::LeakDetector::default().scan(&result_text);
         let model_result = swage_core::compact_tool_result_for_model_with_reference(
             &safe_result,
@@ -724,7 +727,6 @@ mod tests {
                 call_id: "nested-secret".into(),
                 tool: "secret_tool".into(),
                 arguments: "{}".into(),
-                model_arguments: "{}".into(),
                 result: None,
                 model_result: None,
                 status: None,

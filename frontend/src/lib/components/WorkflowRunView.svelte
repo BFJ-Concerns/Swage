@@ -7,7 +7,7 @@
   because it is the record of an ending rather than a progress reading.
 -->
 <script lang="ts">
-  import { cancelWorkflowRun, fetchWorkflowRun } from "../api/workflow-runs";
+  import { cancelWorkflowRun } from "../api/workflow-runs";
   import { formatRunTime } from "../run-times";
   import { conversationPath } from "../router";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
@@ -29,16 +29,12 @@
     if (!run || cancelling) return;
     const runId = run.id;
     cancellingRunId = runId;
-    let requested = false;
     cancelError = "";
     try {
       await cancelWorkflowRun(runId);
-      requested = true;
-      const refreshed = await fetchWorkflowRun(runId);
-      if (run?.id === runId && refreshed) detail = refreshed;
     } catch (error) {
       cancelError = error instanceof Error ? error.message : String(error);
-      if (!requested) cancellingRunId = null;
+      cancellingRunId = null;
     }
   }
 
@@ -100,7 +96,7 @@
   // stands: its interrupted attempt's tool calls have unknown outcomes.
   function describeRedispatch(worker: WorkflowWorkerAccount): string | null {
     return worker.redispatched_after_interruption
-      ? "redispatched after an interruption — the interrupted attempt's tool calls have unknown outcomes and may have been applied twice"
+      ? "redispatched after an interruption — tool calls from the earlier attempt may have been applied twice"
       : null;
   }
 
@@ -257,7 +253,7 @@
       {#if run.state === "parked"}
         <section class="awaited" aria-label="Awaited work">
           <h3>Waiting for</h3>
-          {#if run.wake_at && waits.some((entry) => entry.kind === "timer")}<p>Timer wakes at {@render recordedTime(run.wake_at)}</p>{/if}
+          {#if detail?.timer_wake_at}<p>Timer wakes at {@render recordedTime(detail.timer_wake_at)}</p>{/if}
           {#each detail?.holds ?? [] as hold (hold.id)}
             {#if hold.state === "open"}
               <p>Decision hold: {hold.content}</p>

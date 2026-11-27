@@ -10,6 +10,7 @@ export const SETTINGS_LABELS: Readonly<Record<string, string>> = {
   "tool_runtime.search.provider_type": "Provider type (required)",
   "tool_runtime.search.base_url": "Base URL (required)",
   "sandbox.enabled": "Sandbox",
+  "sandbox.network": "Sandbox network",
   "hitl": "Approval defaults",
   "context": "Context assembly",
   "tool_permissions.allow": "Tool allow rules",

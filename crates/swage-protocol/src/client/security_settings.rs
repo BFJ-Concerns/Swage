@@ -12,7 +12,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use super::access::AccessGateMode;
-use super::settings::RequireApprovalEntry;
+use super::settings::{RequireApprovalEntry, SandboxNetwork};
 
 /// The scope a set of security settings belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, TS)]
@@ -55,6 +55,8 @@ pub struct RelaxedCheck {
 #[ts(optional_fields = nullable)]
 pub struct EffectiveSecurityChecks {
     pub sandbox_enabled: bool,
+    /// What a sandboxed command reaches on the network.
+    pub sandbox_network: SandboxNetwork,
     /// The tools an attended session is asked about before they run.
     pub require_approval: Vec<RequireApprovalEntry>,
     /// How a binding beyond loopback gates requests; loopback is never gated.
@@ -71,6 +73,9 @@ pub struct SecurityOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub sandbox_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sandbox_network: Option<SandboxNetwork>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub require_approval: Option<Vec<RequireApprovalEntry>>,
@@ -106,6 +111,13 @@ pub struct SaveSecuritySettingsRequest {
     )]
     #[ts(optional)]
     pub sandbox_enabled: Option<Option<bool>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_override"
+    )]
+    #[ts(optional)]
+    pub sandbox_network: Option<Option<SandboxNetwork>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

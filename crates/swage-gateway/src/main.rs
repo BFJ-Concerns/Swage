@@ -99,6 +99,41 @@ fn build_sandbox_agent_tools(config: Option<&swage_sandbox::SandboxConfig>) -> V
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<_> = std::env::args_os().collect();
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == swage_sandbox::SANDBOX_EXEC_FLAG)
+    {
+        match swage_sandbox::run_sandboxed_command(args[2..].to_vec()).await {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    // Git calls its SSH signing program with ssh-keygen's arguments; the
+    // binary recognises that shape by the leading `-Y`.
+    if swage_gateway::git_signer::is_signing_invocation(&args) {
+        match swage_gateway::git_signer::run_signer(&args[1..]).await {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("swage: commit not signed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.get(1).is_some_and(|arg| arg == "git-credential") {
+        if let Err(error) = swage_gateway::git_credential::run_helper(
+            args.get(2).and_then(|arg| arg.to_str()).unwrap_or(""),
+        )
+        .await
+        {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let cli = Cli::parse();
 
     if cli.sandbox_mode {
@@ -112,20 +147,6 @@ async fn main() {
             std::process::exit(1);
         }
         return;
-    }
-
-    // --sandboxed-exec: the governor of a program that is not the agent.
-    // The filesystem rules apply to this process and survive the exec, so
-    // the program runs under the agent's own boundary.
-    if let Some((program, args)) = cli.sandboxed_exec.split_first() {
-        if let Err(error) = swage_sandbox::apply_child_landlock_from_env() {
-            eprintln!("Error: {error}");
-            std::process::exit(1);
-        }
-        use std::os::unix::process::CommandExt;
-        let error = std::process::Command::new(program).args(args).exec();
-        eprintln!("Error: failed to exec {program}: {error}");
-        std::process::exit(1);
     }
 
     // --server-mode is set when we re-exec ourselves as a background daemon.

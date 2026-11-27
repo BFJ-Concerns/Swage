@@ -1502,10 +1502,10 @@ async fn provider_anomaly_fails_before_output_schema_retry() {
             request_id: Some("req-empty".into()),
             terminal_event: Some("message_stop".into()),
             stop_reason: Some("end_turn".into()),
-            usage: TokenUsage {
+            usage: Some(TokenUsage {
                 input_tokens: 11,
                 output_tokens: 0,
-            },
+            }),
             content_blocks: vec![],
         }),
         StreamChunk::ProviderAnomaly {

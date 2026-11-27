@@ -1,11 +1,19 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use swage_core::ScopeLocation;
 
 use tokio::fs;
 use uuid::Uuid;
 
+use swage_context::materials::{
+    MaterialReach, MaterialsElement, ReferenceMaterial, ReferenceMaterialScope,
+};
 use swage_core::{GatewayError, StorageError};
-use swage_storage::{Attachment, AttachmentScopeKind, Material, MaterialSourceKind, NewMaterial};
+use swage_storage::{
+    Attachment, AttachmentScopeKind, Material, MaterialSourceKind, MaterialStatus, NewMaterial,
+    Storage,
+};
 
 use crate::{state::AppState, tool::workspace::validate_path};
 
@@ -55,6 +63,108 @@ pub async fn create_material(
         })
         .await?;
     map_material_response(state, material).await
+}
+
+/// How much of a session's reference material a turn quotes whole in its
+/// context. Materials past either limit are named with their id for
+/// `material_read`. Which limits serve a session is drawn at the
+/// `context.material_quoting` experiment location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialQuoting {
+    /// The variant id recorded for these limits.
+    pub variant: &'static str,
+    /// The longest material quoted whole.
+    pub per_material_bytes: usize,
+    /// The most text quoted across all of a turn's materials, so a folder
+    /// of short files is listed rather than poured into every turn.
+    pub total_bytes: usize,
+}
+
+impl MaterialQuoting {
+    pub const AUTHORED: Self = Self {
+        variant: "short-whole-v1",
+        per_material_bytes: 4096,
+        total_bytes: 16 * 1024,
+    };
+}
+
+/// The reference material a turn in `session_id` sees: the session's own
+/// active materials and, inside a topic, the topic's. `None` when nothing is
+/// active, so the assembly carries no empty element. A store that cannot be
+/// read is omitted with a warning — the turn runs with what could be read,
+/// never with material nobody attached.
+pub async fn load_reference_materials(
+    storage: &Arc<dyn Storage>,
+    session_id: Uuid,
+    topic: &swage_storage::Topic,
+    reach: MaterialReach,
+    quoting: MaterialQuoting,
+) -> Option<MaterialsElement> {
+    let mut active = Vec::new();
+    match storage.list_materials_by_session(session_id).await {
+        Ok(own) => active.extend(
+            own.into_iter()
+                .map(|m| (m, ReferenceMaterialScope::Session)),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, %session_id, "the session's materials could not be listed; omitted")
+        }
+    }
+    if !topic.is_general {
+        match storage.list_materials_by_topic(topic.id).await {
+            Ok(shared) => active.extend(
+                shared
+                    .into_iter()
+                    .map(|m| (m, ReferenceMaterialScope::Topic)),
+            ),
+            Err(error) => {
+                tracing::warn!(%error, topic_id = %topic.id, "the topic's materials could not be listed; omitted")
+            }
+        }
+    }
+    active.retain(|(material, _)| material.status == MaterialStatus::Active);
+    if active.is_empty() {
+        return None;
+    }
+    let mut quote_budget = quoting.total_bytes;
+    let materials = active
+        .into_iter()
+        .map(|(material, scope)| {
+            reference_material(
+                material,
+                scope,
+                quoting.per_material_bytes,
+                &mut quote_budget,
+            )
+        })
+        .collect();
+    Some(MaterialsElement::new(materials, reach))
+}
+
+/// One material as the context lists it: a short text material is quoted
+/// whole while the turn's quote budget lasts; anything else is named with
+/// its id.
+fn reference_material(
+    material: Material,
+    scope: ReferenceMaterialScope,
+    per_material_bytes: usize,
+    quote_budget: &mut usize,
+) -> ReferenceMaterial {
+    let byte_count = material.content_text.len();
+    let quoted = byte_count <= per_material_bytes
+        && byte_count <= *quote_budget
+        && material.mime_type.starts_with("text/");
+    if quoted {
+        *quote_budget -= byte_count;
+    }
+    ReferenceMaterial {
+        id: material.id.to_string(),
+        title: material.title,
+        mime_type: material.mime_type,
+        byte_count,
+        scope,
+        inline_text: quoted.then_some(material.content_text),
+    }
 }
 
 pub async fn get_material(

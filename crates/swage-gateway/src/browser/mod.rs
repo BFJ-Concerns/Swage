@@ -309,7 +309,7 @@ impl BrowserHost {
                 "browser_type",
                 true,
                 format!(
-                    "(el) => {{ el.scrollIntoView({{block:'center',inline:'center'}}); el.focus(); if ({replace}) el.value = ''; el.value = ({replace} ? '' : el.value) + {quoted_text}; el.dispatchEvent(new InputEvent('input', {{bubbles:true}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); if ({submit} && el.form) el.form.requestSubmit(); }}"
+                    "(el) => {{ el.scrollIntoView({{block:'center',inline:'center'}}); el.focus(); el.value = ({replace} ? '' : el.value) + {quoted_text}; el.dispatchEvent(new InputEvent('input', {{bubbles:true}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); if ({submit} && el.form) el.form.requestSubmit(); }}"
                 ),
             )
             .await?

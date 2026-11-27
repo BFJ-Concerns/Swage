@@ -336,6 +336,17 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
                         .is_offered(crate::tool::memory::MEMORY_WRITE_TOOL),
                 )),
         );
+        let reference_materials = crate::material::load_reference_materials(
+            &self.state.storage,
+            session.id,
+            &self.topic,
+            swage_context::materials::MaterialReach::for_tools(
+                self.offered_tools
+                    .is_offered(crate::tool::material::MATERIAL_READ_TOOL),
+            ),
+            context_choices.material_quoting,
+        )
+        .await;
         let mut session_variables: std::collections::BTreeMap<String, String> = self
             .state
             .storage
@@ -375,6 +386,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             active_skills,
             delegated_history,
             memory_index,
+            reference_materials,
             environment,
             available_skills,
             self.offered_tools.clone(),
@@ -1438,6 +1450,9 @@ impl DelegationHandler for GatewayDelegationHandler {
             hook_registry: self.state.hook_registry.clone(),
             leak_detector: None,
             approval_registrar: Some(signalling_approval_registrar(self.state.clone())),
+            request_judge: Some(Arc::new(crate::request_judge::GatewayRequestJudge::new(
+                self.state.clone(),
+            ))),
             delegation_handler: Some(Arc::new(child_handler)),
             router: router.clone(),
             active_delegations: self.active_delegations.clone(),

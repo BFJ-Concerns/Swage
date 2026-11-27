@@ -10,7 +10,9 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
 
 use swage_protocol::client::error::ErrorCode;
+use swage_storage::store::SecretStore;
 
+use crate::answer_masking::mask_answer_text;
 use crate::{error::ApiError, state::AppState, subscription::SubscriptionState};
 
 use super::{ServerEvent, dispatch_client_message};
@@ -129,7 +131,13 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
 
     // Spawn a forwarding task: reads from both the per-turn mpsc channel and
     // the server-wide broadcast channel, writing each event to the WebSocket.
-    let mut forward_task = tokio::spawn(forward_events(ws_sink, session_id, rx, bcast_rx));
+    let mut forward_task = tokio::spawn(forward_events(
+        ws_sink,
+        session_id,
+        rx,
+        bcast_rx,
+        Arc::clone(&state.storage) as Arc<dyn SecretStore>,
+    ));
 
     if state.shutdown_signal.is_cancelled() {
         let _ = tx.send(ServerEvent::Shutdown {
@@ -217,15 +225,19 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     crate::presence::record_client_disconnected(&state, session_id).await;
 }
 
-/// Forward the connection's ordered session stream and unrelated broadcasts.
+/// Forward the connection's ordered session stream and unrelated broadcasts,
+/// each frame masked against the registered secret values as every answer is
+/// ([`crate::answer_masking`]).
 async fn forward_events<S>(
     mut ws_sink: S,
     session_id: Uuid,
     mut rx: mpsc::UnboundedReceiver<ServerEvent>,
     mut bcast_rx: broadcast::Receiver<ServerEvent>,
+    store: Arc<dyn SecretStore>,
 ) where
     S: futures::Sink<Message> + Unpin,
 {
+    let mut streamed = swage_core::secret_masking::StreamMasking::default();
     loop {
         tokio::select! {
             // Per-turn events (Token, ToolStart, ToolEnd, TurnComplete, etc.)
@@ -234,19 +246,24 @@ async fn forward_events<S>(
                     None => break, // All senders dropped — turn and connection done.
                     Some(event) => {
                         let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
-                        match serde_json::to_string(&event) {
-                            Ok(json) => {
-                                if ws_sink.send(Message::Text(json.into())).await.is_err() {
-                                    // Client disconnected — stop forwarding.
-                                    break;
+                        let mut disconnected = false;
+                        for event in held_back_stream(&mut streamed, event, &store.registered_secret_values()) {
+                            match serde_json::to_string(&event) {
+                                Ok(mut json) => {
+                                    mask_answer_text(store.as_ref(), &mut json).await;
+                                    if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                                        disconnected = true;
+                                        break;
+                                    }
                                 }
-                                if is_shutdown {
-                                    break;
+                                Err(e) => {
+                                    tracing::error!(error = %e, "failed to serialise server event");
                                 }
                             }
-                            Err(e) => {
-                                tracing::error!(error = %e, "failed to serialise server event");
-                            }
+                        }
+                        // A client that disconnected stops the forwarding.
+                        if disconnected || is_shutdown {
+                            break;
                         }
                     }
                 }
@@ -262,7 +279,8 @@ async fn forward_events<S>(
                         }
                         let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
                         match serde_json::to_string(&event) {
-                            Ok(json) => {
+                            Ok(mut json) => {
+                                mask_answer_text(store.as_ref(), &mut json).await;
                                 // Attempt the send; ignore the result for broadcast events.
                                 let _ = ws_sink.send(Message::Text(json.into())).await;
                                 if is_shutdown {
@@ -290,6 +308,37 @@ async fn forward_events<S>(
 
     // Send a close frame when the forwarding loop exits for any reason.
     let _ = ws_sink.send(Message::Close(None)).await;
+}
+
+/// The events to send for one event of the session's stream. Streamed text
+/// is held back while its end could be the start of a registered value, so a
+/// value split across two tokens is masked whole; any other event first
+/// releases what is held, so the text it follows reaches the client ahead
+/// of it.
+fn held_back_stream(
+    streamed: &mut swage_core::secret_masking::StreamMasking,
+    event: ServerEvent,
+    secret_values: &swage_core::RegisteredSecretValues,
+) -> Vec<ServerEvent> {
+    let values = secret_values.current();
+    match event {
+        ServerEvent::Token { content } => {
+            let content = streamed.push(&content, &values);
+            if content.is_empty() {
+                Vec::new()
+            } else {
+                vec![ServerEvent::Token { content }]
+            }
+        }
+        event => {
+            let content = streamed.finish(&values);
+            if content.is_empty() {
+                vec![event]
+            } else {
+                vec![ServerEvent::Token { content }, event]
+            }
+        }
+    }
 }
 
 pub(super) fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEvent) -> bool {
@@ -320,6 +369,114 @@ mod tests {
     use crate::thread_selection::resolve_thread_for_session;
     use crate::turn::TurnInput;
     use swage_core::{FinishReason, StreamChunk};
+
+    /// An in-memory store masking `values`, as the socket's forwarder reads it.
+    fn store_masking(values: &[&str]) -> Arc<dyn SecretStore> {
+        let store = swage_storage::SqliteStorage::in_memory().unwrap();
+        store
+            .registered_secret_values()
+            .replace(values.iter().map(|value| value.to_string()).collect());
+        Arc::new(store)
+    }
+
+    /// What the socket carries is masked as the record is: a tool's result
+    /// holding a registered value reaches the client with the value masked,
+    /// under a field named like a key as anywhere else, while the event's own
+    /// call id is left as it is.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_registered_value_never_reaches_the_socket() {
+        let secret = r#"sock-"registered"-value"#;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (_broadcast_sender, broadcast) = broadcast::channel(4);
+        let (sink, mut output) = futures::channel::mpsc::unbounded::<Message>();
+        let forwarding = tokio::spawn(forward_events(
+            sink,
+            Uuid::new_v4(),
+            receiver,
+            broadcast,
+            store_masking(&[secret]),
+        ));
+        sender
+            .send(ServerEvent::ToolEnd {
+                execution: None,
+                call_id: "call-1".into(),
+                tool: "shell".into(),
+                result: serde_json::json!({
+                    "output": format!("key {secret} end"),
+                    "secret_id": secret,
+                }),
+                status: "success".into(),
+                duration_ms: 1,
+                truncated: false,
+                total_bytes: None,
+                parent_call_id: None,
+            })
+            .unwrap();
+        sender
+            .send(ServerEvent::Shutdown {
+                reason: "test finished".into(),
+            })
+            .unwrap();
+        forwarding.await.unwrap();
+
+        let Some(Message::Text(frame)) = output.next().await else {
+            panic!("expected the tool's result");
+        };
+        let event: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(event["result"]["output"], "key [REDACTED_SECRET] end");
+        assert_eq!(event["result"]["secret_id"], "[REDACTED_SECRET]");
+        assert_eq!(event["call_id"], "call-1");
+    }
+
+    /// A registered value a provider streams in two pieces reaches the
+    /// client masked whole, and the text after it is not lost.
+    #[tokio::test]
+    async fn a_value_split_across_tokens_never_reaches_the_socket() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (_broadcast_sender, broadcast) = broadcast::channel(4);
+        let (sink, output) = futures::channel::mpsc::unbounded::<Message>();
+        let forwarding = tokio::spawn(forward_events(
+            sink,
+            Uuid::new_v4(),
+            receiver,
+            broadcast,
+            store_masking(&["verifier-canary-7F29"]),
+        ));
+        for content in ["the key is verifier-canary-", "7F29 and verif"] {
+            sender
+                .send(ServerEvent::Token {
+                    content: content.into(),
+                })
+                .unwrap();
+        }
+        sender
+            .send(ServerEvent::Shutdown {
+                reason: "test finished".into(),
+            })
+            .unwrap();
+        forwarding.await.unwrap();
+
+        let frames: Vec<serde_json::Value> = output
+            .filter_map(|message| async move {
+                match message {
+                    Message::Text(text) => Some(serde_json::from_str(&text).unwrap()),
+                    _ => None,
+                }
+            })
+            .collect()
+            .await;
+        let streamed: String = frames
+            .iter()
+            .filter(|event| event["type"] == "token")
+            .map(|event| event["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(streamed, "the key is [REDACTED_SECRET] and verif");
+        assert!(
+            frames
+                .iter()
+                .all(|event| !event.to_string().contains("7F29"))
+        );
+    }
 
     #[tokio::test]
     async fn ready_queue_and_turn_events_reach_the_socket_in_emission_order() {
@@ -368,7 +525,13 @@ mod tests {
                 .await
                 .unwrap();
             let (sink, mut output) = futures::channel::mpsc::unbounded::<Message>();
-            let forwarding = tokio::spawn(forward_events(sink, session_id, receiver, broadcast));
+            let forwarding = tokio::spawn(forward_events(
+                sink,
+                session_id,
+                receiver,
+                broadcast,
+                Arc::clone(&state.storage) as Arc<dyn SecretStore>,
+            ));
             let mut events = Vec::new();
             for _ in 0..6 {
                 let message =

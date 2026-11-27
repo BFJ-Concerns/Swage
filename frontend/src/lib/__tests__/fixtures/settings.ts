@@ -36,6 +36,8 @@ export function emptySettings(): SettingsResponse {
     sandbox: {
       enabled: true,
       allow_degraded_execution: false,
+      network: "open",
+      egress_hosts: [],
     },
     context: {
       assembly: "default",
@@ -61,6 +63,7 @@ export function emptySettings(): SettingsResponse {
     sessions: { archive_after_days: 7, max_delegation_depth: 4 },
     memory: { curator_idle_minutes: 10 },
     attachments: { accepted_schemes: ["https", "data"] },
+    judge: { model: "" },
     voice: {},
     restart_required: false,
     can_restart: false,

@@ -1928,10 +1928,15 @@
         },
         "sandbox_enabled": {
           "type": "boolean"
+        },
+        "sandbox_network": {
+          "$ref": "#/$defs/SandboxNetwork",
+          "description": "What a sandboxed command reaches on the network."
         }
       },
       "required": [
         "sandbox_enabled",
+        "sandbox_network",
         "require_approval",
         "access_gate"
       ],
@@ -2391,6 +2396,20 @@
       },
       "required": [
         "source_path"
+      ],
+      "type": "object"
+    },
+    "JudgeConfig": {
+      "additionalProperties": false,
+      "description": "The judging model: who answers for a request a session's grants do\nnot cover — alone in an unattended turn, and first in an attended one,\nwhere the person takes the cases it is not sure of.",
+      "properties": {
+        "model": {
+          "description": "The model catalogue key, or an alias, of the model that judges\nsuch requests. Empty means no judge, and an unattended request\nbeyond the session's grants then fails closed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model"
       ],
       "type": "object"
     },
@@ -4491,15 +4510,48 @@
         "allow_degraded_execution": {
           "type": "boolean"
         },
+        "egress_hosts": {
+          "description": "Under the recorded proxy, the hosts a sandboxed command reaches\nwithout the judge being asked: an exact host, or `*.suffix` for a\nhost and every name beneath it. Any other host goes to the request\njudge and fails closed without its yes. Read only when `network` is\n`proxy`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "enabled": {
           "type": "boolean"
+        },
+        "network": {
+          "$ref": "#/$defs/SandboxNetwork",
+          "description": "What a sandboxed command can reach on the network."
         }
       },
       "required": [
         "enabled",
-        "allow_degraded_execution"
+        "allow_degraded_execution",
+        "network",
+        "egress_hosts"
       ],
       "type": "object"
+    },
+    "SandboxNetwork": {
+      "description": "What a sandboxed command can reach on the network.",
+      "oneOf": [
+        {
+          "const": "open",
+          "description": "The host's network, directly, as an unsandboxed command reaches it.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No network at all.",
+          "type": "string"
+        },
+        {
+          "const": "proxy",
+          "description": "Only through the gateway's recording proxy: every destination is\nrecorded, a listed host is reached, and any other host is put to the\nrequest judge.",
+          "type": "string"
+        }
+      ]
     },
     "SaveProviderSettings": {
       "properties": {
@@ -4608,6 +4660,16 @@
             "boolean",
             "null"
           ]
+        },
+        "sandbox_network": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SandboxNetwork"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "type": "object"
@@ -4664,6 +4726,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/HitlConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgeConfig"
             },
             {
               "type": "null"
@@ -5345,6 +5418,16 @@
           "type": [
             "boolean",
             "null"
+          ]
+        },
+        "sandbox_network": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SandboxNetwork"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -6580,6 +6663,9 @@
         "hitl": {
           "$ref": "#/$defs/HitlConfig"
         },
+        "judge": {
+          "$ref": "#/$defs/JudgeConfig"
+        },
         "memory": {
           "$ref": "#/$defs/MemoryConfig"
         },
@@ -6636,6 +6722,7 @@
         "communication",
         "sessions",
         "memory",
+        "judge",
         "attachments",
         "voice",
         "restart_required",
@@ -8554,7 +8641,7 @@
           "type": "object"
         },
         {
-          "description": "The model the call named refused before any output, and the call's\ndeclared fallback served it instead; no interruption occurred.",
+          "description": "The primary failed before any output and the call was dispatched to its declared fallback.",
           "properties": {
             "cause": {
               "const": "provider_fallback",
@@ -8567,6 +8654,23 @@
           "required": [
             "cause",
             "primary_failure"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Replay dispatched another attempt after a recorded provider failure.",
+          "properties": {
+            "cause": {
+              "const": "after_provider_failure",
+              "type": "string"
+            },
+            "failure": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cause",
+            "failure"
           ],
           "type": "object"
         }
@@ -10047,6 +10151,14 @@
         "run": {
           "$ref": "#/$defs/WorkflowRun"
         },
+        "timer_wake_at": {
+          "description": "The recorded timer deadline when a timer can wake this parked run.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "wake_metrics": {
           "$ref": "#/$defs/WorkflowWakeMetrics",
           "description": "The run's own wake economics, derived from the journal and event\nqueue — the falsification signal for a gated long run: a sustained\nhigh wake rate means the design's economics are failing."
@@ -10181,7 +10293,7 @@
           ]
         },
         "state": {
-          "type": "string"
+          "$ref": "#/$defs/WorkflowRunState"
         }
       },
       "required": [
@@ -10246,9 +10358,10 @@
       "type": "object"
     },
     "WorkflowRunHandover": {
-      "description": "The durable account a failed run leaves behind: what stopped it, which\ncall failed, and where the pending event queue stood, so whoever picks\nthe work up starts from the record instead of a re-run.",
+      "description": "The account a failed run leaves, with the detail the gateway recovered.",
       "oneOf": [
         {
+          "description": "The script error that prevented the run from continuing.",
           "properties": {
             "classification": {
               "const": "author_error",
@@ -10265,7 +10378,7 @@
           "type": "object"
         },
         {
-          "description": "An attributed agent-call failure stopped the run.",
+          "description": "The failed call, the last journal position and the event queue at failure.",
           "properties": {
             "classification": {
               "const": "interrupted",
@@ -10312,7 +10425,7 @@
           "type": "object"
         },
         {
-          "description": "The run failed without an attributable agent-call identity.",
+          "description": "The failure and any recorded terminal error when no call could be identified.",
           "properties": {
             "classification": {
               "const": "interrupted_unattributed",
@@ -10335,7 +10448,7 @@
           "type": "object"
         },
         {
-          "description": "The journal read-back failed for a known agent call, so only its\nidentity could be recovered.",
+          "description": "The failure, the affected call’s identity and any terminal error\nwhen the call’s journal could not be reconstructed.",
           "properties": {
             "classification": {
               "const": "reconstruction_failed",
@@ -10714,6 +10827,7 @@
           ]
         },
         "run_id": {
+          "format": "uuid",
           "type": [
             "string",
             "null"

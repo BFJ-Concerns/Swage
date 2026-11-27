@@ -32,6 +32,11 @@ fn typescript_bindings_are_regenerated() {
     plugin::ContextOperation::export_all(&cfg).expect("export context operations");
     plugin::ContextProgramInput::export_all(&cfg).expect("export context input");
     plugin::ContextProgramOutput::export_all(&cfg).expect("export context output");
+    hosting::sandbox::SandboxPolicy::export_all(&cfg).expect("export sandbox policy");
+    hosting::GitCredentialRequest::export_all(&cfg).expect("export git credential request");
+    hosting::GitCredentialResponse::export_all(&cfg).expect("export git credential response");
+    hosting::GitSignRequest::export_all(&cfg).expect("export git sign request");
+    hosting::GitSignResponse::export_all(&cfg).expect("export git sign response");
     // Exporting the top-level types pulls in every dependency they
     // reference, so the full surface lands in one pass.
     client::workflow::WorkflowRunEndingNotice::export_all(&cfg).expect("export ending notice");

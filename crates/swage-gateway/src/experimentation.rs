@@ -35,6 +35,11 @@ pub const LOCATION_CONTEXT_ASSEMBLY: &str = "context.assembly";
 pub const LOCATION_WORKING_NORMS: &str = "context.working_norms";
 pub const LOCATION_TASK_PROMPT: &str = "task.prompt";
 
+/// How much of a session's reference material its turns quote whole in
+/// context, the rest being read with `material_read`. The authored limits
+/// (`crate::material::MaterialQuoting::AUTHORED`) are the first variant.
+pub const LOCATION_MATERIAL_QUOTING: &str = "context.material_quoting";
+
 /// The closing-account request: the text that asks the model for a final
 /// account when its last round after tool rounds returns none. The authored
 /// default (`swage_agent::closing_account::CLOSING_ACCOUNT_REQUEST`) is the
@@ -44,6 +49,11 @@ pub const LOCATION_CLOSING_ACCOUNT_REQUEST: &str = "turn.closing_account_request
 /// The memory curator's prompt: the instructions every curation pass runs
 /// under. The authored default is the first variant.
 pub const LOCATION_MEMORY_CURATOR_PROMPT: &str = "prompts.memory_curator";
+
+/// The request judge's instruction: what the judging model is told before it
+/// decides a request beyond a session's grants. The authored default is the
+/// first variant; a candidate decision model's instruction registers here.
+pub const LOCATION_REQUEST_JUDGE_PROMPT: &str = "prompts.request_judge";
 
 /// The succession summariser's instruction: the text the hand-over notes
 /// are written under when a session's history outgrows its room or keeps

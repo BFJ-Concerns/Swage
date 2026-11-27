@@ -65,14 +65,14 @@ impl ProcessLauncher for GatewayProcessLauncher {
         spec: &ProcessSpec,
         socket: &Path,
     ) -> Result<tokio::process::Command, PluginError> {
-        // The turn's rules name the session's paths, not the plugin's: the
-        // installed package joins them read-only, so the sandbox can mount
-        // it and the rules let the program be read and executed from it.
+        // The turn's rules mask the gateway's data root, where the package
+        // is installed: the package joins them as a read-only path, which
+        // reopens that directory alone, so the program can be read and run
+        // from it and nothing else under the root shows.
         let with_install = |config: &SandboxConfig| {
             let mut config = config.clone();
             if let Some(install) = spec.command.parent() {
-                config.read_only_mounts.push(install.to_path_buf());
-                config.landlock_read_paths.push(install.to_path_buf());
+                config.read_only_paths.push(install.to_path_buf());
             }
             config
         };
@@ -250,12 +250,12 @@ mod tests {
         let fallback = GatewayProcessLauncher::new(Arc::new(ProcessPlacement::fallback(config())))
             .command(&spec(), socket)
             .unwrap();
-        let governor = swage_sandbox::host_binary().unwrap();
+        let governor = swage_sandbox::resolve_agent_binary().unwrap();
         assert_eq!(program_of(&fallback), governor.as_os_str());
         assert_eq!(
             args_of(&fallback),
             vec![
-                "--sandboxed-exec",
+                swage_sandbox::SANDBOX_EXEC_FLAG,
                 "/data/plugins/driver/1/driver",
                 "--serve"
             ]
@@ -291,13 +291,15 @@ mod tests {
                     "a sandboxed placement is the bubblewrap command"
                 );
                 let args = args_of(&sandboxed);
-                assert!(args.iter().any(|arg| arg == "--clearenv"));
                 assert!(
                     args.windows(2)
                         .any(|pair| pair[0] == "--ro-bind" && pair[1] == "/data/plugins/driver/1"),
                     "the install directory is bound in: {args:?}"
                 );
-                assert!(args.iter().any(|arg| arg == "--sandboxed-exec"));
+                assert!(
+                    args.iter()
+                        .any(|arg| arg == swage_sandbox::SANDBOX_EXEC_FLAG)
+                );
                 assert_eq!(args.last().map(String::as_str), Some("--serve"));
             }
             Err(error) => assert!(

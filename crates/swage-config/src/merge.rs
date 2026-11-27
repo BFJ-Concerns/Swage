@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use swage_core::ApprovalTimeoutPolicy;
 pub use swage_protocol::client::settings::{
-    PartialAttachmentsConfig, PartialMemoryConfig, PartialSessionsConfig,
+    PartialAttachmentsConfig, PartialJudgeConfig, PartialMemoryConfig, PartialSessionsConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,6 +49,8 @@ pub struct PartialModelCatalogConfig {
 pub struct PartialSandboxConfig {
     pub enabled: Option<bool>,
     pub allow_degraded_execution: Option<bool>,
+    pub network: Option<swage_protocol::client::settings::SandboxNetwork>,
+    pub egress_hosts: Option<Vec<String>>,
 }
 
 /// Partial mirror of `LoggingConfig`.
@@ -264,6 +266,7 @@ pub struct PartialConfig {
     pub scheduling: Option<PartialSchedulingConfig>,
     pub sessions: Option<PartialSessionsConfig>,
     pub memory: Option<PartialMemoryConfig>,
+    pub judge: Option<PartialJudgeConfig>,
     pub attachments: Option<PartialAttachmentsConfig>,
     pub voice: Option<PartialVoiceConfig>,
     pub generation: Option<PartialGenerationConfig>,
@@ -304,6 +307,7 @@ impl From<ResolvedConfig> for PartialConfig {
             scheduling,
             sessions,
             memory,
+            judge,
             attachments,
             voice,
             generation,
@@ -338,6 +342,8 @@ impl From<ResolvedConfig> for PartialConfig {
             sandbox: Some(PartialSandboxConfig {
                 enabled: Some(sandbox.enabled),
                 allow_degraded_execution: Some(sandbox.allow_degraded_execution),
+                network: Some(sandbox.network),
+                egress_hosts: Some(sandbox.egress_hosts),
             }),
             logging: Some(PartialLoggingConfig {
                 level: Some(logging.level),
@@ -460,6 +466,7 @@ impl From<ResolvedConfig> for PartialConfig {
             }),
             sessions: Some(sessions.into()),
             memory: Some(memory.into()),
+            judge: Some(judge.into()),
             attachments: Some(attachments.into()),
             voice: Some(PartialVoiceConfig {
                 transcription_model: voice.transcription_model,
@@ -526,6 +533,8 @@ impl_merge_overlay!(PartialServerConfig { host, port, access });
 impl_merge_overlay!(PartialSandboxConfig {
     enabled,
     allow_degraded_execution,
+    network,
+    egress_hosts,
 });
 impl_merge_overlay!(PartialLoggingConfig { level });
 impl_merge_overlay!(PartialContextConfig {
@@ -738,6 +747,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             PartialSessionsConfig::overlay,
         ),
         memory: merge_section(base.memory, overlay.memory, PartialMemoryConfig::overlay),
+        judge: merge_section(base.judge, overlay.judge, PartialJudgeConfig::overlay),
         attachments: merge_section(
             base.attachments,
             overlay.attachments,
@@ -840,6 +850,8 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             allow_degraded_execution: sb
                 .allow_degraded_execution
                 .unwrap_or(dsb.allow_degraded_execution),
+            network: sb.network.unwrap_or(dsb.network),
+            egress_hosts: sb.egress_hosts.unwrap_or(dsb.egress_hosts),
         },
         logging: LoggingConfig {
             level: lg.level.unwrap_or(dlg.level),
@@ -1031,6 +1043,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         sessions: partial.sessions.unwrap_or_default().resolve(),
         memory: partial.memory.unwrap_or_default().resolve(),
+        judge: partial.judge.unwrap_or_default().resolve(),
         attachments: partial.attachments.unwrap_or_default().resolve(),
         voice: {
             let v = partial.voice.unwrap_or_default();

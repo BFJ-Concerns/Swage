@@ -46,12 +46,12 @@ impl Tool for PythonExecuteTool {
          defined in one call exists in the next, and only what the program prints comes \
          back. The standard library can be imported and third-party packages cannot. An \
          exception fails the call with its traceback, and so does running past the \
-         installation's time limit. Unless the operator has lifted it, the program runs \
-         sandboxed: it starts in an empty directory of its own, anything it writes there is \
-         gone when the call ends, and neither the session's files nor the network can be \
-         reached from inside it, by `open` or by any standard-library module. The program \
-         reaches files, commands and the web through the `swage` module, which is already in \
-         scope. Each of its functions makes one call to the tool it is named for and returns \
+         installation's time limit. The program starts in the session's working directory \
+         and runs as a `shell` command would: unless the operator has lifted the sandbox, it \
+         can change files under the working directory and little outside it, and it reaches \
+         the network only as far as the operator lets sandboxed commands reach it. The \
+         `swage` module, already in scope, calls the session's other tools from inside the \
+         program. Each of its functions makes one call to the tool it is named for and returns \
          that tool's result object, the same fields a direct call gives: \
          `swage.read_file(path)`, `swage.write_file(path, content)`, \
          `swage.edit_files(changes)`, `swage.list_files(path)`, \
@@ -102,20 +102,16 @@ impl Tool for PythonExecuteTool {
             "python_execute requires gateway execution context",
         )?;
 
-        // The tools the worker calls run through the session's own
-        // dispatcher — the turn's registry, permissions and execution
-        // strategy — so a nested call meets every gate the model's own call
-        // meets. Without one there is nothing to gate them, and the call
-        // fails closed rather than run them ungated.
-        let session_dispatcher = gateway_ctx.session_dispatcher().ok_or_else(|| {
-            ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: "python_execute needs the session's tool dispatcher to run the tools the worker calls"
-                    .to_string(),
-            }
-        })?;
+        let execution =
+            gateway_ctx
+                .python_execution
+                .as_ref()
+                .ok_or_else(|| ToolError::ExecutionFailed {
+                    name: self.name().into(),
+                    message: "Python execution requires the calling turn's policy".into(),
+                })?;
         let nested_runtime = NestedToolRuntime::new(
-            Arc::clone(session_dispatcher),
+            Arc::clone(&execution.dispatcher),
             gateway_ctx.ws_tx().clone(),
             Arc::clone(&self.storage),
             turn_id,
@@ -125,7 +121,7 @@ impl Tool for PythonExecuteTool {
 
         let mut lease = self
             .pool
-            .acquire()
+            .acquire_for_turn(execution.sandbox.clone(), execution.egress.clone())
             .await
             .map_err(|error| ToolError::ExecutionFailed {
                 name: self.name().to_owned(),

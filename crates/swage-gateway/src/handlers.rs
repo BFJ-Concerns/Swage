@@ -2177,6 +2177,9 @@ async fn execute_external_delegate_message(
         approval_registrar: Some(crate::turn::build_approval_registrar(
             state.approval_channels.clone(),
         )),
+        request_judge: Some(Arc::new(crate::request_judge::GatewayRequestJudge::new(
+            state.clone(),
+        ))),
         delegation_handler: Some(Arc::new(delegation_handler)),
         router: router.clone(),
         active_delegations: swage_agent::active_delegations(),

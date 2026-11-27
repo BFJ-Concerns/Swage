@@ -87,3 +87,6 @@ mod worktree_recovery_gateway_integration;
 
 #[path = "integration/provider_refusal_gateway_integration.rs"]
 mod provider_refusal_gateway_integration;
+
+#[path = "integration/sandbox_development_integration.rs"]
+mod sandbox_development_integration;

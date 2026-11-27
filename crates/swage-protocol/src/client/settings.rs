@@ -366,14 +366,41 @@ pub struct HitlConfig {
 pub struct SandboxConfig {
     pub enabled: bool,
     pub allow_degraded_execution: bool,
+    /// What a sandboxed command can reach on the network.
+    pub network: SandboxNetwork,
+    /// Under the recorded proxy, the hosts a sandboxed command reaches
+    /// without the judge being asked: an exact host, or `*.suffix` for a
+    /// host and every name beneath it. Any other host goes to the request
+    /// judge and fails closed without its yes. Read only when `network` is
+    /// `proxy`.
+    pub egress_hosts: Vec<String>,
 }
-/// Every turn is sandboxed unless configuration turns it off, and running
-/// without isolation after a failed sandbox setup needs its own opt-in.
+
+/// What a sandboxed command can reach on the network.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxNetwork {
+    /// The host's network, directly, as an unsandboxed command reaches it.
+    #[default]
+    Open,
+    /// No network at all.
+    None,
+    /// Only through the gateway's recording proxy: every destination is
+    /// recorded, a listed host is reached, and any other host is put to the
+    /// request judge.
+    Proxy,
+}
+
+/// Every turn is sandboxed unless configuration turns it off, running
+/// without isolation after a failed sandbox setup needs its own opt-in, and
+/// a sandboxed command reaches the network as the host does.
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             allow_degraded_execution: false,
+            network: SandboxNetwork::Open,
+            egress_hosts: Vec::new(),
         }
     }
 }
@@ -597,6 +624,21 @@ settings_section! {
     }
 }
 
+settings_section! {
+    /// The judging model: who answers for a request a session's grants do
+    /// not cover — alone in an unattended turn, and first in an attended one,
+    /// where the person takes the cases it is not sure of.
+    section "judge" as JudgeConfig / PartialJudgeConfig {
+        /// The model catalogue key, or an alias, of the model that judges
+        /// such requests. Empty means no judge, and an unattended request
+        /// beyond the session's grants then fails closed.
+        model: String = String::new(),
+    }
+    problems(_section) {
+        Vec::new()
+    }
+}
+
 /// Model routes for voice, served by the default provider's endpoint. An
 /// unset id leaves that capability unavailable.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, TS)]
@@ -631,6 +673,7 @@ pub struct SettingsResponse {
     pub communication: CommunicationConfig,
     pub sessions: SessionsConfig,
     pub memory: MemoryConfig,
+    pub judge: JudgeConfig,
     pub attachments: AttachmentsConfig,
     pub voice: VoiceConfig,
     pub restart_required: bool,
@@ -684,6 +727,9 @@ pub struct SaveSettingsRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub memory: Option<MemoryConfig>,
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub judge: Option<JudgeConfig>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub attachments: Option<AttachmentsConfig>,

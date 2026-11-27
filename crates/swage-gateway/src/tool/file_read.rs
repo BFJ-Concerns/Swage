@@ -54,6 +54,10 @@ impl Tool for FileReadTool {
                     "type": "integer",
                     "minimum": 0,
                     "description": "Where in the file to start, counted in bytes: the `next_offset_bytes` of the result being continued. Omit to read from the beginning."
+                },
+                "justification": {
+                    "type": "string",
+                    "description": "Why this file is needed when it lies outside the session's granted locations, in one or two sentences. Read by the judge that answers for the request, and by the person when one is watching and the judge is not sure; omitted, the request is weighed without a reason."
                 }
             },
             "required": ["path"]
