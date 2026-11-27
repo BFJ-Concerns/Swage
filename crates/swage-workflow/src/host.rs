@@ -110,6 +110,12 @@ pub struct AgentCallRequest {
     pub fallback_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
+    /// The least effort the call accepts being served at. The host refuses
+    /// the call before its worker starts where the model it would run on
+    /// would serve it below this — a clamp to a lower level the model does
+    /// support, no effort set, or a model that takes no effort control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_effort: Option<Effort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
