@@ -10989,9 +10989,12 @@ async fn startup_recovery_redrives_a_continuation_after_its_worker_turn_was_orph
         .iter()
         .find(|worker| worker.journal_entry_id == started.id)
         .expect("the continuation is done");
-    assert!(redispatched.redispatched_after_interruption);
+    assert_eq!(
+        redispatched.redispatch_causes,
+        vec![WorkflowAttemptCause::AfterInterruption]
+    );
     assert!(
-        !account.workers.done[0].redispatched_after_interruption
+        account.workers.done[0].redispatch_causes.is_empty()
             || account.workers.done[0].journal_entry_id == started.id,
         "the worker that settled before the death is not marked"
     );
@@ -16983,7 +16986,7 @@ async fn declared_fallback_model_retries_only_before_output_and_records_the_serv
     let account: swage_protocol::client::workflow::WorkflowRunTerminalAccount =
         serde_json::from_value(run.terminal_account.clone().expect("terminal account"))
             .expect("account");
-    assert!(!account.workers.done[0].redispatched_after_interruption);
+    assert!(account.workers.done[0].redispatch_causes.is_empty());
     // The rounds of the fallback's turn number as the record numbers the
     // attempts — the second — even when the primary's attempt never
     // resolved a turn.
@@ -20631,13 +20634,20 @@ mod dispatch_attempt_reader_tests {
                 assert!(actual.unwrap_err().contains(&entry.id.to_string()));
             } else {
                 assert!(actual.is_ok(), "valid worker must be accounted: {actual:?}");
-                assert_eq!(actual.unwrap().redispatched_after_interruption, has_attempt);
+                assert_eq!(
+                    actual.unwrap().redispatch_causes,
+                    if has_attempt {
+                        vec![WorkflowAttemptCause::AfterInterruption]
+                    } else {
+                        vec![]
+                    }
+                );
             }
         }
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn redispatch_after_provider_failure_keeps_the_repeated_effects_warning() {
+    async fn terminal_account_names_the_recorded_provider_failure_that_caused_redispatch() {
         let (storage, entry) = entry_with_attempts(Some(serde_json::json!([]))).await;
         let run = storage
             .get_workflow_run(entry.run_id)
@@ -20673,7 +20683,9 @@ mod dispatch_attempt_reader_tests {
             .expect("cause");
         assert_eq!(
             cause,
-            WorkflowAttemptCause::AfterProviderFailure { failure }
+            WorkflowAttemptCause::AfterProviderFailure {
+                failure: failure.clone()
+            }
         );
 
         let resumed_turn = worker_turn(&storage, run.topic_id, "replayed attempt").await;
@@ -20686,8 +20698,14 @@ mod dispatch_attempt_reader_tests {
             .iter()
             .find(|row| row.id == entry.id)
             .expect("replayed call");
-        let worker = worker_account(replayed, &HashMap::new(), None).expect("worker account");
-        assert!(worker.redispatched_after_interruption);
+        let detail = journal_wire(replayed.clone(), None).expect("worker detail");
+        let attempts = detail.agent_call.unwrap().dispatch.unwrap().attempts;
+        let account = terminal_account_from_journal(&entries, WorkflowRunEnding::Cancelled, None)
+            .expect("terminal account");
+        assert_eq!(
+            account.workers.cut_short[0].redispatch_causes,
+            vec![attempts[1].cause.clone()]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
