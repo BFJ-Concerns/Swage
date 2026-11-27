@@ -33,7 +33,8 @@ pub struct PairingCodeResponse {
     pub expires_at: DateTime<Utc>,
 }
 
-/// Redeem a pairing code for the gateway's token.
+/// Redeem a pairing code for the gateway's token. A few wrong codes in a row
+/// spend every outstanding code, and the person pairing issues a new one.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 #[ts(optional_fields = nullable)]
@@ -58,6 +59,7 @@ pub struct AccessStatusResponse {
     /// Whether the gate applies to this gateway's binding at all.
     pub gated: bool,
     pub mode: AccessGateMode,
-    /// Whether this request carried the token, or came from loopback.
+    /// Whether this request carried the token or came from the gateway's
+    /// own machine: over loopback, or from the address it is bound to.
     pub admitted: bool,
 }

@@ -37,7 +37,7 @@
         "description": "Whether the connection the request arrived on is admitted, and why: the\nweb UI reads it to decide whether to ask for a pairing code.",
         "properties": {
           "admitted": {
-            "description": "Whether this request carried the token, or came from loopback.",
+            "description": "Whether this request carried the token or came from the gateway's\nown machine: over loopback, or from the address it is bound to.",
             "type": "boolean"
           },
           "gated": {
@@ -3259,7 +3259,7 @@
       },
       "PairClientRequest": {
         "additionalProperties": false,
-        "description": "Redeem a pairing code for the gateway's token.",
+        "description": "Redeem a pairing code for the gateway's token. A few wrong codes in a row\nspend every outstanding code, and the person pairing issues a new one.",
         "properties": {
           "pairing_code": {
             "type": "string"
@@ -11132,7 +11132,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Redeem a pairing code for the gateway's token, set as the browser's cookie."
+        "summary": "Redeem a pairing code for the gateway's token, set as the browser's cookie; a few wrong codes spend every outstanding code."
       }
     },
     "/api/pair/codes": {
@@ -11154,7 +11154,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Issue a one-time pairing code; loopback only."
+        "summary": "Issue a one-time pairing code; from the gateway's own machine only, over loopback or from its bound address."
       }
     },
     "/api/secrets": {

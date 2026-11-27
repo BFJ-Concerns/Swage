@@ -276,10 +276,16 @@ The gateway listens on `127.0.0.1:3000` by default. Set `[server] host` and
 ./target/debug/swage gateway start --host 192.0.2.10 --port 3000
 ```
 
-**The gateway has no authentication.** Binding to a private-network address
-trusts every host on that network with the full API and every configured
-provider key. Public-internet exposure is not supported. Remember that the
-host firewall must also allow the port before LAN clients can connect.
+Bound to any address but loopback, the gateway serves another machine only
+once that client has paired: run `swage gateway pair` on the gateway's
+machine for a one-time code and enter it on the client, which remembers the
+gateway's token from then on. A few wrong codes spend every outstanding code.
+Requests from the gateway's own machine need no pairing. The gate is a token,
+not authentication for the public internet, so bind only to a trusted private
+network such as a LAN or a tailnet. The host firewall must also allow the port
+before other machines can connect. [Pairing beyond
+loopback](docs/interfaces-and-tooling.md#pairing-beyond-loopback) covers each
+client and how the gate can be relaxed.
 
 ### A second, isolated instance
 

@@ -486,7 +486,8 @@ mod tests {
     use crate::{state::AppState, turn::tests::MockProvider};
 
     /// A binding beyond loopback admits an unpaired request only to liveness
-    /// and pairing; a paired request, or one from loopback, reaches everything.
+    /// and pairing; a paired request, or one from the gateway's own machine,
+    /// reaches everything.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lan_binding_admits_paired_and_loopback_requests_only() {
         use axum::extract::ConnectInfo;
@@ -605,10 +606,10 @@ mod tests {
             401
         );
 
-        // Pairing codes are issued from loopback only — a remote request is
-        // refused by the gate before the handler sees it, and a paired remote
-        // by the handler — and redeem once for the token, set as the cookie a
-        // browser carries thereafter.
+        // Pairing codes are issued from the gateway's own machine only — a
+        // remote request is refused by the gate before the handler sees it,
+        // and a paired remote by the handler — and redeem once for the token,
+        // set as the cookie a browser carries thereafter.
         assert_eq!(
             send(router.clone(), "POST", "/api/pair/codes", vec![], None)
                 .await

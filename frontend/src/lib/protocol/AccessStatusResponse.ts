@@ -11,6 +11,7 @@ export type AccessStatusResponse = {
  */
 gated: boolean, mode: AccessGateMode,
 /**
- * Whether this request carried the token, or came from loopback.
+ * Whether this request carried the token or came from the gateway's
+ * own machine: over loopback, or from the address it is bound to.
  */
 admitted: boolean, };

@@ -343,12 +343,12 @@ export async function accessStatus(): Promise<AccessStatusResponse> {
   return request<AccessStatusResponse>("GET", `/api/access`);
 }
 
-/** Issue a one-time pairing code; loopback only. */
+/** Issue a one-time pairing code; from the gateway's own machine only, over loopback or from its bound address. */
 export async function issuePairingCode(): Promise<PairingCodeResponse> {
   return request<PairingCodeResponse>("POST", `/api/pair/codes`);
 }
 
-/** Redeem a pairing code for the gateway's token, set as the browser's cookie. */
+/** Redeem a pairing code for the gateway's token, set as the browser's cookie; a few wrong codes spend every outstanding code. */
 export async function pairClient(body: PairClientRequest): Promise<PairClientResponse> {
   return request<PairClientResponse>("POST", `/api/pair`, body);
 }
