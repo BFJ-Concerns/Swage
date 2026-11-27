@@ -1251,6 +1251,167 @@ mod approval_tests {
         }
     }
 
+    /// A waited child that answers with the error it ended on.
+    struct ErroredDelegation(String);
+
+    #[async_trait::async_trait]
+    impl crate::delegation::DelegationHandler for ErroredDelegation {
+        async fn handle_delegation(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<Value>,
+            _: Option<String>,
+            _: Option<swage_protocol::client::workflow::WorkerIsolation>,
+            _: Option<Vec<String>>,
+            _: Option<&str>,
+            _: swage_core::DispatchContextComposition,
+            _: &str,
+            _: &str,
+            _: Uuid,
+            _: Uuid,
+            _: tokio_util::sync::CancellationToken,
+            _: swage_core::DelegateCompletionMode,
+        ) -> Result<crate::delegation::DelegationOutcome, AgentError> {
+            Ok(crate::delegation::DelegationOutcome::Completed(
+                serde_json::json!({ "error": self.0 }),
+            ))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waited_child_that_was_stopped_or_failed_is_not_a_successful_call() {
+        use swage_protocol::client::conversation::{
+            ToolCompletion, ToolExecution, ToolExecutionStage, ToolOutcome,
+        };
+        use swage_storage::store::ToolCallStore;
+        let stopped = AgentError::Cancelled.to_string();
+        for (child_error, expected_status, expected_execution) in [
+            (
+                stopped.as_str(),
+                "cancelled",
+                ToolExecution {
+                    outcome: ToolOutcome::Cancelled,
+                    stage: ToolExecutionStage::Finished,
+                    completion: ToolCompletion::Confirmed,
+                },
+            ),
+            ("child failed", "error", ToolExecution::failed()),
+        ] {
+            let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+            let topic = storage.general_scope().await.unwrap();
+            let session = storage
+                .create_session(swage_storage::fixtures::new_session(topic.id))
+                .await
+                .unwrap();
+            let thread = ThreadStore::create(
+                &*storage,
+                NewThread {
+                    session_id: session.id,
+                    agent_id: "agent".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let turn = storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: "agent".into(),
+                    state: TurnState::Pending,
+                    user_input: Some("survey".into()),
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+            let mut registry = swage_tool::registry::ToolRegistry::new();
+            registry
+                .register_builtin(Arc::new(swage_tool::delegate::DelegateTool))
+                .unwrap();
+            let agent = Agent {
+                config: AgentConfig::new("agent").with_workspace("/work", vec!["/work".into()]),
+                provider: Arc::new(DelegateThenWait(AtomicBool::new(false))),
+                storage: storage.clone(),
+                tool_dispatcher: Some(ToolDispatcher::new(
+                    Arc::new(registry),
+                    swage_tool::permission::PermissionConfig {
+                        allow: vec!["*".into()],
+                        deny: vec![],
+                        bundles: std::collections::HashMap::new(),
+                        require_approval: vec![],
+                    },
+                    Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+                    swage_tool::rate_limit::RateLimitConfig::default(),
+                    Arc::new(LeakDetector::default()),
+                    false,
+                )),
+                hook_registry: None,
+                leak_detector: None,
+                approval_registrar: None,
+                request_judge: None,
+                delegation_handler: Some(Arc::new(ErroredDelegation(child_error.to_owned()))),
+                context_transfer_config: swage_config::ContextTransferConfig::default(),
+            };
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let running = agent.process_turn_streaming(
+                TurnRequest {
+                    execution: TurnExecutionContext {
+                        session_id: session.id,
+                        thread_id: thread.id,
+                        turn_id: turn.id,
+                        topic_id: Some(topic.id),
+                    },
+                    user_message: "survey".into(),
+                    assembled_context: vec![ChatMessage::new(Role::User, "survey")],
+                    parent_turn_id: None,
+                    existing_turn_id: Some(turn.id),
+                    cancellation_token: tokio_util::sync::CancellationToken::new(),
+                    compaction_focus: None,
+                    effort: None,
+                },
+                event_tx,
+            );
+            let inspect = async {
+                let mut delegation_succeeded = None;
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        AgentEvent::DelegationCompleted { success, .. } => {
+                            delegation_succeeded = Some(success);
+                        }
+                        AgentEvent::ToolEnd {
+                            status, execution, ..
+                        } => {
+                            assert_eq!(delegation_succeeded, Some(false), "{child_error}");
+                            assert_eq!(status, expected_status, "{child_error}");
+                            assert_eq!(execution, Some(expected_execution), "{child_error}");
+                            let call = storage
+                                .get_tool_call_by_turn_and_call_id(turn.id, "call-worker")
+                                .await
+                                .unwrap()
+                                .unwrap();
+                            assert_eq!(call.status.as_deref(), Some(expected_status));
+                            assert_eq!(call.execution, Some(expected_execution));
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                panic!("tool result was not emitted");
+            };
+            Box::pin(tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                async {
+                    tokio::select! {
+                        () = inspect => {},
+                        result = running => panic!("turn ended before its tool result: {result:?}"),
+                    }
+                },
+            ))
+            .await
+            .expect("the delegation settles");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failed_delegation_settlement_is_not_consumed_by_the_next_tool() {
         use swage_storage::store::ToolCallStore;
@@ -3891,14 +4052,42 @@ impl Agent {
                             .get("incomplete_reason")
                             .and_then(|v| v.as_str())
                             .map(str::to_owned);
+                        // A child that ended in error answers with `error`
+                        // in place of a response; one stopped answers with
+                        // the cancellation's own error.
+                        let child_error = result.get("error").and_then(Value::as_str);
                         let _ = event_tx.send(AgentEvent::DelegationCompleted {
                             incomplete_reason: incomplete_reason.clone(),
                             target_agent_id: target_agent_id.clone(),
-                            success: incomplete_reason.is_none(),
+                            success: incomplete_reason.is_none() && child_error.is_none(),
                         });
                         let result_str = serde_json::to_string(&result).unwrap_or_default();
-                        let mut delivered: ToolDispatchResult =
-                            (result_str, false, "success".to_string()).into();
+                        let mut delivered: ToolDispatchResult = match child_error {
+                            None => (result_str, false, "success".to_string()).into(),
+                            Some(error) if error == AgentError::Cancelled.to_string() => {
+                                let mut cancelled: ToolDispatchResult = (
+                                    result_str,
+                                    true,
+                                    swage_storage::store::CANCELLED_TOOL_STATUS.to_string(),
+                                )
+                                    .into();
+                                cancelled.execution =
+                                    swage_protocol::client::conversation::ToolExecution {
+                                        outcome:
+                                            swage_protocol::client::conversation::ToolOutcome::Cancelled,
+                                        stage: swage_protocol::client::conversation::ToolExecutionStage::Finished,
+                                        completion: swage_protocol::client::conversation::ToolCompletion::Confirmed,
+                                    };
+                                cancelled
+                            }
+                            Some(_) => {
+                                let mut failed: ToolDispatchResult =
+                                    (result_str, true, "error".to_string()).into();
+                                failed.execution =
+                                    swage_protocol::client::conversation::ToolExecution::failed();
+                                failed
+                            }
+                        };
                         delivered.delivered = true;
                         Ok(delivered)
                     }
