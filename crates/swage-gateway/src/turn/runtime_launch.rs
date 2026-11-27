@@ -82,6 +82,16 @@ pub(crate) async fn served_effort_capability(
     }
 }
 
+/// The effort a turn on `config`'s selected model would be served at when it
+/// asks for `requested`.
+pub(crate) async fn served_effort(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    requested: swage_core::Effort,
+) -> swage_core::ResolvedEffort {
+    swage_core::resolve_effort(requested, &served_effort_capability(state, config).await)
+}
+
 /// The output limit a turn's request carries: the caller's own value (a
 /// generation preset's `max_tokens`), else the catalogue entry's declaration,
 /// else the provider adapter's account of the documented limit for the
@@ -103,7 +113,7 @@ pub(crate) fn output_limit_for_model(
 
 /// The effort a turn asks for: the caller's override, else the session's
 /// recorded effort, else the selected (or default) model's default effort.
-pub(super) fn requested_effort(
+pub(crate) fn requested_effort(
     effort_override: Option<swage_core::Effort>,
     session_metadata: Option<&serde_json::Value>,
     selected_model_id: Option<&str>,

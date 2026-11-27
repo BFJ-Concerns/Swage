@@ -2930,6 +2930,15 @@ async fn run_ephemeral_agent_call_with_admission(
             "AgentCallError: {error}"
         )));
     }
+    // A named model the catalogue lacks reaches here only when its declared
+    // fallback will serve the call, and `call_config` then names neither.
+    if let Some(floor) = request.min_effort
+        && request.model.as_deref().is_none_or(|model| {
+            crate::turn::resolve_requested_turn_model(&call_config, model).is_ok()
+        })
+    {
+        refuse_below_effort_floor(state, &call_config, &request, floor).await?;
+    }
     // This identity deliberately cannot name an agent definition: definition
     // ids exclude underscores. Bare workflow workers therefore receive the
     // inherited session configuration, bounded by their dispatch ancestry,
@@ -4396,6 +4405,64 @@ async fn resolve_agent_call_config(
         config,
         selected_model.as_deref(),
     ))
+}
+
+/// Refuse a call that declares the least effort it accepts (`minEffort`)
+/// where the model it would run on would serve it below that: its effort
+/// clamped to a lower level the model does support, no effort set for it at
+/// all, or a model that takes no effort control. The refusal is the call's
+/// own failure, raised before a worker exists and journalled with the call.
+///
+/// `config` is the call's resolved configuration, its default model the one
+/// the call would run on.
+async fn refuse_below_effort_floor(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    request: &AgentCallRequest,
+    floor: swage_core::Effort,
+) -> Result<(), WorkflowHostError> {
+    let continued_session_metadata = match request.session.as_ref() {
+        Some(session_ref) => state
+            .storage
+            .get_session(session_ref.session_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .and_then(|session| session.metadata),
+        None => None,
+    };
+    let requested = crate::turn::requested_effort(
+        request.effort,
+        continued_session_metadata.as_ref(),
+        None,
+        config,
+    )
+    .map_err(|error| format!("AgentCallError: {error}"))?;
+    // The catalogue id, as a script names the model.
+    let model = &config.models.default;
+    let shortfall = match requested {
+        None => Some(format!(
+            "no effort is set for the call and model '{model}' has no default effort"
+        )),
+        Some(requested) => {
+            let resolved = crate::turn::served_effort(state, config, requested).await;
+            match resolved.control {
+                swage_core::EffortControl::Omitted => {
+                    Some(format!("model '{model}' takes no effort control"))
+                }
+                _ => {
+                    let served = resolved.clamped_to.unwrap_or(resolved.requested);
+                    (served < floor)
+                        .then(|| format!("model '{model}' would serve {requested} as {served}"))
+                }
+            }
+        }
+    };
+    match shortfall {
+        None => Ok(()),
+        Some(shortfall) => Err(WorkflowHostError::Message(format!(
+            "EffortFloorError: the call accepts no effort below {floor} (minEffort), but {shortfall}"
+        ))),
+    }
 }
 
 /// The fallback model a call may fall back to, if it declared one it is

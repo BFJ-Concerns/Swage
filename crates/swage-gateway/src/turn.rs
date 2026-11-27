@@ -87,10 +87,10 @@ pub(crate) use operator_guidance::*;
 pub(crate) use projection::route_approval_agent_event;
 use projection::{ProjectedTurn, TurnProjection, project_agent_events};
 pub(crate) use provider_record::*;
-pub(crate) use runtime_launch::served_effort_capability;
-use runtime_launch::{RuntimeLaunch, launch_turn_runtime, requested_effort};
+use runtime_launch::{RuntimeLaunch, launch_turn_runtime};
 #[cfg(test)]
 use runtime_launch::{effort_capability_for_model, output_limit_for_model};
+pub(crate) use runtime_launch::{requested_effort, served_effort, served_effort_capability};
 use sandbox_approval::{
     SandboxDegradationApproval, SandboxDegradationApprovalRequest,
     request_sandbox_degradation_approval,

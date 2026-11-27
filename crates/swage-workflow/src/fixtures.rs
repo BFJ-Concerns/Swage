@@ -14,6 +14,7 @@ pub fn agent_call_request(prompt: String) -> AgentCallRequest {
         model: None,
         fallback_model: None,
         effort: None,
+        min_effort: None,
         timeout_ms: None,
         cwd: None,
         isolation: None,
