@@ -50,11 +50,12 @@ impl Tool for ShellTool {
          starts a new shell: a change of directory or a variable set in one call is gone in \
          the next. A command still running at the installation's time limit is stopped, \
          along with every process it started, and the call fails saying so. The two streams \
-         share the installation's output limit. One that is cut to fit keeps its beginning, \
-         is marked in `output` where it stops and flagged (`stdout_truncated`, \
-         `stderr_truncated`), and the result then gives the path of a file holding the whole \
-         of that stream (`stdout_artifact_path`, `stderr_artifact_path`), which `file_read` \
-         opens. Unless the operator has \
+         share the installation's output limit. One too long to fit keeps its beginning and \
+         its end: a bracketed line in `output` stands where the middle was left out and says \
+         how many bytes that was, the stream is flagged (`stdout_truncated`, \
+         `stderr_truncated`), and the result gives the path of a file holding the whole of \
+         it (`stdout_artifact_path`, `stderr_artifact_path`), which `file_read` opens. \
+         Unless the operator has \
          lifted it, the command runs sandboxed: it can change files under the working \
          directory and little outside it, so a write refused elsewhere is that boundary and \
          not a fault to retry. The file tools read, write, edit and search files directly; \
@@ -278,20 +279,30 @@ impl BoundedRead {
 }
 
 impl ReportedStream {
-    /// The stream's text, ending in a note where it was cut so that the
-    /// reader does not take the cut for the stream's end.
+    /// The stream's text, with the cut marked where part of it was left
+    /// out so that the reader does not take what it holds for the whole.
     fn display(&self, stream: &str) -> String {
         let text = String::from_utf8_lossy(&self.bytes);
         if self.truncated {
-            format!(
-                "{text}\n[{stream} cut here: the first {} of {} bytes]\n",
-                self.bytes.len(),
-                self.total_bytes
-            )
+            let marker = cut_marker(
+                stream,
+                self.total_bytes - self.bytes.len(),
+                self.total_bytes,
+            );
+            format!("{text}{marker}")
         } else {
             text.into_owned()
         }
     }
+}
+
+/// The line that stands in `output` for the part of a cut stream left out,
+/// at the place it was taken from. It sits on a line of its own, in
+/// brackets and naming its stream, so that it is not read as something the
+/// command printed, and counts what is missing so that the reader knows how
+/// much of the stream it has not seen.
+fn cut_marker(stream: &str, omitted_bytes: usize, total_bytes: usize) -> String {
+    format!("\n[{stream} cut here: {omitted_bytes} of {total_bytes} bytes left out]\n")
 }
 
 /// How many bytes of each stream fit under `cap` together. Both are kept
@@ -616,7 +627,7 @@ mod tests {
         let output = val["output"].as_str().unwrap();
         assert_eq!(val["exit_code"], json!(0));
         assert_eq!(
-            output, "1234567890\n[stdout cut here: the first 10 of 1000 bytes]\n",
+            output, "1234567890\n[stdout cut here: 990 of 1000 bytes left out]\n",
             "the stream is cut at the limit and marked where it stops"
         );
         assert_eq!(val["truncated"], json!(true));
@@ -721,7 +732,7 @@ mod tests {
         assert_eq!(val["exit_code"], json!(1));
         assert_eq!(
             output,
-            "stderr: 1234567890\n[stderr cut here: the first 10 of 1000 bytes]\n"
+            "stderr: 1234567890\n[stderr cut here: 990 of 1000 bytes left out]\n"
         );
         assert_eq!(val["truncated"], json!(true));
         assert_eq!(val["stderr_truncated"], json!(true));
