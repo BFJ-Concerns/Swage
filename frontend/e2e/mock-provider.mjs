@@ -89,6 +89,10 @@ async function handle(request, response) {
     await textResponse(response, ["Partial response at the output limit."], 30, "max_tokens");
   } else if (lastText === "refuse this turn") {
     await textResponse(response, ["Recorded refusal from the provider."], 30, "refusal");
+  } else if (lastText === "wait for an incomplete child") {
+    toolResponse(response, "wait-child", "delegate", { target_agent: "gateway", task: "child reaches output limit" });
+  } else if (lastText?.includes("child reaches output limit")) {
+    await textResponse(response, ["Child response cut short."], 30, "max_tokens");
   } else if (definitionResult) {
     await textResponse(response, ["Definition tool returned to the provider."]);
   } else if (lastText === "Create a preferred agent") {

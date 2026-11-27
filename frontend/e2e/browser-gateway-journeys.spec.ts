@@ -422,6 +422,14 @@ test("retries the complete failed batch before and after reload", async ({ page 
   await expect(page.getByLabel("Your message").last()).toHaveText(/failed batch first\s+failed batch second/);
 });
 
+test("reports the waited child's incomplete reply live and after reload", async ({ page }) => {
+  await send(page, "wait for an incomplete child");
+  await expect(page.getByText("Child response incomplete", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText("Child response incomplete", { exact: true })).toBeVisible();
+});
+
 test("approves a pending tool call through the rendered UI", async ({ page }) => {
   await send(page, "approve a tool");
   const approval = page.getByRole("dialog", { name: "Approval required" });
