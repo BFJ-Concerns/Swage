@@ -8,6 +8,7 @@
 -->
 <script lang="ts">
   import { cancelWorkflowRun } from "../api/workflow-runs";
+  import { describeRedispatchCause } from "../run-attempts";
   import { formatRunTime } from "../run-times";
   import { conversationPath } from "../router";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
@@ -94,14 +95,6 @@
     return worker.label ?? `worker ${worker.seq}`;
   }
 
-  // A worker dispatched again after an interruption is marked where it
-  // stands: its interrupted attempt's tool calls have unknown outcomes.
-  function describeRedispatch(worker: WorkflowWorkerAccount): string | null {
-    return worker.redispatched_after_interruption
-      ? "redispatched after an interruption — tool calls from the earlier attempt may have been applied twice"
-      : null;
-  }
-
   const placements = $derived(
     [...new Set(partitions.flatMap(([, workers]) => workers.map((worker) => worker.placement ?? null)))],
   );
@@ -126,7 +119,7 @@
   const redispatchedAny = $derived(
     account
       ? Object.values(account.workers).some((workers) =>
-          workers.some((worker) => worker.redispatched_after_interruption),
+          workers.some((worker) => worker.redispatch_causes.length > 0),
         )
       : false,
   );
@@ -188,7 +181,7 @@
         {/if}
         {#if redispatchedAny}
           <p class="detail disclosure">
-            Workers redispatched after an interruption may have repeated their effects.
+            Workers dispatched again during replay may have repeated their effects.
           </p>
         {/if}
       </section>
@@ -218,9 +211,12 @@
                         </span>
                         <span class="detail">{describeTermination(worker)}</span>
                         {#if result?.kind === "agent_call"}<span class="output">{renderOutput(result.output)}</span>{/if}
-                        {#if describeRedispatch(worker)}
-                          <span class="detail redispatch">{describeRedispatch(worker)}</span>
-                        {/if}
+                        {#each worker.redispatch_causes as cause}
+                          {@const reason = describeRedispatchCause(cause)}
+                          {#if reason}
+                            <span class="detail redispatch">Dispatched again {reason}. Earlier tool calls may have been applied twice.</span>
+                          {/if}
+                        {/each}
                       </li>
                     {/each}
                   </ul>

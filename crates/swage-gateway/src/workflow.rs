@@ -3662,10 +3662,8 @@ fn worker_worktree_completion(entry: &WorkflowJournalRecord) -> Option<WorkflowW
         })
 }
 
-/// One worker's standing for the terminal account. An attempt record the
-/// contract cannot read is an error, as it is for every other reader of the
-/// column: a flag read as `false` from an unreadable record would be a
-/// positive statement the record does not make.
+/// One worker's standing for the terminal account. An unreadable attempt
+/// record fails the account because it cannot tell us whether replay redispatched the worker.
 fn worker_account(
     entry: &WorkflowJournalRecord,
     placements: &HashMap<u64, String>,
@@ -3688,13 +3686,17 @@ fn worker_account(
         placement: worker_placement_of(entry, placements),
         worktree: worker_worktree_completion(entry),
         termination,
-        redispatched_after_interruption: attempts.iter().any(|attempt| {
-            matches!(
-                attempt.cause,
-                WorkflowAttemptCause::AfterInterruption
-                    | WorkflowAttemptCause::AfterProviderFailure { .. }
-            )
-        }),
+        redispatch_causes: attempts
+            .into_iter()
+            .map(|attempt| attempt.cause)
+            .filter(|cause| {
+                matches!(
+                    cause,
+                    WorkflowAttemptCause::AfterInterruption
+                        | WorkflowAttemptCause::AfterProviderFailure { .. }
+                )
+            })
+            .collect(),
     })
 }
 
