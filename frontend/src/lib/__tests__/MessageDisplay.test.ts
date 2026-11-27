@@ -334,13 +334,13 @@ describe("provider failure notice", () => {
     expect(document.querySelector(".turn-error p")?.textContent).toBe(reason);
   });
 
-  it("offers generic recovery without inventing a provider or error category", () => {
+  it("shows an unassociated failure without offering to resend an earlier message", () => {
     const streaming = makeStreamingStore();
     Object.defineProperty(streaming, "turnError", { get: () => ({ code: "provider_error", message: "opaque diagnostic" }) });
     component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([{ role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" }]), streamingStore: streaming } });
     flushSync();
     expect(document.querySelector(".turn-error p")?.textContent).toBe("The request failed. See the details for the reported cause.");
-    expect(document.querySelector(".turn-error button")?.textContent).toBe("Retry");
+    expect(document.querySelector(".turn-error button")).toBeNull();
     expect(document.querySelector(".turn-error a")?.textContent).toBe("Provider settings");
   });
 });

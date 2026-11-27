@@ -38,6 +38,12 @@
   const isFailed = $derived(
     toolCall.status === "error" || toolCall.status === "rejected" || toolCall.status === "expired",
   );
+  const childIncomplete = $derived(
+    toolCall.tool === "delegate" && toolCall.status === "success" &&
+    toolCall.result !== null && typeof toolCall.result === "object" &&
+    "incomplete_reason" in toolCall.result && typeof toolCall.result.incomplete_reason === "string",
+  );
+  const isSuccessful = $derived(toolCall.status === "success" && !childIncomplete);
 
   // Accept only complete objects/arrays, even when quoted through several layers.
   function embeddedStructure(text: string): object | undefined {
@@ -198,7 +204,7 @@
 <div
   class="tool-call"
   class:in-progress={isInProgress}
-  class:completed={toolCall.status === "success"}
+  class:completed={isSuccessful}
   class:error={isFailed}
 >
   <!-- ---- Header: tool identity and inline status ---- -->
@@ -206,7 +212,7 @@
     {#if isInProgress}
       <!-- Animated indicator for in-flight calls. -->
       <span class="pulse" aria-hidden="true"></span>
-    {:else if toolCall.status === "success"}
+    {:else if isSuccessful}
       <span class="status-icon success" aria-hidden="true">✓</span>
     {:else if isFailed}
       <span class="status-icon error-icon" aria-hidden="true">✗</span>
@@ -230,7 +236,9 @@
     <p class="model-delivery">{toolCall.model_replay_truncated ? "Later turns receive a preview." : "Later turns receive the full result."}</p>
   {/if}
 
-  {#if toolCall.status === "expired"}
+  {#if childIncomplete}
+    <p role="status">Child response incomplete</p>
+  {:else if toolCall.status === "expired"}
     <p role="status">Approval expired. Retry the operation.</p>
   {/if}
 

@@ -18,7 +18,7 @@
   import { onMount } from "svelte";
   import AppLayout from "./lib/components/AppLayout.svelte";
   import PairingDialog from "./lib/components/PairingDialog.svelte";
-  import { getConversation } from "./lib/api/conversations";
+  import { getConversation, getThread } from "./lib/api/conversations";
   import { fetchSettings } from "./lib/api/settings";
   import { openSharedWorkSurfaceChannel } from "./lib/api/work-surface";
   import { listEffectiveAgentDefinitions } from "./lib/api/agent-definitions";
@@ -53,27 +53,59 @@
   const topicStore = createTopicStore();
   const conversationStore = createConversationStore();
 
-  // A reconnect reconciles the conversation that owns the socket, even while
-  // another conversation is selected.
+  // A turn can outlive the socket it began on. While recovering it, follow
+  // the gateway's session updates as well as the new socket.
   let streamingStore: StreamingStore;
+  const recoveringTurns = new Map<string, number>();
+
+  function recoveringGeneration(conversationId: string): number | undefined {
+    const generation = recoveringTurns.get(conversationId);
+    const stream = streamingStore.streamFor?.(conversationId);
+    if (generation !== undefined && stream?.isStreaming && stream.activeTurnGeneration === generation) {
+      return generation;
+    }
+    recoveringTurns.delete(conversationId);
+    return undefined;
+  }
+
+  async function refreshOpenConversation(): Promise<void> {
+    const conversationId = conversationStore.activeConversation?.id;
+    if (!conversationId) return;
+    const generation = recoveringGeneration(conversationId);
+    await conversationStore.refreshActiveConversation();
+    if (generation !== undefined && conversationStore.activeConversation?.id === conversationId &&
+        (streamingStore.streamFor?.(conversationId).threadId ?? null) === (conversationStore.activeThreadId ?? null)) {
+      streamingStore.reconcileAfterReconnect(generation, conversationId);
+      recoveringGeneration(conversationId);
+    }
+  }
+
   const connectionStore = createConnectionStore({
     onReconnect: async (conversationId) => {
       streamingStore.clearConnectionError(conversationId);
-      const recoveredTurnGeneration = streamingStore.streamFor?.(conversationId)
-        .activeTurnGeneration ?? 0;
-      if (conversationStore.activeConversation?.id === conversationId) {
-        await conversationStore.refreshActiveConversation();
-        streamingStore.reconcileAfterReconnect(recoveredTurnGeneration);
+      const stream = streamingStore.streamFor?.(conversationId);
+      const generation = stream?.isStreaming ? stream.activeTurnGeneration : undefined;
+      if (generation !== undefined) recoveringTurns.set(conversationId, generation);
+      if (conversationStore.activeConversation?.id === conversationId &&
+          (stream?.threadId ?? null) === (conversationStore.activeThreadId ?? null)) {
+        await refreshOpenConversation().catch(() => {});
       } else {
-        const recoveredConversation = await getConversation(conversationId);
-        // The owner may have become active while its off-screen recovery was
-        // pending. Install the same authoritative snapshot in that case.
-        conversationStore.replaceActiveConversationIfCurrent?.(recoveredConversation);
-        streamingStore.reconcileAfterReconnect(
-          recoveredTurnGeneration,
-          conversationId,
-          recoveredConversation.messages,
-        );
+        try {
+          const recoveredConversation = await getConversation(conversationId);
+          const messages = stream?.threadId
+            ? (await getThread(stream.threadId)).messages
+            : recoveredConversation.messages;
+          if (!stream?.threadId && (conversationStore.activeThreadId ?? null) === null &&
+              (generation === undefined || recoveringGeneration(conversationId) === generation)) {
+            conversationStore.replaceActiveConversationIfCurrent?.(recoveredConversation);
+          }
+          if (generation !== undefined && recoveringGeneration(conversationId) === generation) {
+            streamingStore.reconcileAfterReconnect(generation, conversationId, messages, recoveredConversation.queued);
+            recoveringGeneration(conversationId);
+          }
+        } catch {
+          // A failed read leaves the local stream visible.
+        }
       }
     },
   });
@@ -468,8 +500,11 @@
   onMount(() =>
     watchOpenConversation({
       openConversationId: () => conversationStore.activeConversation?.id ?? null,
-      holdsSocket: () => connectionStore.status === "connected",
-      refresh: () => conversationStore.refreshActiveConversation(),
+      holdsSocket: () => {
+        const id = conversationStore.activeConversation?.id;
+        return connectionStore.status === "connected" && (id === undefined || recoveringGeneration(id) === undefined);
+      },
+      refresh: refreshOpenConversation,
     }),
   );
 
