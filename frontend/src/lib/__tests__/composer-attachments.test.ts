@@ -155,7 +155,7 @@ describe("composer attachments", () => {
     const { input, conversations } = await setup();
     let answer!: () => void;
     const answered = new Promise<void>((resolve) => { answer = resolve; });
-    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
       if (init?.method === "POST") {
         await answered;
         return new Response(JSON.stringify({ ...JSON.parse(init.body as string), id: "late", status: "active" }), { status: 200 });
@@ -170,6 +170,15 @@ describe("composer attachments", () => {
     answer();
     await vi.waitFor(() => expect(document.body.textContent).not.toContain("Attaching…"));
     expect(document.body.textContent).not.toContain("late.md");
+  });
+
+  it("attaches a file where the page is served over plain HTTP", async () => {
+    const { created } = await setup();
+    // Outside a secure context the browser offers no crypto.randomUUID.
+    vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
+    choose([new File(["notes"], "notes.md")]);
+    await vi.waitFor(() => expect(document.body.textContent).toContain("notes.md · reference for this session"));
+    expect(created[0].relative_path).toMatch(/^composer\/[0-9a-f-]{36}\/notes\.md$/);
   });
 
   it("registers a folder's text files by their paths and skips the rest", async () => {

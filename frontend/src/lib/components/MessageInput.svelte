@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import { tick } from "svelte";
+  import { randomUuid } from "../random-uuid";
   import { archiveMaterial, createMaterial, listSessionMaterials } from "../api/materials";
   import type { MessageAttachment } from "../protocol/MessageAttachment";
   import type { StreamingStore } from "../stores/streaming";
@@ -152,7 +153,7 @@
       scope_kind: "session",
       session_id: target,
       title,
-      relative_path: `composer/${crypto.randomUUID()}/${segments.join("/")}`,
+      relative_path: `composer/${randomUuid()}/${segments.join("/")}`,
       mime_type: materialMimeType(file.name, file.type),
       content_text: body,
     });
