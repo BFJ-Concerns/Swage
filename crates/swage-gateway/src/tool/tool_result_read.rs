@@ -205,8 +205,8 @@ pub(crate) fn recovered_model_result(record: &swage_storage::ToolCallRecord) -> 
 
 /// Resolve a stored tool-call reference (`tool_call:<turn>:<call>:result`)
 /// to the call it names, provided the call's turn belongs to the current
-/// turn's thread. A reference from another conversation, a malformed one and
-/// a missing call all read as unavailable — nothing leaks which it was.
+/// turn's thread. A malformed reference is invalid. A reference to a missing
+/// call or to another thread is reported as unavailable.
 pub(crate) async fn stored_tool_call_in_current_thread(
     ctx: &dyn ToolContext,
     tool_name: &str,
