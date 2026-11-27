@@ -215,18 +215,48 @@ export type ClientEvent = WireClientEvent;
 export type KnownServerEvent = Exclude<WireServerEvent, { type: "unknown" }>;
 export type KnownServerEventType = KnownServerEvent["type"];
 
-// Runtime validation needs event names as values; entries must belong to the
-// generated wire union.
-export const KNOWN_SERVER_EVENT_TYPES = [
-  "token", "tool_start", "tool_end", "surface_updated", "library_updated", "session_updated", "workflow_run_updated", "agent_definitions_changed", "context_assembled", "turn_complete",
-  "output_schema_retry", "provider_retry_started", "provider_retry_settled",
-  "output_schema_failed", "delegation_started", "delegation_completed",
-  "workflow_run_started", "workflow_entry_started",
-  "workflow_entry_completed", "workflow_run_completed", "error", "cancelled",
-  "lagged", "shutdown", "skill_activated", "skill_already_active", "skill_deactivated",
-  "approval_required", "approval_confirmed", "approval_expired",
-  "approval_decision_error", "message_queued", "queue_drained", "queued_message_sent", "message_appended",
-] as const satisfies readonly KnownServerEventType[];
+// Runtime event recognition must cover every kind in the generated union.
+const serverEventKinds = {
+  token: true,
+  tool_start: true,
+  tool_end: true,
+  surface_updated: true,
+  library_updated: true,
+  session_updated: true,
+  workflow_run_updated: true,
+  agent_definitions_changed: true,
+  context_assembled: true,
+  turn_complete: true,
+  output_schema_retry: true,
+  provider_retry_started: true,
+  provider_retry_settled: true,
+  output_schema_failed: true,
+  delegation_started: true,
+  delegation_completed: true,
+  workflow_run_started: true,
+  workflow_entry_started: true,
+  workflow_entry_completed: true,
+  workflow_run_completed: true,
+  error: true,
+  cancelled: true,
+  lagged: true,
+  shutdown: true,
+  skill_activated: true,
+  skill_already_active: true,
+  skill_deactivated: true,
+  approval_required: true,
+  approval_confirmed: true,
+  approval_expired: true,
+  approval_decision_error: true,
+  message_queued: true,
+  queue_drained: true,
+  queued_message_sent: true,
+  message_appended: true,
+} satisfies Record<KnownServerEventType, true>;
+
+export function isKnownServerEventType(type: string): type is KnownServerEventType {
+  return Object.hasOwn(serverEventKinds, type);
+}
 
 export type UnknownServerEvent = Extract<WireServerEvent, { type: "unknown" }>;
 export type ServerEvent = WireServerEvent;

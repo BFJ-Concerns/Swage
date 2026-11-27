@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use swage_config::{Protocol, RESERVED_WORKFLOW_AGENT_ID};
+use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 use swage_context::working_norms::ModelFamily;
 use swage_core::{Effort, EffortCapability, ToolError};
 use swage_tool::context::ToolContext;
@@ -76,21 +76,7 @@ pub(crate) async fn models_for_session(
     let mut models = Vec::with_capacity(ids.len());
     for id in ids {
         let entry = &config.models.entries[&id];
-        let capability = entry
-            .capabilities
-            .effort
-            .clone()
-            .or_else(|| {
-                let provider = config.providers.entries.get(&entry.provider_id)?;
-                match provider.protocol {
-                    Protocol::Codex => crate::codex::effort_capability(&entry.model_id),
-                    _ => swage_provider::documented_effort_capability(
-                        &provider.protocol,
-                        &entry.model_id,
-                    ),
-                }
-            })
-            .unwrap_or(EffortCapability::None);
+        let capability = crate::turn::effort_capability_for_model(&config, &id, None);
         let mut model = json!({
             "id": id,
             "model": entry.model_id,

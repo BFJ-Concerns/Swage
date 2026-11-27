@@ -134,6 +134,10 @@ const GATE_MODEL: &str = "gate-small";
 
 fn config_with_gate_model() -> swage_config::ResolvedConfig {
     let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "mock".into(),
+        swage_config::ProviderEndpointConfig::default(),
+    );
     config.models.entries.insert(
         GATE_MODEL.to_string(),
         swage_config::ModelEndpointConfig {

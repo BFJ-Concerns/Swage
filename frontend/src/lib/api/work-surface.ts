@@ -7,8 +7,8 @@
 // and carries signals rather than content — the surface answers a signal by
 // reading through the authoritative HTTP path.
 
-import { KNOWN_SERVER_EVENT_TYPES } from "../types";
-import type { KnownServerEventType, ServerEvent } from "../types";
+import { isKnownServerEventType } from "../types";
+import type { ServerEvent } from "../types";
 
 export interface WorkSurfaceChannel {
   onSignal(handler: (event: ServerEvent) => void): void;
@@ -28,10 +28,6 @@ export interface WorkSurfaceChannelOptions {
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 const BACKOFF_FACTOR = 2;
-
-function isKnownServerEventType(type: string): type is KnownServerEventType {
-  return (KNOWN_SERVER_EVENT_TYPES as readonly string[]).includes(type);
-}
 
 export function createWorkSurfaceChannel(options?: WorkSurfaceChannelOptions) {
   const handlers = new Set<(event: ServerEvent) => void>();
