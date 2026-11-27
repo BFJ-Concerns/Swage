@@ -473,38 +473,65 @@ const SHARED_CACHES: &[(Place, Option<&str>)] = &[
     ),
 ];
 
-/// The shared caches a turn's sandbox may write. A cache that does not
-/// exist yet is created first where its tool is installed, since the
-/// sandbox can write inside a cache but cannot create one in the home; a
-/// cache with no tool to fill it is left uncreated.
-pub(crate) fn shared_caches(roots: &PolicyRoots, installed: impl Fn(&str) -> bool) -> Vec<PathBuf> {
-    SHARED_CACHES
-        .iter()
-        .map(|(cache, tool)| (roots.resolve(cache), *tool))
-        .filter_map(|(path, tool)| {
-            if !path.is_dir()
-                && tool.is_none_or(&installed)
-                && let Err(error) = std::fs::create_dir_all(&path)
-            {
-                tracing::warn!(
-                    path = %path.display(),
-                    %error,
-                    "the shared cache could not be created; sandboxed commands cannot write it"
-                );
-            }
-            path.is_dir().then(|| sandbox_path(&path))
-        })
-        .collect()
+/// The shared caches a turn's sandbox may write, beside the paths it
+/// already writes (`writable`). A cache that does not exist yet is created
+/// first where its tool is installed, since the sandbox can write inside a
+/// cache but cannot create one in the home; a cache with no tool to fill it
+/// is left uncreated. A cache within a writable path, the shared cache
+/// included, is written through that path and granted nothing of its own
+/// (`within_writable`).
+pub(crate) fn shared_caches(
+    roots: &PolicyRoots,
+    writable: &[PathBuf],
+    installed: impl Fn(&str) -> bool,
+) -> Vec<PathBuf> {
+    let mut caches: Vec<PathBuf> = Vec::new();
+    for (cache, tool) in SHARED_CACHES {
+        let path = roots.resolve(cache);
+        if within_writable(&path, writable.iter().chain(&caches)) {
+            continue;
+        }
+        if !path.is_dir()
+            && tool.is_none_or(&installed)
+            && let Err(error) = std::fs::create_dir_all(&path)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "the shared cache could not be created; sandboxed commands cannot write it"
+            );
+        }
+        if path.is_dir() {
+            caches.push(sandbox_path(&path));
+        }
+    }
+    caches
+}
+
+/// Whether `path`, or any directory above it, is within a path the sandbox
+/// writes. Such a path is the sandbox's to shape: a command can make it,
+/// or a directory on the way to it, a link to anywhere, so its target is
+/// never granted on its say; what is really there is already writable.
+fn within_writable<'a>(path: &Path, writable: impl Iterator<Item = &'a PathBuf> + Clone) -> bool {
+    path.ancestors().any(|ancestor| {
+        let ancestor = sandbox_path(ancestor);
+        writable
+            .clone()
+            .any(|granted| ancestor.starts_with(granted))
+    })
 }
 
 /// The temporary directory the operator's environment names, when it is
 /// one a sandboxed command needs granted: the sandbox's own `/tmp` hides
 /// everything the host keeps under `/tmp`, and the host's root is read-only,
 /// so a `TMPDIR` anywhere but `/tmp` itself is written only through a grant.
-fn temporary_directory(roots: &PolicyRoots) -> Option<PathBuf> {
-    let directory = roots.environment.path("TMPDIR")?;
-    let directory = sandbox_path(directory);
-    (directory.is_dir() && directory != Path::new("/tmp")).then_some(directory)
+fn temporary_directory(roots: &PolicyRoots, writable: &[PathBuf]) -> Option<PathBuf> {
+    let named = roots.environment.path("TMPDIR")?;
+    let directory = sandbox_path(named);
+    (directory.is_dir()
+        && directory != Path::new("/tmp")
+        && !within_writable(named, writable.iter()))
+    .then_some(directory)
 }
 
 /// Whether a command is installed: an executable of that name on `PATH`.
@@ -634,6 +661,7 @@ pub(crate) fn build_sandbox_config(
         .host_network(host_network);
     let mut granted: Vec<PathBuf> = Vec::new();
     let masked = masked_paths(roots);
+    let mut writable: Vec<PathBuf> = Vec::new();
 
     let active_grant = workspace_policy
         .and_then(|policy| policy.active_workspace.as_ref())
@@ -642,6 +670,7 @@ pub(crate) fn build_sandbox_config(
     granted.push(working_directory.clone());
     if active_can_write {
         builder = builder.write_path(&working_directory);
+        writable.push(working_directory.clone());
         for path in git_metadata_outside(&working_directory) {
             if !path.exists() {
                 continue;
@@ -662,6 +691,7 @@ pub(crate) fn build_sandbox_config(
                 continue;
             }
             builder = builder.write_path(&path);
+            writable.push(path.clone());
             granted.push(path);
         }
     } else {
@@ -691,6 +721,7 @@ pub(crate) fn build_sandbox_config(
             }
             if grant.can_write {
                 builder = builder.write_path(&path);
+                writable.push(path.clone());
                 granted.push(path);
             } else if grant.can_read {
                 builder = builder.read_only_path(&path);
@@ -699,10 +730,11 @@ pub(crate) fn build_sandbox_config(
         }
     }
 
-    for cache in shared_caches(roots, on_path) {
-        builder = builder.write_path(cache);
+    for cache in shared_caches(roots, &writable, on_path) {
+        builder = builder.write_path(&cache);
+        writable.push(cache);
     }
-    if let Some(directory) = temporary_directory(roots) {
+    if let Some(directory) = temporary_directory(roots, &writable) {
         builder = builder.write_path(directory);
     }
     for private in &masked {
@@ -2338,6 +2370,54 @@ mod tests {
                 policy.masked_paths
             );
         }
+    }
+
+    /// A link a command plants where a cache would be, inside a cache or a
+    /// workspace it already writes, never turns into a grant of the link's
+    /// target on the next turn.
+    #[test]
+    fn a_link_planted_in_a_writable_path_is_never_granted_its_target() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = home.join("project");
+        let ssh = home.join(".ssh");
+        for directory in [&home.join(".cache"), &home.join("go/pkg"), &workspace, &ssh] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        for planted in [
+            home.join(".cache/uv"),
+            home.join(".cache/go-build"),
+            home.join("go/pkg/mod"),
+            workspace.join("tmp"),
+        ] {
+            std::os::unix::fs::symlink(&ssh, planted).unwrap();
+        }
+        let roots = PolicyRoots {
+            home: home.clone(),
+            data_root: home.join(".swage"),
+            environment: [("TMPDIR", workspace.join("tmp"))].into(),
+        };
+        let agent_config =
+            AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+        let policy = build_sandbox_config(
+            &agent_config,
+            None,
+            &roots,
+            &swage_config::ResolvedConfig::default(),
+        )
+        .unwrap();
+
+        assert!(
+            !policy.write_paths.contains(&sandbox_path(&ssh)),
+            "{:?}",
+            policy.write_paths
+        );
+        assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
+        assert!(
+            policy
+                .write_paths
+                .contains(&sandbox_path(&home.join(".cache")))
+        );
     }
 
     /// ssh's configuration and known hosts linked into `~/.ssh` from

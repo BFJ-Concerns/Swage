@@ -18574,7 +18574,7 @@ fn absent_shared_caches_are_created_for_installed_tools_only() {
         data_root: home.join(".swage"),
         environment: Default::default(),
     };
-    let caches = crate::turn::dispatcher::shared_caches(&roots, |tool| tool == "npm");
+    let caches = crate::turn::dispatcher::shared_caches(&roots, &[], |tool| tool == "npm");
 
     assert!(home.join(".npm").is_dir());
     assert!(
