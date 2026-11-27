@@ -869,11 +869,11 @@ tests), followed by a separate `cargo test --workspace --doc` stage for
 doctests (nextest cannot run doctests). When set to `cargo`, Rust tests run
 under `cargo test --workspace --no-fail-fast`.
 
-Gateway integration tests (`scratch_tempdir` in
-`crates/swage-gateway/tests/integration/support.rs`) and the browser E2E
-launchers (`frontend/e2e/scratch-root.mjs`) create their disposable roots
-under `SWAGE_TEST_SCRATCH_DIR` when it is set, otherwise under the system
-temporary directory.
+`just verify` clears any inherited `SWAGE_HOME`. Gateway test state owns a
+temporary data root, and tests of discovery set their own roots explicitly.
+Gateway integration tests, browser E2E runs and desktop smoke tests create
+disposable browser state under `SWAGE_TEST_SCRATCH_DIR` when it is set.
+Otherwise they use the system temporary directory.
 
 When both tests and projections fail, both errors surface in one message.
 The test suite aggregates Rust, frontend, and desktop-smoke failures rather

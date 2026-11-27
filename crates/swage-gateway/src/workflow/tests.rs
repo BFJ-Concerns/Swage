@@ -448,16 +448,8 @@ async fn a_run_terminated_at_the_buffer_limit_fails_with_the_reason_recorded() {
 }
 
 async fn assert_workflow_limit_is_recorded(source: String, reason: swage_workflow::Termination) {
-    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let (state, storage) = workflow_test_state();
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
-        Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn TopicStore>,
-        Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-        swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![]),
-        None,
-    );
     let Json(started) = start_inline_run(
         State(state.clone()),
         Path(topic.id),
@@ -19770,7 +19762,7 @@ async fn run_accounts_inspection_reads_an_outstanding_provider_round() {
         .expect("session");
     let opened = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(GatedRoundProvider {
@@ -19838,7 +19830,7 @@ async fn run_accounts_api_cancellation_retains_source_and_time() {
         .await
         .expect("session");
     let opened = Arc::new(Notify::new());
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(GatedRoundProvider {
@@ -19944,7 +19936,7 @@ async fn review_fix_start_snapshot_time_precedes_a_concurrent_completion() {
         .create_session(swage_storage::fixtures::new_session(topic.id))
         .await
         .unwrap();
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(GatedRoundProvider {
