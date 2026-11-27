@@ -101,13 +101,16 @@
       discoveredModels = [];
       return;
     }
-    const discoveryDraft = savedProviderIds.has(selectedProvider)
+    // Discovery from the form uses its current policy even before autosave.
+    // Codex discovery for a saved provider uses its running sign-in state.
+    const discoveryDraft = provider.protocol === "codex" && savedProviderIds.has(selectedProvider)
       ? undefined
       : {
           protocol: provider.protocol,
           base_url: provider.base_url,
           api_key_secret_ref: provider.api_key_secret_ref,
           api_key_env: provider.api_key_env,
+          plaintext_credentials: provider.plaintext_credentials,
           ...(provider.protocol === "codex" ? {
             command: provider.command,
             state_dir: provider.state_dir,
@@ -347,7 +350,7 @@
 {#each providerIds as id, ix (id)}
   {@const provider = settings.providers[id]}
   <ProviderConfiguration
-    {secrets} {secretsError} {id} index={ix} {provider} kindLabel={provider.protocol === "openai" && provider.base_url ? "OpenAI compatible" : PROVIDER_KINDS.find((kind) => kind.protocol === provider.protocol)?.label ?? provider.protocol} displayName={providerDisplayName(id)} models={providerModels(id)}
+    {secrets} {secretsError} {id} index={ix} bind:provider={settings.providers[id]} kindLabel={provider.protocol === "openai" && provider.base_url ? "OpenAI compatible" : PROVIDER_KINDS.find((kind) => kind.protocol === provider.protocol)?.label ?? provider.protocol} displayName={providerDisplayName(id)} models={providerModels(id)}
     defaultModel={settings.default_model} saved={savedProviderIds.has(id)} signInState={signInByProvider[id]}
     {deviceCode} selected={selectedProvider === id} query={modelQuery} {discoveredModels} {addedModelIds} {isPersisting}
     onremoveprovider={removeProvider} onmanualadd={addManualModel} onremovemodel={removeModel} ondefault={setDefaultModel}

@@ -166,8 +166,9 @@ impl Tool for BrowserTypeTool {
 
     fn description(&self) -> &str {
         "Enter text in a field of the current page, named by its ref, and return a snapshot \
-         of the page afterwards. The text becomes the field's whole value, and with `submit` the \
-         form the field belongs to is then submitted. `text` may be a registered secret's \
+         of the page afterwards. The text takes the place of whatever the field holds, or, \
+         with `replace` false, is added to the end of it. With `submit` the form the field \
+         belongs to is then submitted. `text` may be a registered secret's \
          reference in place of a value: the secret's value is then what is entered, and it \
          is kept out of the conversation, the record and the snapshots that follow."
     }
@@ -179,7 +180,7 @@ impl Tool for BrowserTypeTool {
                 "ref": {"type": "string", "description": "The element's ref, taken from the most recent snapshot. Every `browser_*` call returns a new snapshot with new refs, and a ref from an earlier one is refused, since the element it named may no longer be there."},
                 "text": {"type": "string", "description": "The text to enter, or a registered secret's reference to enter that secret's value."},
                 "submit": {"type": "boolean", "default": false, "description": "Once the text is entered, submit the form the field belongs to, as pressing Enter in the field would."},
-                "replace": {"type": "boolean", "default": true, "description": "Empty the field before the text is entered. The text becomes the field's whole value whichever is given."}
+                "replace": {"type": "boolean", "default": true, "description": "`true`, the default, makes the text the field's whole value. `false` keeps what the field already holds and adds the text to the end of it."}
             },
             "required": ["ref", "text"]
         })
