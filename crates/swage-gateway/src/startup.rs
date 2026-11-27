@@ -1732,7 +1732,7 @@ mod tests {
         assert!(message.contains(&path.display().to_string()));
         assert!(message.contains("not produced by this build"));
         assert_eq!(message.matches("Rebuild this data root").count(), 1);
-        assert!(message.contains("data migration is not supported"));
+        assert!(message.contains("Data migration is unavailable"));
     }
 
     #[test]

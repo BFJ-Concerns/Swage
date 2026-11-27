@@ -893,7 +893,13 @@ mod tests {
                         recipient_agent_id: "lead".to_string(),
                         kind: MessageKind::Result,
                         correlation_id: Some(delegate.id),
-                        payload: serde_json::json!({ "response": "Scouted." }),
+                        payload: serde_json::json!({
+                            "response": "Scouted.",
+                            "child_session_id": child_session.id,
+                            "child_thread_id": child_thread.id,
+                            "parent_session_id": session.id,
+                            "parent_thread_id": thread.id,
+                        }),
                     })
                     .await
                     .unwrap();
@@ -944,7 +950,7 @@ mod tests {
                 assert_eq!(
                     result.payload["parent_session_id"],
                     serde_json::json!(session.id),
-                    "and is readdressed to the parent's session"
+                    "the child's original result already addresses the parent"
                 );
                 continue;
             }
@@ -1657,7 +1663,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_graceful_restart_resumes_an_attended_delegation() {
         use swage_storage::store::TurnQueueStore;
 
