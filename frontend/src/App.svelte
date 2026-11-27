@@ -36,6 +36,7 @@
   } from "./lib/stores/streaming";
   import { createTopicStore } from "./lib/stores/topics";
   import { watchOpenConversation } from "./lib/open-conversation-updates";
+  import { watchSessionList } from "./lib/session-list-updates";
   import { conversationPath, createRouter } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
@@ -515,6 +516,9 @@
       window.removeEventListener(DISPLAY_PREFERENCES_CHANGED, onPreferencesChange);
     };
   });
+
+  // The scoped list feeds the sidebar and the switcher on both surfaces.
+  onMount(() => watchSessionList(() => conversationStore.refreshConversations!()));
 
   // A conversation open in this tab while another tab holds its socket follows
   // the gateway's session signal, so a turn stopped or settled elsewhere — or

@@ -184,6 +184,35 @@ describe("ambient channel control path", () => {
       .toContain("History of conv-1");
   });
 
+  it("refreshes the scoped conversation labels and outcomes on gateway updates", async () => {
+    const listeners: Array<(event: ServerEvent) => void> = [];
+    vi.spyOn(workSurface, "openSharedWorkSurfaceChannel").mockImplementation(() => ({
+      onSignal: (handler) => { listeners.push(handler); },
+      onReconnect: () => {},
+      close: () => {},
+    }));
+    const initial = { ...summaries[0], opening_message: "Check the launch", latest_turn_state: "failed" as const };
+    const list = vi.mocked(listConversations);
+    list.mockResolvedValueOnce([initial]);
+
+    component = await mountAppOnConversation();
+    expect(document.querySelector("aside .conversation-item")?.textContent).toContain("Last response failed");
+
+    surfaceButton("Surfaces").click();
+    list.mockResolvedValueOnce([{ ...initial, opening_message: "Read the launch plan", latest_turn_state: "completed" }]);
+    for (const listener of listeners) listener({ type: "session_updated", session_id: initial.id });
+    await vi.waitFor(() => expect(document.querySelector('select[aria-label="Active conversation"] option:checked')
+      ?.textContent).toBe("Read the launch plan"));
+    expect(list).toHaveBeenLastCalledWith(topic.id);
+
+    surfaceButton("Conversation").click();
+    await vi.waitFor(() => {
+      const row = document.querySelector("aside .conversation-item");
+      expect(row?.textContent).toContain("Read the launch plan");
+      expect(row?.textContent).not.toContain("Last response failed");
+    });
+  });
+
   it("keeps the selected conversation socket while the operator surface opens", async () => {
     component = await mountAppOnConversation();
     wsClient.connect.mockClear();

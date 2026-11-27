@@ -294,6 +294,23 @@ test("restores the front door on Back from the first message of a new conversati
   await expect(page.getByLabel("Your message").getByText(first, { exact: true })).toBeVisible();
 });
 
+test("keeps the opening message as a switcher label for a session begun on Surfaces", async ({ page }) => {
+  await send(page, "Session before working on Surfaces");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  const previousId = new URL(page.url()).pathname.split("/").at(-1)!;
+  await page.getByRole("button", { name: "Surfaces", exact: true }).click();
+  await page.getByRole("button", { name: "New conversation", exact: true }).click();
+  const first = "First message sent on Surfaces";
+  await sendNewConversation(page, first);
+  const newId = new URL(page.url()).pathname.split("/").at(-1)!;
+  const switcher = page.getByRole("combobox", { name: "Active conversation" });
+  await expect(switcher.locator("option:checked")).toHaveText(first);
+
+  await switcher.selectOption(previousId);
+  await expect(page.getByLabel("Your message").getByText("Session before working on Surfaces")).toBeVisible();
+  await expect(switcher.locator(`option[value="${newId}"]`)).toHaveText(first);
+});
+
 test("keeps the first question as the label and follows a send from earlier in the transcript", async ({ page }) => {
   const opening = "Where should we start?";
   await page.setViewportSize({ width: 900, height: 660 });
