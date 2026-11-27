@@ -47,7 +47,7 @@ impl Tool for FileWriteTool {
             "properties": {
                 "justification": {
                     "type": "string",
-                    "description": "Why this file is needed when it lies outside the session's granted locations, in one or two sentences. Read by the judge that answers for the request, and by the person when one is watching and the judge is not sure; omitted, the request is weighed without a reason."
+                    "description": swage_agent::JUSTIFICATION_DESCRIPTION
                 },
                 "path": {
                     "type": "string",

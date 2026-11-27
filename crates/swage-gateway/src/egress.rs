@@ -104,8 +104,8 @@ impl EgressPolicy for SessionEgressPolicy {
                 basis: "the install's reachable hosts".into(),
             };
         }
-        let (Some(judge), Some(session_id), Some(turn_id)) =
-            (&self.judge, self.session_id, self.turn_id)
+        let judge = self.judge.as_ref().filter(|judge| judge.is_configured());
+        let (Some(judge), Some(session_id), Some(turn_id)) = (judge, self.session_id, self.turn_id)
         else {
             return EgressVerdict::Refused {
                 reason: "the host is on no standing list of reachable hosts and no judge can \

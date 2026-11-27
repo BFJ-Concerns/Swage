@@ -57,6 +57,10 @@ impl GatewayRequestJudge {
 
 #[async_trait]
 impl RequestJudge for GatewayRequestJudge {
+    fn is_configured(&self) -> bool {
+        !self.state.active_config().judge.model.trim().is_empty()
+    }
+
     async fn judge(&self, request: JudgeRequest) -> Judgement {
         let config = self.state.active_config();
         let selected = config.judge.model.trim();

@@ -418,11 +418,11 @@ fn outside_read_rounds() -> Vec<Vec<StreamChunk>> {
 }
 
 /// Drive an unattended REST turn through the outside read and return the
-/// settled tool-call status and the recorded judgement.
+/// settled tool-call status and the recorded judgements.
 async fn unattended_outside_read(
     provider: MockProvider,
     config: ResolvedConfig,
-) -> (Option<String>, Value) {
+) -> (Option<String>, Vec<Value>) {
     let (_router, address, storage) = start_test_server_with_tools(
         provider,
         config,
@@ -479,29 +479,25 @@ async fn unattended_outside_read(
         })
         .await
         .unwrap();
-    assert_eq!(
-        judgements.len(),
-        1,
-        "one judgement recorded: {judgements:?}"
-    );
-    (calls[0].status.clone(), judgements[0].metadata.clone())
+    (
+        calls[0].status.clone(),
+        judgements.into_iter().map(|event| event.metadata).collect(),
+    )
 }
 
 /// Journey: an unattended REST turn reaches outside its grants with no judge
-/// configured → the call is refused, not waved through, and the refusal is
-/// in the record.
+/// configured, the default → the call is refused, not waved through, and
+/// the record holds no judgement, since no judge made one.
 #[tokio::test(flavor = "multi_thread")]
 async fn unattended_rest_turn_fails_an_out_of_grant_location_closed_without_a_judge() {
     let _guard = SwageHomeGuard::isolate();
-    let (status, judgement) = unattended_outside_read(
+    let (status, judgements) = unattended_outside_read(
         MockProvider::new(outside_read_rounds()),
         config_with_judge(""),
     )
     .await;
     assert_eq!(status.as_deref(), Some("refused"));
-    assert_eq!(judgement["verdict"], "unavailable");
-    assert_eq!(judgement["reach"]["path"], "/srv/notes/plan.md");
-    assert_eq!(judgement["justification"], "the plan the task is about");
+    assert!(judgements.is_empty(), "{judgements:?}");
 }
 
 /// Journey: the same turn with a judge configured whose verdict is a yes →
@@ -509,7 +505,7 @@ async fn unattended_rest_turn_fails_an_out_of_grant_location_closed_without_a_ju
 #[tokio::test(flavor = "multi_thread")]
 async fn unattended_rest_turn_runs_an_out_of_grant_location_the_judge_allowed() {
     let _guard = SwageHomeGuard::isolate();
-    let (status, judgement) = unattended_outside_read(
+    let (status, judgements) = unattended_outside_read(
         MockProvider::with_completion_reply(
             outside_read_rounds(),
             r#"{"decision": "allow", "reason": "the task names this plan"}"#,
@@ -518,6 +514,9 @@ async fn unattended_rest_turn_runs_an_out_of_grant_location_the_judge_allowed() 
     )
     .await;
     assert_eq!(status.as_deref(), Some("success"));
+    let [judgement] = judgements.as_slice() else {
+        panic!("one judgement recorded: {judgements:?}");
+    };
     assert_eq!(judgement["verdict"], "allowed");
     assert_eq!(judgement["judge"], "judge-model");
     assert_eq!(judgement["reason"], "the task names this plan");
