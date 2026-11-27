@@ -845,22 +845,45 @@ fn ssh_configuration(roots: &PolicyRoots) -> SshConfiguration {
         ),
         (user_directory.join("config"), user_directory.clone(), false),
     ];
-    let mut read: Vec<PathBuf> = Vec::new();
+    // Each file walked, by its own path, with whether it shows as included
+    // configuration.
+    let mut read: Vec<(PathBuf, bool)> = Vec::new();
     let mut configuration = SshConfiguration {
         included: Vec::new(),
         substitutes: Vec::new(),
+    };
+    // The link's own name in a directory resolved as the sandbox sees it,
+    // so a linked file shows where ssh looks for it.
+    let show = |included: &mut Vec<PathBuf>, opened: &Path| {
+        if let (Some(directory), Some(name)) = (opened.parent(), opened.file_name()) {
+            let path = sandbox_path(directory).join(name);
+            if !included.contains(&path) {
+                included.push(path);
+            }
+        }
     };
     while let Some((opened, base, included)) = pending.pop() {
         let Ok(file) = opened.canonicalize() else {
             continue;
         };
-        if read.contains(&file) || read.len() >= SSH_CONFIGURATION_FILE_LIMIT {
+        // A file already walked is not walked again, but every name an
+        // include opens it by shows, as ssh may open it by any of them.
+        if let Some((_, shown)) = read.iter().find(|(seen, _)| *seen == file) {
+            if included && *shown {
+                show(&mut configuration.included, &opened);
+            }
             continue;
         }
-        read.push(file.clone());
+        if read.len() >= SSH_CONFIGURATION_FILE_LIMIT {
+            continue;
+        }
         let Ok(content) = std::fs::read(&file) else {
+            read.push((file, false));
             continue;
         };
+        // A private key is never configuration, whatever an include matches.
+        let shown = included && !String::from_utf8_lossy(&content).contains("PRIVATE KEY-----");
+        read.push((file.clone(), shown));
         for pattern in ssh_includes(&String::from_utf8_lossy(&content)) {
             let Some(pattern) = expand_ssh_environment(&pattern) else {
                 continue;
@@ -877,20 +900,10 @@ fn ssh_configuration(roots: &PolicyRoots) -> SshConfiguration {
                 pending.push((path, base.clone(), true));
             }
         }
-        if !included {
+        if !shown {
             continue;
         }
-        // A private key is never configuration, whatever an include matches.
-        if String::from_utf8_lossy(&content).contains("PRIVATE KEY-----") {
-            continue;
-        }
-        // The link's own name in a directory resolved as the sandbox sees
-        // it, so a linked file shows where ssh looks for it.
-        if let (Some(directory), Some(name)) = (opened.parent(), opened.file_name()) {
-            configuration
-                .included
-                .push(sandbox_path(directory).join(name));
-        }
+        show(&mut configuration.included, &opened);
         let owned = std::fs::metadata(&file).is_ok_and(|metadata| metadata.uid() == user);
         if owned {
             continue;
@@ -2651,12 +2664,21 @@ mod tests {
         std::fs::write(dotfiles.join("linked"), "Host linked\n  Port 4444\n").unwrap();
         std::os::unix::fs::symlink(dotfiles.join("linked"), home.join(".ssh/config.d/linked"))
             .unwrap();
+        // One file linked under two names, each included from its own host.
+        std::fs::write(dotfiles.join("shared"), "Port 5555\n").unwrap();
+        for name in ["first", "second"] {
+            std::os::unix::fs::symlink(dotfiles.join("shared"), home.join(".ssh").join(name))
+                .unwrap();
+        }
         std::fs::write(
             dotfiles.join("ssh_config"),
             format!(
-                "Include {}/*\nHost forge\n  Port 2222\nInclude \"{}\"\n",
+                "Include {}/*\nHost forge\n  Port 2222\nInclude \"{}\"\n\
+                 Host first\n  Include {}\nHost second\n  Include {}\n",
                 home.join(".ssh/config.d").display(),
-                linked.display()
+                linked.display(),
+                home.join(".ssh/first").display(),
+                home.join(".ssh/second").display(),
             ),
         )
         .unwrap();
@@ -2682,7 +2704,7 @@ mod tests {
         )
         .unwrap();
         // `.host` is a name the systemd drop-in, where installed, matches.
-        let hosts = ["forge", ".host", "extra", "linked"];
+        let hosts = ["forge", ".host", "extra", "linked", "first", "second"];
         let mut outside = Vec::new();
         for host in hosts {
             let output = tokio::process::Command::new("ssh")
@@ -2699,7 +2721,9 @@ mod tests {
         let script = format!(
             "ssh -F {config} -G forge > {cache}/forge && ssh -F {config} -G .host > {cache}/.host \
              && ssh -F {config} -G extra > {cache}/extra \
-             && ssh -F {config} -G linked > {cache}/linked && touch {cache}/written && TMPDIR={temporary} mktemp >/dev/null \
+             && ssh -F {config} -G linked > {cache}/linked \
+             && ssh -F {config} -G first > {cache}/first \
+             && ssh -F {config} -G second > {cache}/second && touch {cache}/written && TMPDIR={temporary} mktemp >/dev/null \
              && mkdir \"$XDG_RUNTIME_DIR/pnpm\" && test ! -e {runtime}/session.sock",
             config = home.join(".ssh/config").display(),
             cache = cache.display(),
@@ -2731,6 +2755,8 @@ mod tests {
         assert!(String::from_utf8_lossy(&outside[0]).contains("port 2222"));
         assert!(String::from_utf8_lossy(&outside[2]).contains("port 3333"));
         assert!(String::from_utf8_lossy(&outside[3]).contains("port 4444"));
+        assert!(String::from_utf8_lossy(&outside[4]).contains("port 5555"));
+        assert!(String::from_utf8_lossy(&outside[5]).contains("port 5555"));
     }
 
     /// A file the operator's configuration includes shows in the sandbox,
