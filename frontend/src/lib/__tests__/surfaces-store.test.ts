@@ -391,9 +391,9 @@ describe("surfaces store", () => {
       .mockResolvedValueOnce(jsonResponse(listBody))
       .mockResolvedValueOnce(jsonResponse(libraryBody))
       .mockResolvedValueOnce(jsonResponse(surfaceBody("before the gap")))
-      // The lag signal answers with a refetch of the surface and the list.
       .mockResolvedValueOnce(jsonResponse(surfaceBody("written during the gap")))
-      .mockResolvedValueOnce(jsonResponse(listBody));
+      .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse({ entries: [{ ...libraryBody.entries[0], name: "New checklist" }] }));
     vi.stubGlobal("fetch", fetchMock);
 
     const channel = fakeChannel();
@@ -404,6 +404,7 @@ describe("surfaces store", () => {
     channel.emit({ type: "lagged", dropped: 3 });
     await vi.waitFor(() => {
       expect(store.activeSurface?.modules[0].source).toBe("written during the gap");
+      expect(store.library.map((entry) => entry.name)).toEqual(["New checklist"]);
     });
   });
 
