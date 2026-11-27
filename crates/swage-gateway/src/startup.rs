@@ -1229,11 +1229,19 @@ async fn create_provider_with_retry(
         ));
     }
 
-    Arc::new(crate::completion_record::RecordingProvider::new(
-        build_provider_chain(providers, retry),
-        Arc::clone(storage),
-        secret_manager.clone(),
-    ))
+    // Each model's provider records its own attempts, inside retry and
+    // failover, so a completion is recorded under the model that served it.
+    let providers = providers
+        .into_iter()
+        .map(|provider| {
+            Box::new(crate::completion_record::RecordingProvider::new(
+                Arc::from(provider),
+                Arc::clone(storage),
+                secret_manager.clone(),
+            )) as Box<dyn swage_provider::LlmProvider>
+        })
+        .collect();
+    build_provider_chain(providers, retry)
 }
 
 fn ordered_runtime_model_ids(config: &swage_config::ResolvedConfig) -> Vec<String> {
@@ -1893,6 +1901,45 @@ mod tests {
         assert_eq!(response.content, "secondary response");
         assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(secondary_calls.load(Ordering::SeqCst), 1);
+
+        // Each attempt is recorded under the model that made it: the answer
+        // under the secondary's, the refused attempt under the primary's.
+        let mut recorded = Vec::new();
+        for _ in 0..200 {
+            recorded = storage
+                .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                    event_kind: Some("completion".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|event| {
+                    (
+                        event.metadata["model"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        event.metadata["outcome"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if recorded.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        recorded.sort();
+        assert_eq!(
+            recorded,
+            vec![
+                ("primary-wire".to_owned(), "failed".to_owned()),
+                ("secondary-wire".to_owned(), "finished".to_owned()),
+            ]
+        );
     }
 
     #[test]

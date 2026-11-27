@@ -2,8 +2,9 @@
 //! local audit record.
 //!
 //! The gateway builds every completion provider in one place
-//! (`startup::create_provider`), and wraps the whole chain — retry, failover
-//! and the concrete adapters — in [`RecordingProvider`]. Each call through it,
+//! (`startup::create_provider`), and wraps each model's adapter in
+//! [`RecordingProvider`] beneath retry and failover, so every attempt sent
+//! is recorded under the model that served it. Each call through it,
 //! streamed or not, becomes one `completion` event once it ends: the model,
 //! the output limit asked for, why generation stopped (a response cut off at
 //! its length limit included), the tokens and cost reported, and what came

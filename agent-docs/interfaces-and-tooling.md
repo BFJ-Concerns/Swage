@@ -89,7 +89,8 @@ event is written by storage triggers (migration `067_tool_call_audit`) when a
 `tool_calls` row's status is set, carrying the tool, status, arguments, result
 and duration, attributed to the turn's session. A `completion` event is
 written by `RecordingProvider` (`crates/swage-gateway/src/completion_record.rs`),
-which `startup::create_provider` wraps around every provider chain it builds:
+which `startup::create_provider` wraps around each model's adapter beneath
+retry and failover, so each attempt is recorded under the model that served it:
 one event per `complete`, `complete_with_tools` or `stream` call, carrying the
 model, `max_tokens`, `finish_reason`, an `outcome` (`cut off at its length
 limit`, `interrupted` for a stream dropped before it ended, `failed`, …),
