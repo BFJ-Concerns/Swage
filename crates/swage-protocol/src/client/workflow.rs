@@ -261,17 +261,14 @@ pub enum WorkflowRunState {
     Parked,
 }
 
-/// The durable account a failed run leaves behind: what stopped it, which
-/// call failed, and where the pending event queue stood, so whoever picks
-/// the work up starts from the record instead of a re-run.
+/// The account a failed run leaves, with the detail the gateway recovered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "classification", rename_all = "snake_case")]
 #[ts(optional_fields = nullable)]
 pub enum WorkflowRunHandover {
-    AuthorError {
-        failure: String,
-    },
-    /// An attributed agent-call failure stopped the run.
+    /// The script error that prevented the run from continuing.
+    AuthorError { failure: String },
+    /// The failed call, the last journal position and the event queue at failure.
     Interrupted {
         failure: String,
         failed_call: WorkflowHandoverFailedCall,
@@ -284,13 +281,13 @@ pub enum WorkflowRunHandover {
         events_pending: u64,
         events: Vec<WorkflowHandoverEvent>,
     },
-    /// The run failed without an attributable agent-call identity.
+    /// The failure and any recorded terminal error when no call could be identified.
     InterruptedUnattributed {
         failure: String,
         terminal_error: Option<String>,
     },
-    /// The journal read-back failed for a known agent call, so only its
-    /// identity could be recovered.
+    /// The failure, the affected call’s identity and any terminal error
+    /// when the call’s journal could not be reconstructed.
     ReconstructionFailed {
         failure: String,
         failed_call: WorkflowHandoverFailedCallRef,
@@ -726,9 +723,10 @@ pub enum WorkflowAttemptCause {
     /// before it off: that attempt's outcome is unknown, and the tool calls
     /// it issued may have been applied.
     AfterInterruption,
-    /// The model the call named refused before any output, and the call's
-    /// declared fallback served it instead; no interruption occurred.
+    /// The primary failed before any output and the call was dispatched to its declared fallback.
     ProviderFallback { primary_failure: String },
+    /// Replay dispatched another attempt after a recorded provider failure.
+    AfterProviderFailure { failure: String },
 }
 
 /// One attempt of a dispatched call: why it was dispatched, when it was
@@ -973,6 +971,8 @@ pub struct WorkflowJournalEntry {
 #[ts(optional_fields = nullable)]
 pub struct WorkflowRunDetailResponse {
     pub run: WorkflowRun,
+    /// The recorded timer deadline when a timer can wake this parked run.
+    pub timer_wake_at: Option<DateTime<Utc>>,
     pub journal: Vec<WorkflowJournalEntry>,
     /// The run's own wake economics, derived from the journal and event
     /// queue — the falsification signal for a gated long run: a sustained
@@ -1077,7 +1077,7 @@ pub struct WorkflowRunCancellation {
 pub struct WorkflowRunEndingNotice {
     pub run_id: Uuid,
     pub script_name: Option<String>,
-    pub state: String,
+    pub state: WorkflowRunState,
     pub completed_at: Option<DateTime<Utc>>,
 }
 
@@ -1086,7 +1086,7 @@ pub struct WorkflowRunEndingNotice {
 #[ts(optional_fields = nullable)]
 pub struct WorkflowRunStatusRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
+    pub run_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 100))]
     pub acknowledge_run_ids: Option<Vec<Uuid>>,

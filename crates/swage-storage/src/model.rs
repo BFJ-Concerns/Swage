@@ -2547,6 +2547,7 @@ pub struct WorkflowRunRecord {
     /// When a parked run is due to wake. Set only while `state` is
     /// `parked`; cleared on every other state transition.
     pub wake_at: Option<DateTime<Utc>>,
+    pub timer_wake_at: Option<DateTime<Utc>>,
     /// The session whose turn started this run — the conversation the run's
     /// workers are grouped beneath in the recent-sessions list. `None` for a
     /// run started by the operator API or a schedule.

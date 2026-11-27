@@ -26,6 +26,7 @@ use swage_protocol::client::context::AssemblyReport;
 /// loop for the turn's life.
 pub(super) struct TurnProjection<'a> {
     pub(super) session_id: Uuid,
+    pub(super) workflow_run_id: Option<Uuid>,
     /// The turn row the coordinator prepared; the parent of any delegation
     /// until `TurnStarted` names the agent's own id.
     pub(super) prepared_turn_id: Uuid,
@@ -65,6 +66,7 @@ pub(super) async fn project_agent_events(
 ) -> ProjectedTurn {
     let TurnProjection {
         session_id,
+        workflow_run_id,
         prepared_turn_id,
         report_json,
         assembly_report,
@@ -78,6 +80,14 @@ pub(super) async fn project_agent_events(
     } = projection;
     let mut turn_id: Option<Uuid> = None;
     let mut record_integrity_lost: Option<String> = None;
+
+    let notify_workflow = || {
+        if let Some(run_id) = workflow_run_id {
+            let _ = state
+                .broadcast
+                .send(ServerEvent::WorkflowRunUpdated { run_id });
+        }
+    };
 
     // The loop runs until the agent drops its sender (channel closes) or
     // the agent task completes.
@@ -178,6 +188,7 @@ pub(super) async fn project_agent_events(
                     &mut record_integrity_lost,
                 )
                 .await;
+                notify_workflow();
                 apply_provider_snapshot_event(
                     state,
                     report_json,
@@ -239,6 +250,7 @@ pub(super) async fn project_agent_events(
                     &mut record_integrity_lost,
                 )
                 .await;
+                notify_workflow();
             }
             event @ (AgentEvent::ProviderReasoningCaptured { .. }
             | AgentEvent::ProviderResponseCaptured { .. }

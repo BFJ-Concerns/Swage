@@ -49,7 +49,16 @@ use super::{
         CreateTopicRequest, RelinkWorkspaceAttachmentRequest, TopicListResponse, TopicResponse,
         UpdateTopicRequest, WorkspaceAttachmentResponse,
     },
+    workflow::{
+        PostWorkflowRunEventRequest, PostWorkflowRunEventResponse, WorkflowRun,
+        WorkflowRunDetailResponse,
+    },
 };
+
+pub const WORKFLOW_RUN_PATH: &str = "/api/workflow-runs/{id}";
+pub const WORKFLOW_RUN_EVENTS_PATH: &str = "/api/workflow-runs/{id}/events";
+pub const WORKFLOW_RUN_CANCEL_PATH: &str = "/api/workflow-runs/{id}/cancel";
+pub const WORKFLOW_RUN_RESUME_PATH: &str = "/api/workflow-runs/{id}/resume";
 
 /// HTTP method, as the OpenAPI document spells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -553,6 +562,74 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 204,
                 body: None,
+            },
+        },
+        Route {
+            operation_id: "get_workflow_run",
+            method: Method::Get,
+            path: WORKFLOW_RUN_PATH,
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Read a workflow run with its journal.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<WorkflowRunDetailResponse>(),
+            },
+        },
+        Route {
+            operation_id: "post_workflow_run_event",
+            method: Method::Post,
+            path: WORKFLOW_RUN_EVENTS_PATH,
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Post an event to a workflow run.",
+            request_optional: false,
+            request: schema::<PostWorkflowRunEventRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<PostWorkflowRunEventResponse>(),
+            },
+        },
+        Route {
+            operation_id: "cancel_workflow_run",
+            method: Method::Post,
+            path: WORKFLOW_RUN_CANCEL_PATH,
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Request cancellation of a workflow run.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<WorkflowRun>(),
+            },
+        },
+        Route {
+            operation_id: "resume_workflow_run",
+            method: Method::Post,
+            path: WORKFLOW_RUN_RESUME_PATH,
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Resume an interrupted workflow run.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<WorkflowRun>(),
             },
         },
         Route {

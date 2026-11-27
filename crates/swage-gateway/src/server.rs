@@ -130,13 +130,22 @@ pub fn build_router(state: AppState) -> Router {
             "/api/topics/{id}/workflow-runs",
             get(workflow::list_runs).post(workflow::start_inline_run),
         )
-        .route("/api/workflow-runs/{id}", get(workflow::get_run))
         .route(
-            "/api/workflow-runs/{id}/events",
+            swage_protocol::client::routes::WORKFLOW_RUN_PATH,
+            get(workflow::get_run),
+        )
+        .route(
+            swage_protocol::client::routes::WORKFLOW_RUN_EVENTS_PATH,
             post(workflow::post_operator_run_event),
         )
-        .route("/api/workflow-runs/{id}/cancel", post(workflow::cancel_run))
-        .route("/api/workflow-runs/{id}/resume", post(workflow::resume_run))
+        .route(
+            swage_protocol::client::routes::WORKFLOW_RUN_CANCEL_PATH,
+            post(workflow::cancel_run),
+        )
+        .route(
+            swage_protocol::client::routes::WORKFLOW_RUN_RESUME_PATH,
+            post(workflow::resume_run),
+        )
         .route(
             "/api/conversations/{id}/branches",
             get(handlers::list_conversation_branches).post(handlers::create_conversation_branch),

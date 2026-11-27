@@ -479,7 +479,7 @@ describe("AppLayout shell navigation", () => {
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledOnce();
     });
-    expect(fetchSpy).toHaveBeenCalledWith("/api/workflow-runs/run%201");
+    expect(fetchSpy).toHaveBeenCalledWith("/api/workflow-runs/run%201", { method: "GET" });
     await vi.waitFor(() => {
       expect(
         document.querySelectorAll(

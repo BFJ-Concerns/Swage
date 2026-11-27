@@ -157,6 +157,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     compaction_focus: Option<String>,
     requested_model: Option<String>,
     provider_failure_observer: Option<ProviderFailureObserver>,
+    workflow_run_id: Option<Uuid>,
     reuse_persisted_input: bool,
 ) -> Result<(), GatewayError> {
     let TurnInput {
@@ -790,6 +791,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         state,
         TurnProjection {
             session_id,
+            workflow_run_id,
             prepared_turn_id,
             report_json: &mut report_json,
             assembly_report: &assembly_report,

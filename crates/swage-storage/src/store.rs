@@ -1384,8 +1384,7 @@ pub trait WorkflowStore: Send + Sync {
         from: &str,
         to: &str,
     ) -> Result<bool, StorageError>;
-    /// Park a run on a durable wait: state `parked`, due at `wake_at`, its
-    /// engine torn down until the waker resumes it by replay.
+    /// Park a run on a timer, recording its deadline along with the scheduler wake time.
     async fn set_workflow_run_parked(
         &self,
         id: Uuid,
