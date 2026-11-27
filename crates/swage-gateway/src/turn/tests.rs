@@ -41,8 +41,6 @@ use swage_storage::{
     },
 };
 
-use super::history::parse_model_arguments;
-
 use swage_agent::{AgentEvent, DelegationOutcome};
 use swage_sandbox::ToolCallResult;
 
@@ -64,10 +62,10 @@ fn provider_response_witness_is_appended_without_content_fields() {
             request_id: Some("req-123".into()),
             terminal_event: Some("message_stop".into()),
             stop_reason: Some("end_turn".into()),
-            usage: swage_core::TokenUsage {
+            usage: Some(swage_core::TokenUsage {
                 input_tokens: 9,
                 output_tokens: 0,
-            },
+            }),
             content_blocks: vec![swage_core::ProviderContentBlockWitness {
                 block_type: "thinking".into(),
                 count: 1,
@@ -136,10 +134,10 @@ async fn ordinary_and_delegated_snapshot_paths_record_provider_events_identicall
         request_id: Some("request-3".into()),
         terminal_event: Some("message_stop".into()),
         stop_reason: Some("end_turn".into()),
-        usage: swage_core::TokenUsage {
+        usage: Some(swage_core::TokenUsage {
             input_tokens: 11,
             output_tokens: 7,
-        },
+        }),
         content_blocks: vec![swage_core::ProviderContentBlockWitness {
             block_type: "text".into(),
             count: 1,
@@ -379,10 +377,10 @@ fn provider_witness_chunks() -> Vec<StreamChunk> {
             request_id: Some("req-123".into()),
             terminal_event: Some("message_stop".into()),
             stop_reason: Some("end_turn".into()),
-            usage: swage_core::TokenUsage {
+            usage: Some(swage_core::TokenUsage {
                 input_tokens: 9,
                 output_tokens: 2,
-            },
+            }),
             content_blocks: vec![swage_core::ProviderContentBlockWitness {
                 block_type: "text".into(),
                 count: 1,
@@ -672,9 +670,14 @@ async fn token_threshold_triggers_succession_for_a_turn() {
     let mut config = swage_config::ResolvedConfig::default();
     config.context.compaction_threshold =
         Some(swage_protocol::client::settings::CompactionThresholdConfig::Tokens(600));
-    let (state, session_id) =
+    let (mut state, session_id) =
         make_state_with_config_and_storage(provider_witness_chunks(), config, Arc::clone(&storage))
             .await;
+    state.provider = Arc::new(crate::completion_record::RecordingProvider::new(
+        Arc::clone(&state.provider),
+        Arc::clone(&state.storage),
+        (*state.secret_manager).clone(),
+    ));
     seed_history(&storage, session_id, 90).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -688,6 +691,30 @@ async fn token_threshold_triggers_succession_for_a_turn() {
     )
     .await
     .expect("turn completes after token-triggered succession");
+    let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+    let turn_id = storage.list_turns_by_thread(thread.id).await.unwrap()[0].id;
+    let summary = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(event) = storage
+                .db
+                .lock()
+                .await
+                .audit_events
+                .iter()
+                .find(|event| {
+                    event.event_kind == "completion" && event.metadata["streamed"] == false
+                })
+                .cloned()
+            {
+                break event;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("summary should have a completion in the audit record");
+    assert_eq!(summary.session_id, Some(session_id));
+    assert_eq!(summary.metadata["turn_id"], turn_id.to_string());
     let db = storage.db.lock().await;
     let (report_json, _) = db.snapshots.values().next().expect("context snapshot");
     let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
@@ -845,7 +872,6 @@ async fn seed_finished_turn(
                 call_id: format!("call-{position}"),
                 tool: tool.to_string(),
                 arguments: arguments.to_string(),
-                model_arguments: arguments.to_string(),
                 result: Some("no such file".to_string()),
                 model_result: None,
                 status: Some(status.to_string()),
@@ -5386,7 +5412,6 @@ impl ToolCallStore for MockStorage {
             call_id: tool_call.call_id,
             tool: tool_call.tool,
             arguments: tool_call.arguments,
-            model_arguments: tool_call.model_arguments,
             result: tool_call.result,
             model_result: tool_call.model_result,
             status: tool_call.status,
@@ -6347,6 +6372,17 @@ fn mock_secret_record(
 
 #[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
+    fn registered_secret_values(&self) -> swage_core::RegisteredSecretValues {
+        swage_core::RegisteredSecretValues::default()
+    }
+
+    async fn stored_keys_among(
+        &self,
+        _: Vec<String>,
+    ) -> Result<std::collections::HashSet<String>, StorageError> {
+        Ok(std::collections::HashSet::new())
+    }
+
     async fn write_credentials_with_audit(
         &self,
         creations: Vec<swage_storage::NewSecretRecord>,
@@ -10689,11 +10725,14 @@ async fn later_snapshot_masks_registered_secret_before_tool_replay_compaction() 
         .list_tool_calls_by_turn(first_turn)
         .await
         .unwrap();
-    let stored_arguments: serde_json::Value =
-        serde_json::from_str(&calls[0].model_arguments).unwrap();
-    let stored_prefix = stored_arguments["text"].as_str().unwrap();
-    assert_eq!(stored_prefix.len(), 2000);
-    assert!(stored_prefix.contains("unique-long-fixture-material-"));
+    let stored_arguments: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+    assert!(
+        stored_arguments["text"]
+            .as_str()
+            .unwrap()
+            .contains("unique-long-fixture-material-"),
+        "the call was recorded before the value was registered"
+    );
     let stored_result: swage_core::CompactToolReplay =
         serde_json::from_str(calls[0].model_result.as_ref().unwrap()).unwrap();
     assert!(stored_result.truncated);
@@ -10709,7 +10748,6 @@ async fn later_snapshot_masks_registered_secret_before_tool_replay_compaction() 
         call_id: "malformed-call".into(),
         tool: calls[0].tool.clone(),
         arguments: "{".into(),
-        model_arguments: calls[0].model_arguments.clone(),
         result: Some("Result of the call with malformed arguments".into()),
         model_result: Some(swage_core::compact_tool_result_for_model(
             "Result of the call with malformed arguments",
@@ -10734,7 +10772,6 @@ async fn later_snapshot_masks_registered_secret_before_tool_replay_compaction() 
         .create_tool_call(NewToolCall {
             call_id: "unverifiable-result".into(),
             arguments: "{}".into(),
-            model_arguments: "{}".into(),
             result: None,
             model_result: calls[0].model_result.clone(),
             position: malformed_call.position + 1,
@@ -11029,9 +11066,6 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
             call_id: "call_1".to_string(),
             tool: "echo".to_string(),
             arguments: r#"{"text":"first"}"#.to_string(),
-            model_arguments: swage_core::compact_tool_arguments_for_model(
-                &serde_json::json!({ "text": "first" }),
-            ),
             result: Some(r#"{"output":"first"}"#.to_string()),
             model_result: Some(swage_core::compact_tool_result_for_model_with_reference(
                 r#"{"output":"first"}"#,
@@ -11216,9 +11250,6 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
             call_id: "call_fail".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"command":"missing-command"}"#.to_string(),
-            model_arguments: swage_core::compact_tool_arguments_for_model(
-                &serde_json::json!({ "command": "missing-command" }),
-            ),
             result: Some("command not found".to_string()),
             model_result: Some(swage_core::compact_tool_result_for_model_with_reference(
                 "command not found",
@@ -11315,9 +11346,6 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
             call_id: top_level_call_id.clone(),
             tool: "python_execute".to_string(),
             arguments: r#"{"code":"run()"}"#.to_string(),
-            model_arguments: swage_core::compact_tool_arguments_for_model(
-                &serde_json::json!({"code": "run()"}),
-            ),
             result: Some(r#"{"ok":true}"#.to_string()),
             model_result: Some(swage_core::compact_tool_result_for_model(
                 r#"{"ok":true}"#,
@@ -11341,9 +11369,6 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
             call_id: "nested_read".to_string(),
             tool: "file_read".to_string(),
             arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
-            model_arguments: swage_core::compact_tool_arguments_for_model(
-                &serde_json::json!({"path": "Cargo.toml"}),
-            ),
             result: Some(r#"{"content":"workspace"}"#.to_string()),
             model_result: Some(swage_core::compact_tool_result_for_model(
                 r#"{"content":"workspace"}"#,
@@ -11412,9 +11437,6 @@ fn complete_replay_record(call_id: &str) -> ToolCallRecord {
         call_id: call_id.into(),
         tool: "file_read".into(),
         arguments: r#"{"path":"Cargo.toml"}"#.into(),
-        model_arguments: swage_core::compact_tool_arguments_for_model(
-            &serde_json::json!({"path": "Cargo.toml"}),
-        ),
         result: Some("workspace".into()),
         model_result: Some(swage_core::compact_tool_result_for_model(
             "workspace",
@@ -11468,7 +11490,6 @@ fn replayed_long_argument_values_are_bounded_inside_the_native_shape() {
     let mut record = complete_replay_record("long-write");
     record.tool = "file_write".into();
     record.arguments = raw.to_string();
-    record.model_arguments = swage_core::compact_tool_arguments_for_model(&raw);
 
     let replay = compact_tool_replay_messages(&[record]).unwrap();
     let ToolReplayPart::ToolCall { arguments, .. } = &replay[0].tool_replay().unwrap()[0] else {
@@ -11484,56 +11505,6 @@ fn replayed_long_argument_values_are_bounded_inside_the_native_shape() {
             long_key: "value"
         }),
         "only string values exceeding 2,000 characters may be shortened"
-    );
-}
-
-#[test]
-fn replayed_old_argument_envelopes_recover_bounded_raw_arguments_and_keep_results() {
-    let raw = serde_json::json!({"path": "Cargo.toml", "note": "x".repeat(2001)});
-    let mut old = complete_replay_record("old-read");
-    old.arguments = raw.to_string();
-    old.model_arguments = serde_json::json!({
-        "kind": "tool_arguments", "bytes": old.arguments.len(),
-        "sha256": "a".repeat(64), "truncated": true,
-        "preview": "not the original arguments"
-    })
-    .to_string();
-    let mut native = complete_replay_record("native-kind");
-    native.model_arguments = serde_json::json!({
-        "path": "kind.txt", "kind": "tool_arguments", "preview": "ordinary parameter"
-    })
-    .to_string();
-    let result = old.model_result.clone().unwrap();
-    let replay = compact_tool_replay_messages(&[old.clone(), native]).unwrap();
-    let calls = replay[0].tool_replay().unwrap();
-    assert!(
-        matches!(&calls[0], ToolReplayPart::ToolCall { call_id, arguments, .. }
-        if call_id == "old-read" && arguments == &serde_json::json!({
-            "path": "Cargo.toml", "note": "x".repeat(2000)
-        })),
-        "an old envelope must recover bounded arguments from the raw row"
-    );
-    assert!(
-        matches!(&calls[1], ToolReplayPart::ToolCall { arguments, .. }
-        if arguments == &serde_json::json!({
-            "path": "kind.txt", "kind": "tool_arguments", "preview": "ordinary parameter"
-        })),
-        "native parameters resembling part of an envelope must remain intact"
-    );
-    assert!(
-        matches!(&replay[1].tool_replay().unwrap()[0],
-        ToolReplayPart::ToolResult { call_id, content, .. }
-        if call_id == "old-read" && content == &result),
-        "recovering old arguments must retain the original result"
-    );
-
-    old.arguments = "{invalid".into();
-    assert!(
-        matches!(
-            compact_tool_replay_messages(&[old]),
-            Err(StorageError::Corruption { .. })
-        ),
-        "a preview is no substitute for corrupt raw arguments"
     );
 }
 
@@ -11611,7 +11582,7 @@ async fn replayed_native_arguments_are_redacted_in_recorded_provider_requests() 
     let stored_calls = storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
     assert_eq!(stored_calls.len(), 1);
     assert!(
-        stored_calls[0].model_arguments.contains(secret),
+        stored_calls[0].arguments.contains(secret),
         "the replay input must actually contain the registered secret"
     );
     let snapshot = storage.get_snapshot(turns[1].id).await.unwrap().unwrap();
@@ -11667,17 +11638,6 @@ fn replay_omits_rejected_tool_calls_with_empty_names() {
 }
 
 #[test]
-fn replay_uses_valid_raw_arguments_when_compact_arguments_are_unreadable() {
-    let mut record = complete_replay_record("legacy-call");
-    record.model_arguments = "not-json".into();
-
-    let arguments = parse_model_arguments(&record)
-        .expect("valid raw arguments are a safe legacy replay fallback");
-
-    assert_eq!(arguments["path"], "Cargo.toml");
-}
-
-#[test]
 fn replay_omits_calls_without_model_safe_results() {
     let mut record = complete_replay_record("incomplete-call");
     record.result = Some("raw result must not be replayed".into());
@@ -11708,15 +11668,20 @@ fn replay_includes_started_call_with_unknown_outcome() {
 }
 
 #[test]
-fn corrupt_replay_arguments_are_rejected() {
+fn undecodable_arguments_replay_as_none_beside_their_result() {
     let mut record = complete_replay_record("corrupt-call");
-    record.model_arguments = "{not-json".into();
-    record.arguments = "{also-not-json".into();
+    record.arguments = "{not-json".into();
 
-    let error = compact_tool_replay_messages(&[record])
-        .expect_err("corrupt replay arguments must not be sent to the provider");
+    let replay = compact_tool_replay_messages(&[record]).unwrap();
 
-    assert!(matches!(error, StorageError::Corruption { .. }));
+    assert!(matches!(
+        &replay[0].tool_replay().unwrap()[0],
+        ToolReplayPart::ToolCall { arguments, .. } if arguments == &serde_json::json!({})
+    ));
+    assert!(matches!(
+        &replay[1].tool_replay().unwrap()[0],
+        ToolReplayPart::ToolResult { call_id, .. } if call_id == "corrupt-call"
+    ));
 }
 
 #[test]
@@ -12210,10 +12175,10 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
                 request_id: Some("delegated-diagnostics".into()),
                 terminal_event: Some("message_stop".into()),
                 stop_reason: Some("end_turn".into()),
-                usage: swage_core::TokenUsage {
+                usage: Some(swage_core::TokenUsage {
                     input_tokens: 9,
                     output_tokens: 2,
-                },
+                }),
                 content_blocks: vec![swage_core::ProviderContentBlockWitness {
                     block_type: "text".into(),
                     count: 1,
@@ -19225,6 +19190,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
             Vec::new(),
             swage_context::memory::MemoryReach::EntriesByReference,
         )),
+        None,
         test_environment(),
         vec![],
         swage_tool::registry::OfferedTools::default(),
@@ -19261,6 +19227,7 @@ fn elements_built_without_memory_omit_the_memory_element() {
         vec![],
         vec![],
         vec![ChatMessage::new(Role::User, "Hello")],
+        None,
         None,
         test_environment(),
         vec![],
@@ -19322,6 +19289,7 @@ async fn named_assembly_composes_the_memory_element_like_any_other() {
         vec![],
         vec![],
         Some(memory),
+        None,
         test_environment(),
         vec![],
         swage_tool::registry::OfferedTools::default(),
@@ -19542,6 +19510,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
             Vec::new(),
             swage_context::memory::MemoryReach::EntriesByReference,
         )),
+        None,
         test_environment(),
         vec![],
         swage_tool::registry::OfferedTools::default(),
@@ -19846,6 +19815,7 @@ fn instruction_provenance_counts_configured_files_at_their_own_levels() {
             vec![],
             vec![],
             None,
+            None,
             test_environment(),
             vec![],
             swage_tool::registry::OfferedTools::default(),
@@ -19898,6 +19868,7 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         guidance,
         vec![],
         vec![],
+        None,
         None,
         test_environment(),
         vec![],
@@ -22018,7 +21989,6 @@ async fn a_long_delivered_tool_result_replays_inside_the_whole_frame() {
             call_id: "delegate-1".into(),
             tool: "delegate".into(),
             arguments: "{}".into(),
-            model_arguments: "{}".into(),
             result: Some(payload.clone()),
             model_result: Some(swage_core::compact_delivered_tool_result_for_model(
                 &payload,
@@ -22142,9 +22112,6 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
                 call_id: call_id.into(),
                 tool: tool.into(),
                 arguments: "{}".into(),
-                model_arguments: swage_core::compact_tool_arguments_for_model(&serde_json::json!(
-                    {}
-                )),
                 result: None,
                 model_result: None,
                 status: None,
@@ -22264,7 +22231,6 @@ async fn assistantless_delegated_round_follows_the_delegated_task() {
             call_id: "child-call".into(),
             tool: "echo".into(),
             arguments: "{}".into(),
-            model_arguments: "{}".into(),
             result: Some("done".into()),
             model_result: Some("done".into()),
             status: Some("success".into()),
@@ -26949,4 +26915,287 @@ async fn dispatcher_preserves_arguments_beyond_the_replay_bound() {
     .await;
     assert!(validated.load(Ordering::SeqCst), "validation must run");
     assert!(executed.load(Ordering::SeqCst), "execution must run");
+}
+
+// -----------------------------------------------------------------------
+// Reference materials in context
+// -----------------------------------------------------------------------
+
+mod reference_materials {
+    //! Active material of the session's scope reaches the turn's context;
+    //! archived material, another session's and another topic's do not.
+    use swage_context::materials::{
+        MaterialReach, MaterialsElement, ReferenceMaterial, ReferenceMaterialScope,
+    };
+    use swage_storage::store::MaterialStore;
+    use swage_storage::{AttachmentScopeKind, MaterialSourceKind, NewMaterial, NewTopic};
+
+    use super::*;
+
+    fn new_material(
+        scope_kind: AttachmentScopeKind,
+        session_id: Option<Uuid>,
+        topic_id: Option<Uuid>,
+        title: &str,
+        text: &str,
+    ) -> NewMaterial {
+        NewMaterial {
+            id: Uuid::new_v4(),
+            scope_kind,
+            session_id,
+            topic_id,
+            source_kind: MaterialSourceKind::Manual,
+            source_attachment_id: None,
+            title: title.into(),
+            relative_path: format!("{}.md", title.to_lowercase()),
+            mime_type: "text/markdown".into(),
+            content_text: text.into(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_loader_carries_only_the_scopes_active_material() {
+        let storage = Arc::new(MockStorage::new());
+        let (_state, session_id) = make_state_with_storage(vec![], storage.clone()).await;
+        let general = storage.general_scope().await.expect("general scope");
+
+        assert!(
+            crate::material::load_reference_materials(
+                &(storage.clone() as Arc<dyn swage_storage::Storage>),
+                session_id,
+                &general,
+                MaterialReach::ReadByTool,
+                crate::material::MaterialQuoting::AUTHORED,
+            )
+            .await
+            .is_none(),
+            "no element when nothing is active"
+        );
+
+        storage
+            .create_material(new_material(
+                AttachmentScopeKind::Session,
+                Some(session_id),
+                Some(general.id),
+                "Plan",
+                "Launch on Tuesday.",
+            ))
+            .await
+            .unwrap();
+        let archived = storage
+            .create_material(new_material(
+                AttachmentScopeKind::Session,
+                Some(session_id),
+                Some(general.id),
+                "Old",
+                "superseded",
+            ))
+            .await
+            .unwrap();
+        storage.archive_material(archived.id).await.unwrap();
+        let other = storage
+            .create_session(new_session(general.id))
+            .await
+            .unwrap();
+        storage
+            .create_material(new_material(
+                AttachmentScopeKind::Session,
+                Some(other.id),
+                Some(general.id),
+                "Theirs",
+                "not yours",
+            ))
+            .await
+            .unwrap();
+        let long_text =
+            "x".repeat(crate::material::MaterialQuoting::AUTHORED.per_material_bytes + 1);
+        storage
+            .create_material(new_material(
+                AttachmentScopeKind::Session,
+                Some(session_id),
+                Some(general.id),
+                "Long",
+                &long_text,
+            ))
+            .await
+            .unwrap();
+
+        let element = crate::material::load_reference_materials(
+            &(storage.clone() as Arc<dyn swage_storage::Storage>),
+            session_id,
+            &general,
+            MaterialReach::ReadByTool,
+            crate::material::MaterialQuoting::AUTHORED,
+        )
+        .await
+        .expect("active material yields the element");
+        let text = element.content()[0].text_content();
+        assert!(text.contains("- Plan (text/markdown, 18 bytes, attached to this session; id "));
+        assert!(text.contains("```text\nLaunch on Tuesday.\n```"), "{text}");
+        assert!(text.contains("- Long (text/markdown, 4097 bytes, attached to this session; id "));
+        assert!(
+            !text.contains(&long_text),
+            "a long material is listed, never quoted"
+        );
+        assert!(!text.contains("Old") && !text.contains("Theirs"), "{text}");
+        assert_eq!(
+            element.source(),
+            "reference materials (2 active, some quoted inline)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_folder_of_short_files_is_quoted_only_up_to_the_turns_budget() {
+        let storage = Arc::new(MockStorage::new());
+        let (_state, session_id) = make_state_with_storage(vec![], storage.clone()).await;
+        let general = storage.general_scope().await.expect("general scope");
+        let file_text = "y".repeat(crate::material::MaterialQuoting::AUTHORED.per_material_bytes);
+        let files = crate::material::MaterialQuoting::AUTHORED.total_bytes / file_text.len() + 2;
+        for index in 0..files {
+            storage
+                .create_material(new_material(
+                    AttachmentScopeKind::Session,
+                    Some(session_id),
+                    Some(general.id),
+                    &format!("notes/{index}.md"),
+                    &file_text,
+                ))
+                .await
+                .unwrap();
+        }
+        let element = crate::material::load_reference_materials(
+            &(storage.clone() as Arc<dyn swage_storage::Storage>),
+            session_id,
+            &general,
+            MaterialReach::ReadByTool,
+            crate::material::MaterialQuoting::AUTHORED,
+        )
+        .await
+        .expect("active material yields the element");
+        let text = element.content()[0].text_content();
+        assert_eq!(text.matches("- notes/").count(), files);
+        assert_eq!(
+            text.matches("```text").count(),
+            crate::material::MaterialQuoting::AUTHORED.total_bytes / file_text.len()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_topic_sessions_context_carries_the_topics_material_and_not_another_topics() {
+        let storage = Arc::new(MockStorage::new());
+        let (_state, _general_session) = make_state_with_storage(vec![], storage.clone()).await;
+        let orchard = TopicStore::create(
+            storage.as_ref(),
+            NewTopic {
+                name: "Orchard".into(),
+                slug: "orchard".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let elsewhere = TopicStore::create(
+            storage.as_ref(),
+            NewTopic {
+                name: "Elsewhere".into(),
+                slug: "elsewhere".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let session = storage
+            .create_session(new_session(orchard.id))
+            .await
+            .unwrap();
+        storage
+            .create_material(new_material(
+                AttachmentScopeKind::Topic,
+                None,
+                Some(orchard.id),
+                "Guide",
+                "Prune in winter.",
+            ))
+            .await
+            .unwrap();
+        storage
+            .create_material(new_material(
+                AttachmentScopeKind::Topic,
+                None,
+                Some(elsewhere.id),
+                "Far",
+                "elsewhere",
+            ))
+            .await
+            .unwrap();
+
+        let element = crate::material::load_reference_materials(
+            &(storage.clone() as Arc<dyn swage_storage::Storage>),
+            session.id,
+            &orchard,
+            MaterialReach::ReadByTool,
+            crate::material::MaterialQuoting::AUTHORED,
+        )
+        .await
+        .expect("the topic's material yields the element");
+        let text = element.content()[0].text_content();
+        assert!(text.contains("- Guide (text/markdown, 16 bytes, attached to the topic; id "));
+        assert!(!text.contains("Far"));
+    }
+
+    #[test]
+    fn the_builder_places_materials_between_memory_and_prompts_and_omits_them_when_absent() {
+        let materials = MaterialsElement::new(
+            vec![ReferenceMaterial {
+                id: "m-1".into(),
+                title: "Plan".into(),
+                mime_type: "text/markdown".into(),
+                byte_count: 5,
+                scope: ReferenceMaterialScope::Session,
+                inline_text: Some("short".into()),
+            }],
+            MaterialReach::ReadByTool,
+        );
+        let mut elements = build_assembly_elements(
+            "Be helpful.",
+            &[],
+            vec![],
+            vec![],
+            vec![],
+            Some(MemoryIndexElement::new(
+                None,
+                Vec::new(),
+                swage_context::memory::MemoryReach::EntriesByReference,
+            )),
+            Some(materials),
+            test_environment(),
+            vec![],
+            swage_tool::registry::OfferedTools::default(),
+            "claude-test-model",
+            swage_context::working_norms::WorkingNormsScaffold::Native,
+            &[],
+            None,
+        );
+        elements.sort_by_key(|element| std::cmp::Reverse(element.priority()));
+        let names: Vec<&str> = elements.iter().map(|element| element.name()).collect();
+        let position = |name: &str| names.iter().position(|n| *n == name).unwrap();
+        assert!(position("memory") < position("materials"));
+        assert!(position("materials") < position("prompts"));
+
+        let without = build_assembly_elements(
+            "Be helpful.",
+            &[],
+            vec![],
+            vec![],
+            vec![],
+            None,
+            None,
+            test_environment(),
+            vec![],
+            swage_tool::registry::OfferedTools::default(),
+            "claude-test-model",
+            swage_context::working_norms::WorkingNormsScaffold::Native,
+            &[],
+            None,
+        );
+        assert!(without.iter().all(|element| element.name() != "materials"));
+    }
 }

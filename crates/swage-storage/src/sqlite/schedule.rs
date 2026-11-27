@@ -290,7 +290,8 @@ fn serialise_optional_dt(value: Option<DateTime<Utc>>) -> Option<String> {
 
 #[async_trait]
 impl ScheduleStore for SqliteStorage {
-    async fn create_schedule(&self, schedule: NewSchedule) -> Result<Schedule, StorageError> {
+    async fn create_schedule(&self, mut schedule: NewSchedule) -> Result<Schedule, StorageError> {
+        self.mask(&mut schedule.message);
         let delivery_json = serialise_json(&schedule.delivery_routing)?;
         self.with_conn(move |conn| {
             let id = schedule.id;
@@ -393,8 +394,9 @@ impl ScheduleStore for SqliteStorage {
     async fn update_schedule(
         &self,
         id: Uuid,
-        update: UpdateSchedule,
+        mut update: UpdateSchedule,
     ) -> Result<Schedule, StorageError> {
+        self.mask_option(&mut update.message);
         // Apply only the fields the caller supplied. Expanding a partial
         // update from a previously-read row would let an operator edit write
         // stale lifecycle values over a scheduler tick that landed between

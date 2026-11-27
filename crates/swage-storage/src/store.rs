@@ -515,6 +515,18 @@ pub trait SecretStore: AuditStore + Send + Sync {
     async fn revoke_secret(&self, id: Uuid) -> Result<SecretRecord, StorageError>;
     async fn restore_secret(&self, id: Uuid) -> Result<SecretRecord, StorageError>;
     async fn get_managed_secret_value(&self, id: Uuid) -> Result<Option<String>, StorageError>;
+    /// The registered secret values this store masks out of the conversation
+    /// records it writes — turn input and replies, messages, tool calls, queued
+    /// input and context snapshots. Whoever reads the values from their
+    /// backends replaces the set, so every writer masks against the same one.
+    fn registered_secret_values(&self) -> swage_core::RegisteredSecretValues;
+    /// Those of `candidates` this store holds as its own keys: values of its
+    /// identifier and slug columns. An answer that masks registered values
+    /// keeps these, so it still names what it points at.
+    async fn stored_keys_among(
+        &self,
+        candidates: Vec<String>,
+    ) -> Result<std::collections::HashSet<String>, StorageError>;
 }
 
 #[async_trait]
@@ -1384,8 +1396,7 @@ pub trait WorkflowStore: Send + Sync {
         from: &str,
         to: &str,
     ) -> Result<bool, StorageError>;
-    /// Park a run on a durable wait: state `parked`, due at `wake_at`, its
-    /// engine torn down until the waker resumes it by replay.
+    /// Park a run on a timer, recording its deadline along with the scheduler wake time.
     async fn set_workflow_run_parked(
         &self,
         id: Uuid,
@@ -2403,6 +2414,17 @@ mod tests {
 
     #[async_trait]
     impl SecretStore for StubStorage {
+        fn registered_secret_values(&self) -> swage_core::RegisteredSecretValues {
+            swage_core::RegisteredSecretValues::default()
+        }
+
+        async fn stored_keys_among(
+            &self,
+            _: Vec<String>,
+        ) -> Result<std::collections::HashSet<String>, StorageError> {
+            unimplemented!()
+        }
+
         async fn write_credentials_with_audit(
             &self,
             _: Vec<NewSecretRecord>,

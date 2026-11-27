@@ -52,7 +52,7 @@ async fn run_value(
         .list_workflow_journal(run.id)
         .await
         .map_err(|error| error.to_string())?;
-    let workers = crate::workflow::journal_with_live_workers(state, run.id, entries)
+    let workers = crate::workflow::journal_with_live_workers(state, run.id, entries, detailed)
         .await?
         .into_iter()
         .filter(|entry| entry.agent_call.is_some())
@@ -144,7 +144,8 @@ pub async fn status_for_session(
     let ended_runs = ended
         .into_iter()
         .map(crate::workflow::ending_notice)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.message().to_owned())?;
     Ok(json!({ "runs": values, "ended_runs": ended_runs, "more_ended_runs": more }))
 }
 
@@ -184,26 +185,24 @@ impl Tool for WorkflowRunStatusTool {
         true
     }
 
-    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+    async fn execute(&self, mut params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let invalid = |message: String| ToolError::InvalidParameters {
             name: WORKFLOW_RUN_STATUS_TOOL.into(),
             message,
         };
+        // A blank run_id at the tool boundary selects the open listing.
+        if let Some(field) = params.get_mut("run_id")
+            && let Some(text) = field.as_str()
+        {
+            let trimmed = text.trim();
+            *field = if trimmed.is_empty() {
+                Value::Null
+            } else {
+                Value::String(trimmed.to_owned())
+            };
+        }
         let request: swage_protocol::client::workflow::WorkflowRunStatusRequest =
             serde_json::from_value(params).map_err(|error| invalid(error.to_string()))?;
-        // Models routinely send an optional field as "" rather than
-        // omitting it; an empty or blank run_id means "list the open runs".
-        let run_id = request.run_id.as_deref()
-            .map(str::trim)
-            .filter(|raw| !raw.is_empty())
-            .map(|raw| {
-                Uuid::parse_str(raw).map_err(|error| {
-                    invalid(format!(
-                        "run_id must be a run UUID from workflow_run_status or workflow_run, or omitted to list every open run: {error}"
-                    ))
-                })
-            })
-            .transpose()?;
         let session_id =
             Uuid::parse_str(ctx.session_id()).map_err(|error| invalid(error.to_string()))?;
         let state = ctx
@@ -232,7 +231,7 @@ impl Tool for WorkflowRunStatusTool {
                 .await
                 .map_err(|error| invalid(error.to_string()))?;
         }
-        status_for_session(state, session_id, run_id)
+        status_for_session(state, session_id, request.run_id)
             .await
             .map_err(|message| ToolError::ExecutionFailed {
                 name: WORKFLOW_RUN_STATUS_TOOL.into(),

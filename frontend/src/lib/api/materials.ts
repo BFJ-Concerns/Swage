@@ -47,3 +47,8 @@ export async function createMaterial(
   const response = await request("/api/materials", "POST", requestBody);
   return response.json() as Promise<MaterialRecord>;
 }
+
+export async function archiveMaterial(materialId: string): Promise<MaterialRecord> {
+  const response = await request(`/api/materials/${materialId}/archive`, "POST");
+  return response.json() as Promise<MaterialRecord>;
+}

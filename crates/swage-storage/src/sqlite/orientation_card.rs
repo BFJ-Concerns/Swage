@@ -65,9 +65,14 @@ fn load_card(
 impl OrientationCardStore for SqliteStorage {
     async fn create_orientation_card(
         &self,
-        card: NewOrientationCard,
+        mut card: NewOrientationCard,
         session_id: Option<Uuid>,
     ) -> Result<OrientationCard, StorageError> {
+        // Masked before the insert: the table is append-only, so the masking
+        // triggers' rewrite after the insert would be refused.
+        self.mask(&mut card.title);
+        self.mask(&mut card.content);
+        self.mask(&mut card.authored_by);
         if card.title.trim().is_empty()
             || card.content.trim().is_empty()
             || card.authored_by.trim().is_empty()
@@ -177,9 +182,12 @@ impl SqliteStorage {
         expected_topic_id: Uuid,
         card_id: Uuid,
         replacement_card_id: Option<Uuid>,
-        actor: String,
+        mut actor: String,
         session_id: Option<Uuid>,
     ) -> Result<OrientationCardLifecycle, StorageError> {
+        // Masked before the insert: the table is append-only, so the masking
+        // triggers' rewrite after the insert would be refused.
+        self.mask(&mut actor);
         if actor.trim().is_empty() {
             return Err(StorageError::ConstraintViolation(
                 "orientation-card lifecycle actor must not be empty".into(),
@@ -267,6 +275,43 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    /// A card holding a registered value is created masked: the table is
+    /// append-only, so the value cannot be masked after the insert.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_card_holding_a_registered_value_is_created_masked() {
+        use crate::store::SecretStore;
+
+        let (storage, topic_id, observation_id) = fixture().await;
+        storage
+            .registered_secret_values()
+            .replace(vec!["card-canary-value".into()]);
+        let card = storage
+            .create_orientation_card(
+                NewOrientationCard {
+                    topic_id,
+                    title: "Deploy key card-canary-value".into(),
+                    content: "Use card-canary-value to deploy".into(),
+                    authored_by: "agent".into(),
+                    observation_ids: vec![observation_id],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(card.title, "Deploy key [REDACTED_SECRET]");
+        let content: String = storage
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT content FROM orientation_cards WHERE id = ?1",
+                    [card.id.to_string()],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(content, "Use [REDACTED_SECRET] to deploy");
     }
 
     #[tokio::test(flavor = "multi_thread")]

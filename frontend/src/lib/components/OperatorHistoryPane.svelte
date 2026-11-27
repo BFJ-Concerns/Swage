@@ -80,10 +80,12 @@
 
   // What a tool call or completion gave back, as the text it was, rather
   // than escaped inside the event's JSON detail.
-  function returnedText(metadata: unknown): string | null {
+  function returnedText({ event_kind, metadata }: AuditEventView): string | null {
     if (!isRecord(metadata)) return null;
-    if (typeof metadata.result === "string") return metadata.result;
-    if (typeof metadata.error === "string" && metadata.error) return metadata.error;
+    if (event_kind === "tool_call") {
+      return typeof metadata.result === "string" ? metadata.result : null;
+    }
+    if (event_kind !== "completion") return null;
     const parts: string[] = [];
     if (typeof metadata.content === "string" && metadata.content) parts.push(metadata.content);
     if (Array.isArray(metadata.tool_calls) && metadata.tool_calls.length > 0) {
@@ -170,13 +172,18 @@
     {:else}
       <div class="entries">
         {#each auditEvents as event (event.id)}
-          {@const returned = returnedText(event.metadata)}
+          {@const returned = returnedText(event)}
+          {@const error = event.event_kind === "completion" && isRecord(event.metadata)
+            && typeof event.metadata.error === "string" ? event.metadata.error : null}
           <article class="history-entry audit-entry">
             <div class="entry-heading">
               <strong>{event.event_kind} · {event.entity_kind} · {event.entity_id}</strong>
               <time datetime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time>
             </div>
             <p>{event.summary} · session <span class="mono">{event.session_id ?? "none"}</span></p>
+            {#if error}
+              <p><strong>Error</strong> {error}</p>
+            {/if}
             {#if returned !== null}
               <details class="returned">
                 <summary>What it returned</summary>

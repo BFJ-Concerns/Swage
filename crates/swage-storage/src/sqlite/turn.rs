@@ -153,7 +153,8 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
 
 #[async_trait]
 impl TurnStore for SqliteStorage {
-    async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError> {
+    async fn create_turn(&self, mut turn: NewTurn) -> Result<Turn, StorageError> {
+        self.mask_option(&mut turn.user_input);
         self.with_conn(|conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
@@ -320,7 +321,7 @@ impl TurnStore for SqliteStorage {
         &self,
         call: crate::model::ToolCallRecord,
     ) -> Result<(), StorageError> {
-        let (Some(result), Some(model_result), Some(status), Some(duration_ms)) = (
+        let (Some(mut result), Some(mut model_result), Some(status), Some(duration_ms)) = (
             call.result,
             call.model_result,
             call.status,
@@ -330,6 +331,8 @@ impl TurnStore for SqliteStorage {
                 "delegation settlement requires a complete tool result".into(),
             ));
         };
+        self.mask(&mut result);
+        self.mask(&mut model_result);
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let recorded = tx.execute(
@@ -412,7 +415,8 @@ impl TurnStore for SqliteStorage {
     }
 
     async fn update_response(&self, id: Uuid, response: &str) -> Result<(), StorageError> {
-        let response = response.to_owned();
+        let mut response = response.to_owned();
+        self.mask(&mut response);
         self.with_conn(move |conn| {
             conn.execute(
                 "UPDATE turns SET assistant_response = ?1 WHERE id = ?2",
@@ -428,10 +432,11 @@ impl TurnStore for SqliteStorage {
         id: Uuid,
         inbound_audit: &InboundAudit,
     ) -> Result<(), StorageError> {
-        let inbound_audit_json =
+        let mut inbound_audit_json =
             serde_json::to_string(inbound_audit).map_err(|error| StorageError::Serialisation {
                 message: format!("failed to serialise inbound_audit: {error}"),
             })?;
+        self.mask(&mut inbound_audit_json);
         self.with_conn(move |conn| {
             conn.execute(
                 "UPDATE turns SET inbound_audit = ?1 WHERE id = ?2",
@@ -505,7 +510,8 @@ impl TurnStore for SqliteStorage {
         id: Uuid,
         message: &str,
     ) -> Result<(), StorageError> {
-        let message = message.to_owned();
+        let mut message = message.to_owned();
+        self.mask(&mut message);
         // First explanation wins: a later error on the same turn (a cleanup
         // failure after the provider error) never replaces the account the
         // person first saw.
@@ -528,9 +534,11 @@ impl TurnStore for SqliteStorage {
         // Serialise the JSON value to a text string for storage. This mirrors
         // how cost_microcents stores a scalar — we store structured_output as
         // a TEXT column containing compact JSON.
-        let json_text = serde_json::to_string(output).map_err(|e| StorageError::Serialisation {
-            message: e.to_string(),
-        })?;
+        let mut json_text =
+            serde_json::to_string(output).map_err(|e| StorageError::Serialisation {
+                message: e.to_string(),
+            })?;
+        self.mask(&mut json_text);
         self.with_conn(move |conn| {
             conn.execute(
                 "UPDATE turns SET structured_output = ?1 WHERE id = ?2",

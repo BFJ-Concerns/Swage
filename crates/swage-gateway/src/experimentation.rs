@@ -35,6 +35,11 @@ pub const LOCATION_CONTEXT_ASSEMBLY: &str = "context.assembly";
 pub const LOCATION_WORKING_NORMS: &str = "context.working_norms";
 pub const LOCATION_TASK_PROMPT: &str = "task.prompt";
 
+/// How much of a session's reference material its turns quote whole in
+/// context, the rest being read with `material_read`. The authored limits
+/// (`crate::material::MaterialQuoting::AUTHORED`) are the first variant.
+pub const LOCATION_MATERIAL_QUOTING: &str = "context.material_quoting";
+
 /// The closing-account request: the text that asks the model for a final
 /// account when its last round after tool rounds returns none. The authored
 /// default (`swage_agent::closing_account::CLOSING_ACCOUNT_REQUEST`) is the

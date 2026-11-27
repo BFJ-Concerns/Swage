@@ -157,6 +157,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
         compaction_focus,
         requested_model,
         None,
+        None,
         false,
     )
     .await
@@ -198,6 +199,7 @@ pub(crate) async fn process_turn_with_composition(
         None,
         None,
         None,
+        None,
         false,
     )
     .await
@@ -224,6 +226,7 @@ pub(crate) async fn process_turn_with_composition_and_model(
     agent_call_scope: Option<Uuid>,
     requested_model: Option<String>,
     provider_failure_observer: Option<ProviderFailureObserver>,
+    workflow_run_id: Option<Uuid>,
     reuse_persisted_input: bool,
 ) -> Result<(), GatewayError> {
     process_turn_with_composition_and_focus(
@@ -244,6 +247,7 @@ pub(crate) async fn process_turn_with_composition_and_model(
         None,
         requested_model,
         provider_failure_observer,
+        workflow_run_id,
         reuse_persisted_input,
     )
     .await

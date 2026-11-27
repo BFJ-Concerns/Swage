@@ -301,6 +301,7 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
             None,
             None,
             None,
+            None,
             true,
         ))
         .await

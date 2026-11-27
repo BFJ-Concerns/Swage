@@ -46,14 +46,15 @@ describe("OperatorHistoryPane", () => {
     vi.mocked(fetchAuditEvents).mockResolvedValue({ events: [
       recorded("call", "tool_call", { tool: "shell", status: "success", result: "line one\nline \"two\"" }),
       recorded("cut", "completion", { finish_reason: "length", content: "a summary that stops mid-", tool_calls: [] }),
-      recorded("config", "configuration_change", { action: "update" }),
+      recorded("failed", "completion", { content: "the partial answer", error: "upstream stream failure" }),
+      recorded("gap", "turn_record_degraded", { error: "context snapshot could not be written" }),
     ], next_cursor: null });
     component = mount(OperatorHistoryPane, { target: document.body });
-    await vi.waitFor(() => expect(document.querySelectorAll(".audit-entry")).toHaveLength(3));
-    const returned = [...document.querySelectorAll(".audit-entry")].map(
-      (entry) => entry.querySelector(".returned pre")?.textContent ?? null,
-    );
-    expect(returned).toEqual(['line one\nline "two"', "a summary that stops mid-", null]);
+    await vi.waitFor(() => expect(document.querySelectorAll(".audit-entry")).toHaveLength(4));
+    const entries = [...document.querySelectorAll(".audit-entry")];
+    const returned = entries.map((entry) => entry.querySelector(".returned pre")?.textContent ?? null);
+    expect(returned).toEqual(['line one\nline "two"', "a summary that stops mid-", "the partial answer", null]);
+    expect(entries[2].querySelector("p:has(strong)")?.textContent).toContain("upstream stream failure");
   });
 
   it("reads the audit record by the filters the operator sets and pages older events", async () => {

@@ -253,6 +253,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
         eprintln!("Failed to register the Codex auth store as governed secrets: {error}");
         std::process::exit(1);
     }
+    // Every record written from here on is masked against the registered
+    // values, so they are read before the gateway takes any work.
+    state.secret_manager.refresh_registered_values().await;
     if let Err(error) = recover_worktrees_after_crash(&state).await {
         eprintln!("Worktree startup recovery failed: {error}");
         std::process::exit(1);
@@ -787,8 +790,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         docs_read::DocsReadTool, hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
         knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
         knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
-        knowledge::KnowledgeSearchTool, memory::MemoryReadTool, memory::MemoryWriteTool,
-        plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        knowledge::KnowledgeSearchTool, material::MaterialReadTool, memory::MemoryReadTool,
+        memory::MemoryWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
         run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
         session_variable::SessionVariableTool, surface::SurfaceLibraryTool,
         surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
@@ -848,6 +851,9 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(KnowledgeCiteTool),
         Arc::new(KnowledgeOrientTool),
         Arc::new(KnowledgeCurateOrientationTool),
+        Arc::new(MaterialReadTool {
+            max_output_bytes: max_output,
+        }),
     ]);
 
     let base_tools = if let Some(browser_host) = browser_host {

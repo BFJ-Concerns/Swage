@@ -5,22 +5,11 @@
 
 import { fromStore, get, writable, type Writable } from "svelte/store";
 
+import { randomUuid } from "../random-uuid";
+import type { Effort } from "../protocol/Effort";
 import type { MessageAttachment } from "../protocol/MessageAttachment";
 import { stopConversationTurn } from "../api/conversations";
 import type { MessageView, ServerEvent, ToolCallView } from "../types";
-
-/**
- * A random version-4 UUID identifying one send. `crypto.randomUUID` exists
- * only in secure contexts, and the web UI is also opened over plain HTTP from
- * another machine on a trusted network; `getRandomValues` is available in both.
- */
-function newClientId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
 
 // Approval state surfaced for the ApprovalCard / MessageInput swap.
 // Fields match the `approval_required` server event so the UI can render
@@ -88,7 +77,19 @@ export interface StreamingStore {
     conversationId?: string | null,
     recoveredMessages?: MessageView[],
   ): void;
-  startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
+  startTurn(
+    content: string,
+    selectedModelId?: string | null,
+    agentId?: string | null,
+    effort?: Effort | null,
+    attachments?: MessageAttachment[],
+  ): void | Promise<string | null>;
+  /** Resolve or create the session needed to register composer files. */
+  ensureConversation?(
+    selectedModelId?: string | null,
+    agentId?: string | null,
+    effort?: Effort | null,
+  ): Promise<string | null>;
   /**
    * Stop the running turn in the current conversation. Resolves once the
    * gateway has accepted the stop; rejects with the gateway's reason when it
@@ -116,6 +117,7 @@ export interface StreamingStoreOptions {
     /** The thread the composer sends on; null or absent is the root thread. */
     readonly activeThreadId?: string | null;
     appendOptimisticUserMessage(message: {
+      attachments?: MessageAttachment[];
       client_id?: string;
       content: string;
       timestamp: string;
@@ -695,17 +697,25 @@ export function createStreamingStore(
       stream.pendingApprovalStore.set(null);
     },
 
-    startTurn(content: string, selectedModelId?: string | null): void {
+    ensureConversation: async () => currentConversationId(),
+
+    startTurn(
+      content: string,
+      selectedModelId?: string | null,
+      _agentId?: string | null,
+      _effort?: Effort | null,
+      attachments?: MessageAttachment[],
+    ): void {
       const conversationId = currentConversationId();
       const stream = streamStateFor(conversationId);
-      const clientId = newClientId();
+      const clientId = randomUuid();
       if (stream.isStreamingState.current || hasProcessingRequest(conversationId)) {
         // A turn is running: the message is sent and the gateway holds it
         // for the next turn, announcing it as queued. The live stream and
         // the message list are left as they are.
         const threadId = options?.conversationStore?.activeThreadId ?? null;
         if (conversationId) {
-          options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId, clientId);
+          options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, attachments, threadId, clientId);
         }
         return;
       }
@@ -721,6 +731,7 @@ export function createStreamingStore(
       // Immediately record the user's message so the conversation history
       // updates before the first token arrives.
       options?.conversationStore?.appendOptimisticUserMessage({
+        ...(attachments?.length ? { attachments } : {}),
         client_id: clientId,
         content,
         timestamp: new Date().toISOString(),
@@ -731,7 +742,7 @@ export function createStreamingStore(
       const threadId = options?.conversationStore?.activeThreadId ?? null;
       stream.threadId = threadId;
       if (conversationId) {
-        options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId, clientId);
+        options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, attachments, threadId, clientId);
       }
     },
 
@@ -757,7 +768,7 @@ export interface ConversationAutoCreateOptions {
    * queues frames during the handshake, so the turn can be dispatched as soon
    * as this resolves without racing the connection.
    */
-  createConversation(selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): Promise<string | null>;
+  createConversation(selectedModelId?: string | null, agentId?: string | null, effort?: Effort | null): Promise<string | null>;
 }
 
 // Wraps a streaming store so the composer works in a topic with no
@@ -773,7 +784,27 @@ export function withConversationAutoCreate(
   const isCreatingStore = writable(false);
   const isCreatingState = fromStore(isCreatingStore);
 
+  let creating: Promise<string | null> | null = null;
+  async function ensureConversation(
+    selectedModelId?: string | null,
+    agentId?: string | null,
+    effort?: Effort | null,
+  ): Promise<string | null> {
+    if (options.hasActiveConversation()) return base.ensureConversation?.() ?? null;
+    if (!creating) {
+      isCreatingStore.set(true);
+      creating = options.createConversation(selectedModelId, agentId, effort)
+        .catch(() => null)
+        .finally(() => {
+          creating = null;
+          isCreatingStore.set(false);
+        });
+    }
+    return creating;
+  }
+
   return {
+    ensureConversation,
     get isStreaming(): boolean {
       return isCreatingState.current || base.isStreaming;
     },
@@ -819,34 +850,35 @@ export function withConversationAutoCreate(
       base.reconcileAfterReconnect(turnGeneration, conversationId, recoveredMessages),
     cancelTurn: () => base.cancelTurn(),
 
-    startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void {
+    startTurn(
+      content: string,
+      selectedModelId?: string | null,
+      agentId?: string | null,
+      effort?: Effort | null,
+      attachments?: MessageAttachment[],
+    ): void | Promise<string | null> {
+      // With no conversation in scope, resolves with the session created for
+      // the message, or null when none could be.
       if (options.hasActiveConversation()) {
-        base.startTurn(content, selectedModelId);
+        base.startTurn(content, selectedModelId, undefined, undefined, attachments);
         return;
       }
-      if (get(isCreatingStore)) return;
-      isCreatingStore.set(true);
+      if (get(isCreatingStore)) return Promise.resolve(null);
 
-      void (async () => {
-        try {
-          // A rejection counts as a failed creation, same as a null id.
-          const id = await options
-            .createConversation(selectedModelId, agentId, effort)
-            .catch(() => null);
-          if (id) {
-            base.startTurn(content, selectedModelId);
-            return;
-          }
-          // Creation failed and the composer has already cleared the draft —
-          // echo the content back so it isn't lost.
-          base.handleServerEvent({
-            type: "error",
-            code: "conversation_create_failed",
-            message: `Could not create a conversation, so this was not sent: ${content}`,
-          });
-        } finally {
-          isCreatingStore.set(false);
+      return (async () => {
+        const id = await ensureConversation(selectedModelId, agentId, effort);
+        if (id) {
+          base.startTurn(content, selectedModelId, undefined, undefined, attachments);
+          return id;
         }
+        const imageCount = attachments?.length ?? 0;
+        const unsent = [content, imageCount ? `${imageCount} image${imageCount === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+        base.handleServerEvent({
+          type: "error",
+          code: "conversation_create_failed",
+          message: `Could not create a conversation, so this was not sent: ${unsent}`,
+        });
+        return null;
       })();
     },
   };

@@ -69,6 +69,63 @@ async fn activity_recording_middleware(
     next.run(request).await
 }
 
+/// API paths whose answers carry text the person owns rather than a record:
+/// the secret store, which exists to hand a generated value back once; the
+/// recovery bundle, which carries the secret store to a new installation;
+/// and the settings, which the page reads, edits and saves whole, so a
+/// masked answer would be written back into the person's configuration.
+const UNMASKED_API_PATHS: &[&str] = &["/api/secrets", "/api/recovery", "/api/settings"];
+
+/// Mask registered secret values in every JSON answer the API gives
+/// ([`crate::answer_masking`]), as the conversation socket does. A handler
+/// that answers with what it was sent, before or instead of what it stored,
+/// is covered here.
+async fn registered_value_masking_middleware(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+    let owned_text = UNMASKED_API_PATHS
+        .iter()
+        .any(|owned| path == *owned || path.starts_with(&format!("{owned}/")));
+    let is_json = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"));
+    if !path.starts_with("/api/")
+        || owned_text
+        || !is_json
+        || state
+            .storage
+            .registered_secret_values()
+            .current()
+            .is_empty()
+    {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(%error, %path, "response body could not be read for masking");
+            return Response::builder()
+                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .expect("an empty response builds");
+        }
+    };
+    let Ok(mut text) = String::from_utf8(bytes.to_vec()) else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    if crate::answer_masking::mask_answer_text(state.storage.as_ref(), &mut text).await {
+        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    }
+    Response::from_parts(parts, Body::from(text))
+}
+
 /// Build the axum router for the full gateway API and frontend shell.
 ///
 /// # Routes
@@ -130,13 +187,22 @@ pub fn build_router(state: AppState) -> Router {
             "/api/topics/{id}/workflow-runs",
             get(workflow::list_runs).post(workflow::start_inline_run),
         )
-        .route("/api/workflow-runs/{id}", get(workflow::get_run))
         .route(
-            "/api/workflow-runs/{id}/events",
+            swage_protocol::client::routes::WORKFLOW_RUN_PATH,
+            get(workflow::get_run),
+        )
+        .route(
+            swage_protocol::client::routes::WORKFLOW_RUN_EVENTS_PATH,
             post(workflow::post_operator_run_event),
         )
-        .route("/api/workflow-runs/{id}/cancel", post(workflow::cancel_run))
-        .route("/api/workflow-runs/{id}/resume", post(workflow::resume_run))
+        .route(
+            swage_protocol::client::routes::WORKFLOW_RUN_CANCEL_PATH,
+            post(workflow::cancel_run),
+        )
+        .route(
+            swage_protocol::client::routes::WORKFLOW_RUN_RESUME_PATH,
+            post(workflow::resume_run),
+        )
         .route(
             "/api/conversations/{id}/branches",
             get(handlers::list_conversation_branches).post(handlers::create_conversation_branch),
@@ -466,6 +532,10 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             activity_recording_middleware,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            registered_value_masking_middleware,
+        ))
         .with_state(state)
 }
 
@@ -480,7 +550,7 @@ mod tests {
     use tower::ServiceExt;
 
     use swage_protocol::client::routes::{Method, routes};
-    use swage_storage::store::{Storage, TopicStore};
+    use swage_storage::store::{SecretStore, Storage, TopicStore};
 
     use super::build_router;
     use crate::{state::AppState, turn::tests::MockProvider};
@@ -757,5 +827,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A topic named with a registered value is created with its name
+    /// masked and its slug, a key the product reads back, left as derived,
+    /// in the store and in the answers; the topic list still answers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_topic_named_with_a_registered_value_keeps_its_slug() {
+        let root = tempfile::tempdir().unwrap();
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::open(&root.path().join("mask.db")).unwrap());
+        storage
+            .registered_secret_values()
+            .replace(vec!["73918264".to_string()]);
+        let state = AppState::for_test(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let router = build_router(state);
+        let request = |method: &str, body: &'static str| {
+            Request::builder()
+                .method(method)
+                .uri("/api/topics")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+
+        let created = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                r#"{"name":"Topic 73918264","description":"safe"}"#,
+            ))
+            .await
+            .unwrap();
+        assert!(created.status().is_success(), "{}", created.status());
+        let bytes = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let topic: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(topic["name"], "Topic [REDACTED_SECRET]");
+        assert_eq!(topic["slug"], "topic-73918264");
+
+        let listed = router.oneshot(request("GET", "")).await.unwrap();
+        assert!(listed.status().is_success(), "{}", listed.status());
+        let bytes = to_bytes(listed.into_body(), usize::MAX).await.unwrap();
+        let topics: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(topics["topics"][0]["name"], "Topic [REDACTED_SECRET]");
+        assert_eq!(topics["topics"][0]["slug"], "topic-73918264");
     }
 }

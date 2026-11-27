@@ -15,6 +15,7 @@ use swage_core::{
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_protocol::client::turn::MessageAttachment;
 use swage_protocol::client::workflow::{WorkflowAttemptResolution, WorkflowProviderRoundOutcome};
+use swage_provider::attribution::{COMPLETION_ATTRIBUTION, CompletionAttribution};
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
     NewTurn, ToolCallRecord, TurnState,
@@ -157,6 +158,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     compaction_focus: Option<String>,
     requested_model: Option<String>,
     provider_failure_observer: Option<ProviderFailureObserver>,
+    workflow_run_id: Option<Uuid>,
     reuse_persisted_input: bool,
 ) -> Result<(), GatewayError> {
     let TurnInput {
@@ -604,6 +606,16 @@ pub(super) async fn process_turn_with_composition_and_focus(
     } else {
         None
     };
+    let reference_materials = crate::material::load_reference_materials(
+        &state.storage,
+        session_id,
+        &topic,
+        swage_context::materials::MaterialReach::for_tools(
+            offered_tools.is_offered(crate::tool::material::MATERIAL_READ_TOOL),
+        ),
+        context_choices.material_quoting,
+    )
+    .await;
 
     let environment = build_session_environment(&topic, &tool_root, &session, &workspace_policy);
     let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
@@ -618,6 +630,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         active_skills,
         history_messages,
         memory_index,
+        reference_materials,
         environment,
         available_skills,
         offered_tools,
@@ -649,28 +662,36 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // hitting walls, the turn runs on a successor: the same elements rendered
     // afresh, the older history summarised against them or diagnosed from
     // outside (turn/succession.rs). Otherwise the first assembly stands.
-    let output = succession::succeed_over_threshold(
-        succession::SuccessionSite {
-            provider: state.provider.as_ref(),
-            threshold: &compaction_threshold(&config),
-            model: Some(config.default_model_id()).filter(|model| !model.is_empty()),
-            focus: compaction_focus.as_deref(),
-            variables: &session_variables,
-            tokeniser: &tokeniser,
-            degradation: succession::recent_degradation(state.storage.as_ref(), thread_id).await,
-            diagnosis_models: succession::diagnosis_models(&config),
-            summary_instructions: &succession::SessionSummaryInstructions {
-                state,
-                config: &config.experimentation,
+    let output = COMPLETION_ATTRIBUTION
+        .scope(
+            CompletionAttribution {
                 session_id,
-                turn_id: prepared_turn_id,
+                turn_id: Some(prepared_turn_id),
             },
-        },
-        elements,
-        output,
-        assemble,
-    )
-    .await;
+            succession::succeed_over_threshold(
+                succession::SuccessionSite {
+                    provider: state.provider.as_ref(),
+                    threshold: &compaction_threshold(&config),
+                    model: Some(config.default_model_id()).filter(|model| !model.is_empty()),
+                    focus: compaction_focus.as_deref(),
+                    variables: &session_variables,
+                    tokeniser: &tokeniser,
+                    degradation: succession::recent_degradation(state.storage.as_ref(), thread_id)
+                        .await,
+                    diagnosis_models: succession::diagnosis_models(&config),
+                    summary_instructions: &succession::SessionSummaryInstructions {
+                        state,
+                        config: &config.experimentation,
+                        session_id,
+                        turn_id: prepared_turn_id,
+                    },
+                },
+                elements,
+                output,
+                assemble,
+            ),
+        )
+        .await;
     let (assembled_messages, mut assembly_report) = (output.messages, output.report);
     redact_element_texts(state, &mut assembly_report).await;
     assembly_report.tool_scope = Some(serde_json::json!({
@@ -779,6 +800,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         state,
         TurnProjection {
             session_id,
+            workflow_run_id,
             prepared_turn_id,
             report_json: &mut report_json,
             assembly_report: &assembly_report,

@@ -251,9 +251,13 @@ impl ObservationStore for SqliteStorage {
     async fn add_extraction(
         &self,
         observation_id: Uuid,
-        extracted_text: String,
+        mut extracted_text: String,
         extractor: String,
     ) -> Result<ExtractionDerivation, StorageError> {
+        // Masked before the insert, not after it by the masking triggers: the
+        // full-text index takes the inserted text, and an index that holds
+        // different text from its row can no longer remove the row's entry.
+        self.mask(&mut extracted_text);
         // Pre-flight so a missing observation is a NotFound, not a bare FK error.
         if self.get_observation(observation_id).await?.is_none() {
             return Err(StorageError::NotFound {

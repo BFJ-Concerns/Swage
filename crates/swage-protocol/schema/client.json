@@ -7920,7 +7920,7 @@
           "type": "object"
         },
         {
-          "description": "The model the call named refused before any output, and the call's\ndeclared fallback served it instead; no interruption occurred.",
+          "description": "The primary failed before any output and the call was dispatched to its declared fallback.",
           "properties": {
             "cause": {
               "const": "provider_fallback",
@@ -7933,6 +7933,23 @@
           "required": [
             "cause",
             "primary_failure"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Replay dispatched another attempt after a recorded provider failure.",
+          "properties": {
+            "cause": {
+              "const": "after_provider_failure",
+              "type": "string"
+            },
+            "failure": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cause",
+            "failure"
           ],
           "type": "object"
         }
@@ -9413,6 +9430,14 @@
         "run": {
           "$ref": "#/$defs/WorkflowRun"
         },
+        "timer_wake_at": {
+          "description": "The recorded timer deadline when a timer can wake this parked run.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "wake_metrics": {
           "$ref": "#/$defs/WorkflowWakeMetrics",
           "description": "The run's own wake economics, derived from the journal and event\nqueue — the falsification signal for a gated long run: a sustained\nhigh wake rate means the design's economics are failing."
@@ -9547,7 +9572,7 @@
           ]
         },
         "state": {
-          "type": "string"
+          "$ref": "#/$defs/WorkflowRunState"
         }
       },
       "required": [
@@ -9612,9 +9637,10 @@
       "type": "object"
     },
     "WorkflowRunHandover": {
-      "description": "The durable account a failed run leaves behind: what stopped it, which\ncall failed, and where the pending event queue stood, so whoever picks\nthe work up starts from the record instead of a re-run.",
+      "description": "The account a failed run leaves, with the detail the gateway recovered.",
       "oneOf": [
         {
+          "description": "The script error that prevented the run from continuing.",
           "properties": {
             "classification": {
               "const": "author_error",
@@ -9631,7 +9657,7 @@
           "type": "object"
         },
         {
-          "description": "An attributed agent-call failure stopped the run.",
+          "description": "The failed call, the last journal position and the event queue at failure.",
           "properties": {
             "classification": {
               "const": "interrupted",
@@ -9678,7 +9704,7 @@
           "type": "object"
         },
         {
-          "description": "The run failed without an attributable agent-call identity.",
+          "description": "The failure and any recorded terminal error when no call could be identified.",
           "properties": {
             "classification": {
               "const": "interrupted_unattributed",
@@ -9701,7 +9727,7 @@
           "type": "object"
         },
         {
-          "description": "The journal read-back failed for a known agent call, so only its\nidentity could be recovered.",
+          "description": "The failure, the affected call’s identity and any terminal error\nwhen the call’s journal could not be reconstructed.",
           "properties": {
             "classification": {
               "const": "reconstruction_failed",
@@ -10080,6 +10106,7 @@
           ]
         },
         "run_id": {
+          "format": "uuid",
           "type": [
             "string",
             "null"

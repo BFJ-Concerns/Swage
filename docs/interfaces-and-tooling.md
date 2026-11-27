@@ -230,6 +230,27 @@ or `fileData` for Google. Text-only messages keep the plain string form.
 Stored messages carry their attachments as records that survive round-trips
 through the API.
 
+## Reference material
+
+The composer's **Attach files** and **Attach folder** controls give a session
+material to work from. A PNG or JPEG image (chosen, or pasted into the message
+field) goes with the next message as an [image attachment](#image-attachments).
+A text file, and each text file of a chosen folder, is registered at once as
+the session's reference material through `POST /api/materials`, titled by its
+name or, for a folder, by its path within the folder. A folder brings in at
+most 500 files; files in hidden directories, empty files, files over 1 MB and
+files that are not text are skipped, and the composer says how many. The list
+under the message field shows the session's active material, and **Remove**
+archives one.
+
+Each turn's context carries the active material of its session and, inside a
+topic, of that topic: one entry per material with its title, type, size and
+id. A short material (up to 4 KiB, and 16 KiB across all of them) is quoted
+whole beneath its entry. The agent reads any material with `material_read`
+by that id, a part at a time when it is longer than the tool output limit
+(`[tools] max_output_bytes`). Archived material, and material of another
+session or topic, is neither listed nor readable.
+
 ## Provider setup
 
 Start the gateway and web UI as shown in the [README](../README.md#quick-start).
