@@ -211,7 +211,7 @@ impl Tool for ShellTool {
                 } else if stdout_display.is_empty() {
                     format!("stderr: {stderr_display}")
                 } else {
-                    let separator = if stdout.truncated && !stdout_display.ends_with('\n') {
+                    let separator = if !stdout_display.ends_with('\n') {
                         "\n"
                     } else {
                         ""
@@ -695,6 +695,18 @@ mod tests {
             std::fs::read_to_string(dir.path().join(artifact_path)).expect("stdout file"),
             "1234567890".repeat(10)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stderr_starts_on_its_own_line_after_unterminated_stdout() {
+        let result = tool(5)
+            .execute(
+                json!({"command": "printf done; printf warning >&2"}),
+                &ctx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["output"], "done\nstderr: warning");
     }
 
     #[tokio::test(flavor = "multi_thread")]
