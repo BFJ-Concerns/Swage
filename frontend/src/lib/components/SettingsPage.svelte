@@ -277,8 +277,13 @@
       normaliseDefaultModel();
       submittedFingerprint = settingsFingerprint();
       providerSaveInFlight = providerEditsPending;
-      // The sandbox and approval-gated tools are saved from the Security tab.
-      const { sandbox: _sandbox, tool_permissions, ...general } = settings;
+      // The sandbox and approval-gated tools are saved from the Security tab,
+      // and the restart flags are the server's to report: the request carries
+      // neither, and the gateway refuses a field it does not take.
+      const {
+        sandbox: _sandbox, tool_permissions, restart_required: _restartRequired, can_restart: _canRestart,
+        ...general
+      } = settings;
       const { require_approval: _approvals, ...grants } = tool_permissions;
       const submitted = JSON.parse(JSON.stringify({ ...general, tool_permissions: grants, tool_runtime: toolRuntimeForSave(settings.tool_runtime) })) as SettingsPayload;
       const saved = await saveSettings(submitted);

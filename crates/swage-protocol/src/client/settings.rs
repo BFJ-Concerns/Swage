@@ -638,9 +638,11 @@ pub struct SettingsResponse {
     pub can_restart: bool,
 }
 
-/// Tool grants editable through general settings; approval requirements belong
-/// to the scoped security settings.
+/// Tool grants editable through general settings. Approval requirements are
+/// saved through the scoped security settings, and a save carrying them here
+/// is refused.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 #[ts(optional_fields = nullable)]
 pub struct ToolGrantSettings {
     pub allow: Vec<String>,
@@ -648,7 +650,12 @@ pub struct ToolGrantSettings {
     pub bundles: BTreeMap<String, Vec<String>>,
 }
 
+/// A general settings save. The sandbox and approval requirements are saved
+/// through the scoped security settings, and the restart flags are the
+/// gateway's to report; a save carrying any field not declared here is
+/// refused rather than applied in part.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 #[ts(optional_fields = nullable)]
 pub struct SaveSettingsRequest {
     pub default_provider: String,

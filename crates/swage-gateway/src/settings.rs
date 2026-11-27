@@ -3915,9 +3915,11 @@ mod tests {
         let error = validate_settings_request(&request).expect_err("empty deny rule is invalid");
         assert!(error.message().contains("tool deny rules"));
 
-        request.tool_permissions = Some(wire_from_config(
-            swage_config::ToolPermissionConfig::default(),
-        ));
+        request.tool_permissions = Some(swage_protocol::client::settings::ToolGrantSettings {
+            allow: vec!["*".into()],
+            deny: Vec::new(),
+            bundles: Default::default(),
+        });
         request.hitl = Some(swage_protocol::client::settings::HitlConfig {
             timeout: 0,
             timeout_policy: swage_protocol::client::settings::ApprovalTimeoutPolicy::Reject,

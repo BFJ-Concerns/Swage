@@ -14,4 +14,10 @@ import type { ToolGrantSettings } from "./ToolGrantSettings";
 import type { ToolRuntimeSettings } from "./ToolRuntimeSettings";
 import type { VoiceConfig } from "./VoiceConfig";
 
+/**
+ * A general settings save. The sandbox and approval requirements are saved
+ * through the scoped security settings, and the restart flags are the
+ * gateway's to report; a save carrying any field not declared here is
+ * refused rather than applied in part.
+ */
 export type SaveSettingsRequest = { default_provider: string, providers: { [key in string]: SaveProviderSettings }, default_model: string, models: { [key in string]: ModelSettings }, generation_presets?: { [key in string]: GenerationPresetConfig }, tool_runtime?: ToolRuntimeSettings | null, tool_permissions?: ToolGrantSettings | null, hitl?: HitlConfig | null, context?: ContextConfig | null, pricing?: PricingConfig | null, observability?: ObservabilityConfig | null, communication?: CommunicationConfig | null, sessions?: SessionsConfig | null, memory?: MemoryConfig | null, attachments?: AttachmentsConfig | null, voice?: VoiceConfig | null, };

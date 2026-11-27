@@ -529,6 +529,8 @@ describe("SettingsPage", () => {
     await waitForSaveCall();
     const body = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0];
     expect(body).not.toHaveProperty("sandbox");
+    expect(body).not.toHaveProperty("restart_required");
+    expect(body).not.toHaveProperty("can_restart");
     expect(body.tool_permissions).not.toHaveProperty("require_approval");
     expect(body.tool_permissions?.bundles).toEqual({ inspect: ["file_read"] });
   });

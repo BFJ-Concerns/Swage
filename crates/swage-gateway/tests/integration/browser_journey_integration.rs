@@ -169,10 +169,15 @@ async fn browser_survives_settings_save_and_grant_update() {
     );
     // An in-flight turn can retain the old dispatcher while settings rebuild it.
     let _previous_dispatcher = state.active_tool_dispatcher();
-    request.tool_permissions = Some(serde_json::from_value(json!({"allow": [], "deny": [], "bundles": {}, "require_approval": ["browser_navigate"]})).unwrap());
-    swage_gateway::settings::save_settings(&state, request.clone())
-        .await
-        .expect("approval settings save");
+    swage_gateway::security_settings::save_security_settings(
+        &state,
+        swage_protocol::client::security_settings::SettingsScope::Install,
+        serde_json::from_value(json!({"require_approval": ["browser_navigate"]})).unwrap(),
+    )
+    .await
+    .expect("approval settings save");
+    request.tool_permissions =
+        Some(serde_json::from_value(json!({"allow": [], "deny": [], "bundles": {}})).unwrap());
     let after = navigate(&state, &ctx, fixture.url("/whoami")).await;
     assert!(
         after.is_ok(),

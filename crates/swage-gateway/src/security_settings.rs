@@ -662,8 +662,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_general_and_security_saves_preserve_both_fields() {
         let (state, _, root) = fixture().await;
-        let mut general =
-            serde_json::to_value(crate::settings::load_settings(&state).await.unwrap()).unwrap();
+        let mut general = general_save_from_reading(&state).await;
         general["tool_runtime"]["max_output_bytes"] = serde_json::json!(123_456);
         let path = root.path().join("config.toml");
         let (waiting, resume) = crate::settings::config_write_pause::before_write(path.clone());
@@ -714,38 +713,46 @@ mod tests {
         );
     }
 
+    /// A general save built from the settings reading the way a client
+    /// builds one: everything but the security fields and the restart flags.
+    async fn general_save_from_reading(state: &AppState) -> serde_json::Value {
+        let mut general =
+            serde_json::to_value(crate::settings::load_settings(state).await.unwrap()).unwrap();
+        let fields = general.as_object_mut().unwrap();
+        for field in ["sandbox", "restart_required", "can_restart"] {
+            fields.remove(field);
+        }
+        fields["tool_permissions"]
+            .as_object_mut()
+            .unwrap()
+            .remove("require_approval");
+        general
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn general_save_cannot_overwrite_newer_security_settings() {
+    async fn a_general_save_carrying_security_fields_is_refused() {
         let (state, _, _root) = fixture().await;
-        let mut old =
-            serde_json::to_value(crate::settings::load_settings(&state).await.unwrap()).unwrap();
-        old["sandbox"] = serde_json::json!({"enabled": false, "allow_degraded_execution": false});
-        old["tool_permissions"]["require_approval"] = serde_json::json!([]);
-        save_security_settings(
-            &state,
-            SettingsScope::Install,
-            save(SecurityOverrides {
-                sandbox_enabled: Some(true),
-                require_approval: Some(vec![RequireApprovalEntry::Simple("shell".into())]),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
-        crate::settings::save_settings(&state, serde_json::from_value(old).unwrap())
-            .await
-            .unwrap();
-        let reading = read_security_settings(&state, SettingsScope::Install)
-            .await
-            .unwrap();
-        assert!(
-            reading.effective.sandbox_enabled,
-            "general save reverted the sandbox"
-        );
-        assert_eq!(
-            serde_json::to_value(reading.effective.require_approval).unwrap(),
-            serde_json::json!(["shell"])
-        );
+        let general = general_save_from_reading(&state).await;
+        let mut with_sandbox = general.clone();
+        with_sandbox["sandbox"] =
+            serde_json::json!({"enabled": false, "allow_degraded_execution": false});
+        let mut with_approvals = general;
+        with_approvals["tool_permissions"]["require_approval"] = serde_json::json!([]);
+        for (body, field) in [
+            (with_sandbox, "sandbox"),
+            (with_approvals, "require_approval"),
+        ] {
+            let refused = serde_json::from_value::<
+                swage_protocol::client::settings::SaveSettingsRequest,
+            >(body)
+            .unwrap_err();
+            assert!(
+                refused
+                    .to_string()
+                    .contains(&format!("unknown field `{field}`")),
+                "{refused}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

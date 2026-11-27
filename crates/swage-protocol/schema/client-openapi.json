@@ -4211,6 +4211,8 @@
         "type": "object"
       },
       "SaveSettingsRequest": {
+        "additionalProperties": false,
+        "description": "A general settings save. The sandbox and approval requirements are saved\nthrough the scoped security settings, and the restart flags are the\ngateway's to report; a save carrying any field not declared here is\nrefused rather than applied in part.",
         "properties": {
           "attachments": {
             "anyOf": [
@@ -6980,7 +6982,8 @@
         "type": "string"
       },
       "ToolGrantSettings": {
-        "description": "Tool grants editable through general settings; approval requirements belong\nto the scoped security settings.",
+        "additionalProperties": false,
+        "description": "Tool grants editable through general settings. Approval requirements are\nsaved through the scoped security settings, and a save carrying them here\nis refused.",
         "properties": {
           "allow": {
             "items": {
