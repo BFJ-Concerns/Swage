@@ -16,8 +16,8 @@ use crate::service::{PlatformMessage, append_platform_message};
 /// each is appended as a durable platform message of origin
 /// `delegation` *before* history is rebuilt, so the result enters the
 /// thread record — labelled by its origin in the UI, announced to open
-/// views, part of the audit trail, and carried to the model as ordinary
-/// history content, never as instructions. User role, deliberately:
+/// views, part of the audit trail, and carried to the model inside the
+/// delivered-material frame, never as instructions. User role, deliberately:
 /// the history rebuild carries Tool-role rows only when they answer a
 /// recorded tool call (providers reject orphaned tool results), so a
 /// platform-delivered notification rides the same role a channel or

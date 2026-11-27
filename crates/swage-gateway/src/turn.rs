@@ -329,6 +329,25 @@ pub(super) async fn process_turn_with_composition_and_focus(
         .into_iter()
         .find_map(|(name, text)| (name == closing_request_choice).then_some(text))
         .unwrap_or(authored_closing_request.1);
+    let delivered_material_frame = match crate::experimentation::select_delivered_material_frame(
+        state,
+        session_id,
+        Some(prepared_turn_id),
+    )
+    .await
+    {
+        Ok(frame) => frame,
+        Err(error) => {
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
+            return Err(GatewayError::ConfigError(error.to_string()));
+        }
+    };
 
     // Step 5: Set up the cancellation token before any turn processing begins.
     let cancel_token = cancellation_override.unwrap_or_default();
@@ -397,6 +416,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
                     turn_id: Some(prepared_turn_id),
                     role: Role::User,
                     origin,
+                    delivered: false,
                     content: before_inbound.canonical_content.clone(),
                     agent_id: session.agent_id.clone(),
                 })
@@ -540,6 +560,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     );
     let output_directory = managed_scratch_workspace(&state.config_root, &scope, session.id);
     agent_config.closing_account_request = closing_account_request.to_owned();
+    agent_config.delivered_material_frame = delivered_material_frame.clone();
     agent_config.tool_output_directory = Some(output_directory);
     if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
         agent_config.max_output_retries = max_retries;
@@ -562,8 +583,13 @@ pub(super) async fn process_turn_with_composition_and_focus(
         state,
         session_id,
         prepared_turn_id,
-        history::rebuild_thread_history_messages_with_retrieval(state, thread_id, replay_retrieval)
-            .await,
+        history::rebuild_thread_history_messages_with_retrieval(
+            state,
+            thread_id,
+            replay_retrieval,
+            &delivered_material_frame,
+        )
+        .await,
     )
     .await?;
     let memory_index = if session_carries_memory(&session) {

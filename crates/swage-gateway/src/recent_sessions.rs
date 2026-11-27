@@ -335,6 +335,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: swage_storage::MessageOrigin::User,
+                delivered: false,
                 content: content.to_string(),
                 attachments: Vec::new(),
                 position: 0,

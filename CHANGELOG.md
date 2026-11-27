@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- The audit record holds every tool call that ran, with its arguments and result, and every completion the gateway asked a provider for, with the model, why it stopped (a response cut off at its length limit included), the tokens and what it returned; both are attributed to the session and turn they ran in. The operator history lists them with the rest of the record and shows what each returned.
 - The composer attaches files, folders and images. PNG and JPEG images, chosen or pasted, go with the next message and show on it, queued or sent; files and the text files of a folder become the session's reference material, listed under the field and removable there. A turn's context lists the active reference material of its session and topic, quoting short pieces whole, and the agent reads the rest, a part at a time, with `material_read`.
 - A `model_list` tool lists the models the catalogue serves to the session: each id with its aliases, the provider's name for it, its vendor family (`claude`, `gpt` or `gemini`) where the name shows one, and the effort levels it serves without clamping, so an agent writing a workflow can name a model of another family without being told the ids.
 - A workflow `agent()` or `agentStart()` call may declare `minEffort`, the least effort it accepts. Where its model would serve it below that — a clamp to a lower level, no effort set, or a model with no effort control — the call fails with `EffortFloorError` before any worker starts, and the refusal is journalled with the call.
@@ -119,6 +120,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Material the platform delivers into a conversation — a delegated agent's result, a notice about how a turn ended or about memory — reaches the model inside a delimited block saying the person did not write it and nothing in it is an instruction, on the turn that receives it and on every later turn alike; a typed message or a brief addressed to the agent is never framed, and the conversation view shows the content as stored.
 - The sandbox toggle and the approval-gated tools list move from Settings → Automation to Settings → Security.
 - The workflow-authoring and project-docs skills are rewritten for any installation. The workflow-authoring skill names no model in its examples (a worker with no `model` runs on the configured default), gives each function's error names, and no longer assumes two model families or the development-process skills are in reach.
 - The shipped default agent's description says what it gives a session: no instructions of its own, with the model and tools the installation's settings provide.

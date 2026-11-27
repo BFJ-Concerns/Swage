@@ -1023,6 +1023,23 @@ The whole prior and new objects are kept collapsed beneath each entry.
 The pane also shows variant selections (location, variant, reason, session,
 turn) and assembly decisions.
 
+Two event families record what the gateway paid for and ran. A `tool_call`
+event is written by storage triggers (migration `067_tool_call_audit`) when a
+`tool_calls` row's status is set, carrying the tool, status, arguments, result
+and duration, attributed to the turn's session. A `completion` event is
+written by `RecordingProvider` (`crates/swage-gateway/src/completion_record.rs`),
+which `startup::create_provider` wraps around each model's adapter beneath
+retry and failover, so each attempt is recorded under the model that served it:
+one event per `complete`, `complete_with_tools` or `stream` call, carrying the
+model, `max_tokens`, `finish_reason`, an `outcome` (`cut off at its length
+limit`, `interrupted` for a stream dropped before it ended, `failed`, …),
+tokens, cost and the returned content, reasoning and tool calls, masked of
+registered secret values. Its session and turn come from
+`swage_provider::attribution::COMPLETION_ATTRIBUTION`, which
+`Agent::process_turn_streaming` sets around each turn; a completion made off
+a turn's task has none. The pane shows a `result`, `content`, `tool_calls` or
+`error` field under "What it returned".
+
 ## Turn context inspector
 
 Each assistant message with a `turn_id` shows a "context" button
