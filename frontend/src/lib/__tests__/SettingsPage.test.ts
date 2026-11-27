@@ -520,7 +520,7 @@ describe("SettingsPage", () => {
     component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
     await flushUi();
     const newer = { available_tools: [], scope: { kind: "install" as const },
-      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: ["shell"] },
+      effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "token" as const, require_approval: ["shell"] },
       overrides: { sandbox_enabled: true, require_approval: ["shell"] }, relaxed: [] };
     vi.mocked(settingsApi.saveInstallSecuritySettings).mockResolvedValue(newer);
     await settingsApi.saveInstallSecuritySettings(newer.overrides);
@@ -538,7 +538,7 @@ describe("SettingsPage", () => {
     expect(parseRoute("/settings/security").settingsTab).toBe("security");
     const reading: SecuritySettingsResponse = {
       available_tools: ["shell", "file_write"], scope: { kind: "install" as const },
-      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: [] },
+      effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "token" as const, require_approval: [] },
       overrides: {}, relaxed: [],
     };
     vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);

@@ -1938,10 +1938,15 @@
           },
           "sandbox_enabled": {
             "type": "boolean"
+          },
+          "sandbox_network": {
+            "$ref": "#/components/schemas/SandboxNetwork",
+            "description": "What a sandboxed command reaches on the network."
           }
         },
         "required": [
           "sandbox_enabled",
+          "sandbox_network",
           "require_approval",
           "access_gate"
         ],
@@ -4253,6 +4258,16 @@
               "boolean",
               "null"
             ]
+          },
+          "sandbox_network": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SandboxNetwork"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object"
@@ -5000,6 +5015,16 @@
             "type": [
               "boolean",
               "null"
+            ]
+          },
+          "sandbox_network": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SandboxNetwork"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },

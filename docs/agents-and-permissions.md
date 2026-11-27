@@ -502,7 +502,8 @@ cause, which the gateway log also gives at the turn's start.
 
 A sandboxed command reaches the network as the host does, through the
 operator's own proxy settings where there are any. `sandbox.network`
-confines it:
+confines it, for the install or a topic, in `config.toml` or under
+**Settings → Security** (which offers `open` and `none`):
 
 | Value | A sandboxed command reaches |
 |---|---|
