@@ -57,6 +57,10 @@ pub struct SandboxPolicy {
     /// empty; a file reads as empty. Enforced by the mount layer, so the
     /// fallback backend cannot honour them.
     pub masked_paths: Vec<PathBuf>,
+    /// Files shown read-only in place of what the host has at their path.
+    /// Enforced by the mount layer, so the fallback backend cannot honour
+    /// them.
+    pub substituted_files: Vec<SubstitutedFile>,
     /// Where tools keep their output artefacts, carried to the child
     /// independently of its working directory; writable, as a write path.
     pub tool_output_directory: Option<PathBuf>,
@@ -78,6 +82,14 @@ pub struct SandboxPolicy {
     /// Per-LLM-request IPC timeout.
     #[ts(type = "{ secs: number, nanos: number }")]
     pub llm_request_timeout: Duration,
+}
+
+/// A file the sandbox shows at `path` with the content of `source`, a
+/// file on the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct SubstitutedFile {
+    pub path: PathBuf,
+    pub source: PathBuf,
 }
 
 impl SandboxPolicy {
@@ -222,6 +234,7 @@ impl SandboxPolicyBuilder {
             write_paths: self.write_paths,
             read_only_paths: self.read_only_paths,
             masked_paths: self.masked_paths,
+            substituted_files: Vec::new(),
             tool_output_directory: self.tool_output_directory,
             host_network: self.host_network,
             environment: std::collections::BTreeMap::new(),
