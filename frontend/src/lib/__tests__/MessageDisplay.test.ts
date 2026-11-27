@@ -610,6 +610,29 @@ describe("settled partial responses", () => {
   });
 });
 
+describe("an output-limited turn, as loaded", () => {
+  it("says the reply is incomplete once, and the account says why", () => {
+    const store = makeConversationStore([
+      makeAssistantMessage("The answer ends at a", undefined, undefined, "incomplete", "limited"),
+      {
+        id: "account",
+        role: "user",
+        origin: "platform",
+        content: "The reply stopped early: output token limit reached (length).",
+        timestamp: "2026-03-20T10:01:00Z",
+        turn_id: "limited",
+        turn_state: "incomplete",
+      },
+    ]);
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+    expect(document.body.textContent?.match(/incomplete/gi)).toHaveLength(1);
+    expect(document.body.textContent).toContain("output token limit reached (length)");
+  });
+});
+
 describe("turns that ended without a reply, as loaded", () => {
   function makeRequest(overrides: Partial<MessageView>): MessageView {
     _msgSeq += 1;

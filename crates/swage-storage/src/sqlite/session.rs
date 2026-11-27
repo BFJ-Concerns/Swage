@@ -136,7 +136,7 @@ const SESSION_ACTIVITY_JOIN: &str = "
                MAX(turns.state = 'interrupted') OVER (
                    PARTITION BY threads.session_id
                ) AS has_interrupted_turn,
-               MAX(turns.state IN ('processing', 'delegating', 'awaiting_approval')) OVER (
+               MAX(turns.state IN ('pending', 'processing', 'delegating', 'awaiting_approval')) OVER (
                    PARTITION BY threads.session_id
                ) AS has_processing_turn,
                ROW_NUMBER() OVER (
@@ -147,7 +147,7 @@ const SESSION_ACTIVITY_JOIN: &str = "
         JOIN threads ON threads.id = turns.thread_id
         WINDOW active_first AS (
             PARTITION BY threads.session_id
-            ORDER BY (turns.state IN ('processing', 'delegating', 'awaiting_approval')) DESC,
+            ORDER BY (turns.state IN ('pending', 'processing', 'delegating', 'awaiting_approval')) DESC,
                      turns.created_at DESC, turns.rowid DESC
         )
     ) AS turn_activity ON turn_activity.session_id = sessions.id AND turn_activity.recency = 1";
@@ -799,6 +799,48 @@ mod tests {
         let tooled_entry = &listing[0];
         assert_eq!(tooled_entry.last_activity, tooled.created_at);
         assert_eq!(tooled_entry.latest_message, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_created_and_not_yet_begun_reads_as_in_flight() {
+        use crate::model::{NewTurn, TurnState};
+        use crate::store::{ThreadStore, TurnStore};
+
+        let (storage, topic_id) = make_storage_with_topic().await;
+        let session = storage.create_session(new_session(topic_id)).await.unwrap();
+        let thread = ThreadStore::create(
+            &storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: session.agent_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: session.agent_id.clone(),
+                state: TurnState::Pending,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        let activity = storage
+            .get_session_activity(session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(activity.has_processing_turn);
+        assert_eq!(
+            activity.active_turn,
+            Some(SessionTurnActivity {
+                id: turn.id,
+                state: TurnState::Pending,
+            })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

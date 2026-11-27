@@ -325,7 +325,9 @@ async fn incomplete_account(storage: &dyn Storage, child: &Turn) -> Result<Strin
         .find(|message| {
             message.turn_id == Some(child.id)
                 && message.origin == MessageOrigin::Platform
-                && message.content.starts_with("Response incomplete:")
+                && message
+                    .content
+                    .starts_with(swage_agent::agent::STOPPED_EARLY_ACCOUNT_PREFIX)
         })
         .map(|message| message.content);
     Ok(account
@@ -2237,7 +2239,7 @@ mod tests {
                 role: Role::User,
                 origin: MessageOrigin::Platform,
                 delivered: false,
-                content: "Response incomplete: output token limit reached (max_tokens)."
+                content: "The reply stopped early: output token limit reached (max_tokens)."
                     .to_string(),
                 attachments: Vec::new(),
                 agent_id: "drafter".to_string(),
@@ -2262,7 +2264,7 @@ mod tests {
             .expect("the child's fate is on the record");
         assert_eq!(
             result.payload["incomplete_reason"],
-            "Response incomplete: output token limit reached (max_tokens)."
+            "The reply stopped early: output token limit reached (max_tokens)."
         );
     }
 

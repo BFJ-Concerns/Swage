@@ -604,6 +604,111 @@ async fn a_revision_without_the_succession_step_runs_no_succession() {
     );
 }
 
+/// A message a plugin refuses is never recorded, so the conversation keeps
+/// an account of the refusal in its place, carrying the turn's failure and
+/// why — what a reload shows is what the open view was told.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_message_leaves_its_refusal_in_the_conversation() {
+    use swage_protocol::client::turn_graph::{
+        HookAttachment, HookMode, HookPoint, RevisionActivation, StepFiller, TurnGraph, TurnSlot,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap();
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: session.agent_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn swage_storage::store::Storage>,
+        storage.clone() as Arc<dyn TopicStore>,
+        Arc::new(MockProvider::new(provider_witness_chunks())),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_owned(),
+    );
+    let package = root.path().join("refuser");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("plugin.toml"),
+        "name = \"refuser\"\nversion = \"1\"\ndescription = \"Refuses.\"\nscript = \"plugin.js\"\n[[provides.hooks]]\npoint = \"message_inbound\"\nmode = \"veto\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("plugin.js"),
+        r#"swage.provide.hook("message_inbound", () => ({ action: "veto", reason: "not this one" }));"#,
+    )
+    .unwrap();
+    state.plugins.install(&package, &[], None).await.unwrap();
+    state
+        .plugins
+        .set_enablement("refuser", None, true, None)
+        .await
+        .unwrap();
+    let mut graph = TurnGraph::shipped();
+    graph.steps.retain(|step| step.slot != TurnSlot::Succession);
+    for step in &mut graph.steps {
+        step.filler = StepFiller::Builtin;
+    }
+    graph.hooks.push(HookAttachment {
+        point: HookPoint::MessageInbound,
+        plugin: "refuser".into(),
+        mode: HookMode::Veto,
+    });
+    let revision = state.turn_graph.propose(graph, None).await.unwrap();
+    assert_eq!(
+        revision.activation,
+        RevisionActivation::Active,
+        "{revision:?}"
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let refusal = process_turn(
+        &state,
+        session.id,
+        None,
+        TurnInput::from("the refused text"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("the plugin refuses the message");
+
+    let detail = crate::service::ConversationService::new(
+        storage.clone() as Arc<dyn swage_storage::store::Storage>,
+        storage.clone() as Arc<dyn TopicStore>,
+    )
+    .get_conversation(session.id)
+    .await
+    .unwrap();
+    let [account] = detail.messages.as_slice() else {
+        panic!("one account and no refused text: {:?}", detail.messages);
+    };
+    assert_eq!(account.origin, swage_storage::MessageOrigin::Platform);
+    assert_eq!(
+        account.turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Failed)
+    );
+    assert_eq!(
+        account.failure_message.as_deref(),
+        Some(refusal.to_string().as_str()),
+        "a reload shows the error the open view was sent"
+    );
+    assert!(refusal.to_string().contains("refuser: not this one"));
+    assert!(state.active_turns.lock().await.is_empty());
+}
+
 #[tokio::test]
 async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elements() {
     let storage = Arc::new(MockStorage::new());

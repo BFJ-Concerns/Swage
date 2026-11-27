@@ -180,6 +180,73 @@ pub fn drains_queue_after(turn_state: TurnState) -> bool {
     !matches!(turn_state, TurnState::Interrupted | TurnState::Cancelled)
 }
 
+/// The channel a turn sends its events into so that they reach every view
+/// open on its session — those open when the turn starts and those that
+/// connect, or reconnect, while it runs. The turn's release waits for the
+/// events already sent to enter the session's listeners, so whatever the
+/// session does next reaches them after the turn's own ending.
+pub(crate) async fn deliver_turn_to_session(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+) -> mpsc::UnboundedSender<ServerEvent> {
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let listeners = state.clone();
+    let finish = tokio_util::sync::CancellationToken::new();
+    let relay_finish = finish.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = relay_finish.cancelled() => {
+                    events_rx.close();
+                    while let Some(event) = events_rx.recv().await {
+                        listeners.send_to_session(session_id, &event).await;
+                    }
+                    break;
+                }
+                event = events_rx.recv() => match event {
+                    Some(event) => listeners.send_to_session(session_id, &event).await,
+                    None => break,
+                },
+            }
+        }
+        listeners
+            .finish_queued_turn_events(session_id, turn_id)
+            .await;
+    });
+    state.turn_event_deliveries.lock().await.insert(
+        turn_id,
+        Arc::new(Mutex::new(Some(SessionEventDelivery { finish, task }))),
+    );
+    events_tx
+}
+
+/// Fail a turn delivered to its session whose coordinator returned before
+/// reaching a terminal path, and release the session. A turn the coordinator
+/// ended has already settled its delivery, so this leaves it alone — the
+/// turn-keyed handle keeps the fallback from releasing a later turn.
+pub(crate) async fn fail_turn_left_undelivered(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+) -> Result<(), GatewayError> {
+    if state
+        .turn_event_deliveries
+        .lock()
+        .await
+        .contains_key(&turn_id)
+    {
+        crate::turn::turn_release::record_terminal_state_and_release(
+            state,
+            session_id,
+            turn_id,
+            TurnState::Failed,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Run the queue's drain on its own task, so the ending turn's own path is
 /// not held open by the next turn.
 pub fn spawn_drain(state: AppState, session_id: Uuid) {
@@ -230,36 +297,8 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
         .lock()
         .await
         .insert(session_id, cancellation.clone());
-    // The turn's events reach every open view of the session through the
-    // per-session channel: no single client owns a turn the queue started.
-    let (events_tx, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let listeners = state.clone();
-    let finish = tokio_util::sync::CancellationToken::new();
-    let relay_finish = finish.clone();
-    let task = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = relay_finish.cancelled() => {
-                    events_rx.close();
-                    while let Some(event) = events_rx.recv().await {
-                        listeners.send_to_session(session_id, &event).await;
-                    }
-                    break;
-                }
-                event = events_rx.recv() => match event {
-                    Some(event) => listeners.send_to_session(session_id, &event).await,
-                    None => break,
-                },
-            }
-        }
-        listeners
-            .finish_queued_turn_events(session_id, turn_id)
-            .await;
-    });
-    state.turn_event_deliveries.lock().await.insert(
-        turn.id,
-        Arc::new(Mutex::new(Some(SessionEventDelivery { finish, task }))),
-    );
+    // No single client owns a turn the queue started.
+    let events_tx = deliver_turn_to_session(state, session_id, turn_id).await;
     let result = async {
         // Each recorded row replaces the queued input it came from. Then
         // the view starts displaying the new turn on that thread.
@@ -332,21 +371,7 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
     }
     .await;
     // Errors before the coordinator's terminal paths still belong to this drain.
-    // A turn-keyed handle prevents this fallback from releasing a later turn.
-    if state
-        .turn_event_deliveries
-        .lock()
-        .await
-        .contains_key(&turn.id)
-    {
-        crate::turn::turn_release::record_terminal_state_and_release(
-            state,
-            session_id,
-            turn.id,
-            TurnState::Failed,
-        )
-        .await?;
-    }
+    fail_turn_left_undelivered(state, session_id, turn.id).await?;
     let settled = state
         .storage
         .get_turn(turn.id)

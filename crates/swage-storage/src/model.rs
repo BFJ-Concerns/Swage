@@ -379,9 +379,11 @@ pub struct SessionActivity {
     pub has_interrupted_turn: bool,
     /// The newest turn across every thread in the session.
     pub latest_turn: Option<SessionTurnActivity>,
-    /// The newest processing, delegating or awaiting-approval turn.
+    /// The newest turn in flight: pending, processing, delegating or
+    /// awaiting approval.
     pub active_turn: Option<SessionTurnActivity>,
-    /// Any turn is processing, delegating or awaiting approval.
+    /// Any turn is in flight. A turn created and not yet begun counts: it
+    /// is live work, as the store's one-in-flight rule treats it.
     pub has_processing_turn: bool,
 }
 

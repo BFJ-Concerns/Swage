@@ -5169,6 +5169,51 @@ async fn workflow_launched_by_a_placed_worker_keeps_its_exact_filesystem_authori
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_wait_that_ends_before_its_run_returns_the_run_still_running() {
+    let _guard = crate::test_support::SwageHomeGuard::new();
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    let state = AppState::for_test(
+        Arc::clone(&storage) as Arc<dyn Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(crate::turn::tests::PendingProvider),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let result = GatewayWorkflowLauncher::new(state.clone())
+        .with_wait_limit(std::time::Duration::from_millis(500))
+        .start_inline(
+            session.id,
+            "return await agent('work that outlasts the wait');",
+            Value::Null,
+            None,
+            true,
+        )
+        .await
+        .expect("a wait that ends is not a failed call");
+
+    let run_id: Uuid = serde_json::from_value(result["id"].clone()).expect("run id");
+    assert_eq!(result["state"], "running");
+    assert_eq!(result["view_url"], format!("/workflow-runs/{run_id}"));
+    let run = storage
+        .get_workflow_run(run_id)
+        .await
+        .expect("run query")
+        .expect("run");
+    assert_eq!(run.state, "running", "the run goes on after the wait ends");
+    cancel_run(State(state.clone()), Path(run_id))
+        .await
+        .expect("stop the run");
+    wait_for_terminal(&state, run_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn workflow_launches_carry_task_bounds_and_fail_closed_when_the_task_disappears() {
     let _guard = crate::test_support::SwageHomeGuard::new();
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));

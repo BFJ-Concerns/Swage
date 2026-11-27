@@ -42,7 +42,8 @@ impl Tool for WorkflowRunTool {
          until the run is no longer running and returns the record as it then stands: \
          `final_output` holds what the script returned once `state` is `completed`, and a \
          run that has parked on a wait of its own comes back `parked`, with no output yet. \
-         A run still running after ten minutes fails the wait and not the run. A run that \
+         A run still running after ten minutes comes back with `state` `running`: it goes \
+         on, and `workflow_run_status` reads it by its `id` later. A run that \
          has failed by the time the call returns is reported as a failed call. \
          A script's calls name models by the ids `model_list` returns. Each id comes with \
          its family and the effort levels it serves, which is what a script needs to put a \
