@@ -377,10 +377,14 @@ fn config_with_approval(tool_name: &str, timeout_secs: u64, policy: &str) -> Res
 /// provider, or no judge when `judge_model` is empty.
 fn config_with_judge(judge_model: &str) -> ResolvedConfig {
     let mut config = ResolvedConfig::default();
+    config.providers.entries.insert(
+        "judge-provider".into(),
+        swage_config::ProviderEndpointConfig::default(),
+    );
     config.models.entries.insert(
         "judge-model".into(),
         swage_config::ModelEndpointConfig {
-            provider_id: config.providers.default.clone(),
+            provider_id: "judge-provider".into(),
             model_id: "small-judge".into(),
             ..Default::default()
         },

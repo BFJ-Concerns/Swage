@@ -67,7 +67,11 @@ const HISTORY_ELEMENT: &str = "history";
 
 /// What the pass needs from the turn beyond the elements themselves.
 pub(super) struct SuccessionSite<'a> {
+    /// The provider the summary is written on: the session's entry's own.
     pub provider: &'a dyn LlmProvider,
+    /// The providers the diagnosis's readers and synthesis are written on,
+    /// each the one serving its stage's catalogue entry.
+    pub diagnosis_providers: DiagnosisProviders<'a>,
     pub threshold: &'a CompactionThreshold,
     pub model: Option<&'a str>,
     /// The agent's shaping instructions for the summary, from the turn
@@ -139,6 +143,16 @@ pub(crate) struct ShadowOutcome {
 }
 
 impl Summariser {
+    pub(super) fn use_provider(
+        &mut self,
+        state: &AppState,
+        provider: &std::sync::Arc<dyn LlmProvider>,
+    ) {
+        if let Self::Plugin(slot) = self {
+            slot.use_provider(state, provider);
+        }
+    }
+
     /// Run the succession pass with this summariser.
     async fn succeed(
         &self,
@@ -286,11 +300,49 @@ async fn selected_summary_instructions(
 }
 
 /// The provider-facing model ids a diagnosis is sent to; `None` sends a
-/// call to the provider's own default.
+/// call to the provider's own default. Each stage's catalogue entry is kept
+/// beside its id, since two entries may share an id on two providers.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct DiagnosisModels {
     pub reader: Option<String>,
     pub synthesis: Option<String>,
+    pub reader_entry: Option<String>,
+    pub synthesis_entry: Option<String>,
+}
+
+/// The providers a diagnosis's two stages are sent through.
+#[derive(Clone, Copy)]
+pub(super) struct DiagnosisProviders<'a> {
+    pub reader: &'a dyn LlmProvider,
+    pub synthesis: &'a dyn LlmProvider,
+}
+
+#[cfg(test)]
+impl<'a> DiagnosisProviders<'a> {
+    /// Both stages on one provider.
+    pub(super) fn both(provider: &'a dyn LlmProvider) -> Self {
+        Self {
+            reader: provider,
+            synthesis: provider,
+        }
+    }
+}
+
+/// The provider serving a diagnosis stage's catalogue entry: the session's
+/// own `session` provider when the stage runs on the session's entry or
+/// names none.
+pub(crate) async fn diagnosis_stage_provider(
+    state: &crate::state::AppState,
+    config: &swage_config::ResolvedConfig,
+    entry: Option<&str>,
+    session: &std::sync::Arc<dyn LlmProvider>,
+) -> std::sync::Arc<dyn LlmProvider> {
+    match entry {
+        Some(entry) if entry != config.models.default => {
+            crate::startup::catalogue_entry_provider(state, config, entry).await
+        }
+        _ => std::sync::Arc::clone(session),
+    }
 }
 
 /// The diagnosis models `config` names (`context.diagnosis_reader_model`,
@@ -299,23 +351,31 @@ pub(crate) struct DiagnosisModels {
 pub(crate) fn diagnosis_models(
     config: &swage_config::ResolvedConfig,
 ) -> Result<DiagnosisModels, String> {
+    // A stage's (entry, provider-facing model id).
     let resolve = |field: &str, named: &Option<String>| match named {
         Some(name) => crate::turn::resolve_model_catalogue_entry(&config.models, name)
-            .map(|(_, model)| Some(model.model_id.clone()))
+            .map(|(entry, model)| (Some(entry.to_owned()), Some(model.model_id.clone())))
             .ok_or_else(|| {
                 format!("context.{field} names '{name}', which is not in the model catalogue")
             }),
-        None => Ok(Some(config.default_model_id().to_string()).filter(|model| !model.is_empty())),
+        None => Ok((
+            Some(config.models.default.clone()).filter(|entry| !entry.is_empty()),
+            Some(config.default_model_id().to_string()).filter(|model| !model.is_empty()),
+        )),
     };
+    let (reader_entry, reader) = resolve(
+        "diagnosis_reader_model",
+        &config.context.diagnosis_reader_model,
+    )?;
+    let (synthesis_entry, synthesis) = resolve(
+        "diagnosis_synthesis_model",
+        &config.context.diagnosis_synthesis_model,
+    )?;
     Ok(DiagnosisModels {
-        reader: resolve(
-            "diagnosis_reader_model",
-            &config.context.diagnosis_reader_model,
-        )?,
-        synthesis: resolve(
-            "diagnosis_synthesis_model",
-            &config.context.diagnosis_synthesis_model,
-        )?,
+        reader,
+        synthesis,
+        reader_entry,
+        synthesis_entry,
     })
 }
 
@@ -348,9 +408,13 @@ pub(super) async fn succeed_over_threshold(
                 async {
                     let established = succession::summarise(
                         selected_summary_instructions(&site).await?,
-                        &carried,
-                        &history[..successor.record.messages_removed],
-                        site.focus,
+                        &SuccessionRequest {
+                            carried: &carried,
+                            history: &history[..successor.record.messages_removed],
+                            focus: site.focus,
+                            model: site.model,
+                            retain_at_most: None,
+                        },
                         site.provider,
                         &mut calls,
                     )
@@ -360,6 +424,7 @@ pub(super) async fn succeed_over_threshold(
                             carried: &carried,
                             history: &history,
                             focus: site.focus,
+                            model: site.model,
                             retain_at_most: None,
                         },
                         successor.record.messages_removed,
@@ -436,6 +501,7 @@ pub(super) async fn succeed_over_threshold(
         carried: &carried,
         history: &history,
         focus: site.focus,
+        model: site.model,
         retain_at_most,
     };
     let mut calls = Vec::new();
@@ -967,6 +1033,7 @@ async fn succeed_on_degradation(
             carried: &[],
             history,
             focus: site.focus,
+            model: site.model,
             retain_at_most: None,
         };
         match succession::successor_after(
@@ -1009,6 +1076,7 @@ async fn diagnose(
         carried: &[],
         history,
         focus: site.focus,
+        model: site.model,
         retain_at_most: Some(1),
     };
     let summarised = succession::split_point(&request)?;
@@ -1017,7 +1085,7 @@ async fn diagnose(
     let reader_model = models.reader.as_deref();
     let slices = reader_slices(older, slice_len)?;
     let findings = futures::future::join_all(slices.iter().map(|slice| {
-        site.provider.complete(diagnosis_request(
+        site.diagnosis_providers.reader.complete(diagnosis_request(
             LOCATOR_INSTRUCTIONS,
             succession::transcript(slice),
             reader_model,
@@ -1028,7 +1096,7 @@ async fn diagnose(
     let mut failed_reader = false;
     for finding in findings {
         let mut call = succession::recorded_call(
-            site.provider,
+            site.diagnosis_providers.reader,
             SuccessionStage::Reader,
             reader_model,
             &finding,
@@ -1073,7 +1141,8 @@ async fn diagnose(
         .join("\n\n");
     let synthesis_model = models.synthesis.as_deref();
     let synthesis = site
-        .provider
+        .diagnosis_providers
+        .synthesis
         .complete(diagnosis_request(
             SYNTHESIS_INSTRUCTIONS,
             format!(
@@ -1084,7 +1153,7 @@ async fn diagnose(
         ))
         .await;
     calls.push(succession::recorded_call(
-        site.provider,
+        site.diagnosis_providers.synthesis,
         SuccessionStage::Synthesis,
         synthesis_model,
         &synthesis,
@@ -1546,6 +1615,7 @@ mod tests {
         succeed_over_threshold(
             SuccessionSite {
                 provider,
+                diagnosis_providers: DiagnosisProviders::both(provider),
                 threshold: &threshold,
                 model: None,
                 focus: None,
@@ -1756,11 +1826,14 @@ mod tests {
     #[tokio::test]
     async fn blind_readers_see_only_history_and_the_synthesis_sees_the_record() {
         let provider = RecordingProvider::default();
+        // The summary's provider: a diagnosis is never sent through it.
+        let summary_provider = RecordingProvider::default();
         let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
         let variables = BTreeMap::new();
         let threshold = CompactionThreshold::MessageCount(100);
         let site = SuccessionSite {
-            provider: &provider,
+            provider: &summary_provider,
+            diagnosis_providers: DiagnosisProviders::both(&provider),
             threshold: &threshold,
             model: None,
             focus: None,
@@ -1770,6 +1843,7 @@ mod tests {
             diagnosis_models: Ok(DiagnosisModels {
                 reader: Some("reader-model".to_string()),
                 synthesis: Some("synthesis-model".to_string()),
+                ..Default::default()
             }),
             summariser: Summariser::Builtin,
             shadows: Vec::new(),
@@ -1812,6 +1886,14 @@ mod tests {
             requests.len(),
             LOCATOR_COUNT + 1,
             "three readers and one synthesis"
+        );
+        assert!(
+            summary_provider
+                .requests
+                .lock()
+                .expect("requests")
+                .is_empty(),
+            "every diagnosis stage goes to its own entry's provider"
         );
         let shown = |request: &CompletionRequest| request.messages[1].text_content();
         let readers: Vec<String> = requests[..LOCATOR_COUNT].iter().map(shown).collect();
@@ -1907,6 +1989,7 @@ mod tests {
             let threshold = CompactionThreshold::MessageCount(100);
             let site = SuccessionSite {
                 provider: &provider,
+                diagnosis_providers: DiagnosisProviders::both(&provider),
                 threshold: &threshold,
                 model: None,
                 focus: None,
@@ -1993,6 +2076,7 @@ mod tests {
         let output = assemble(&[Box::new(HistoryElement::new(history.clone()))]);
         let site = SuccessionSite {
             provider: &provider,
+            diagnosis_providers: DiagnosisProviders::both(&provider),
             threshold: &threshold,
             model: None,
             focus: None,
@@ -2064,6 +2148,7 @@ mod tests {
             let result = succeed_over_threshold(
                 SuccessionSite {
                     provider: &provider,
+                    diagnosis_providers: DiagnosisProviders::both(&provider),
                     threshold: &threshold,
                     model: None,
                     focus: None,
@@ -2154,6 +2239,7 @@ mod tests {
             let result = succeed_over_threshold(
                 SuccessionSite {
                     provider: &provider,
+                    diagnosis_providers: DiagnosisProviders::both(&provider),
                     threshold: &threshold,
                     model: None,
                     focus: None,
@@ -2282,6 +2368,8 @@ mod tests {
             Ok(DiagnosisModels {
                 reader: Some("vendor/session-1".to_string()),
                 synthesis: Some("vendor/session-1".to_string()),
+                reader_entry: Some("session".to_string()),
+                synthesis_entry: Some("session".to_string()),
             }),
             "unset, both are the session's model"
         );
@@ -2292,6 +2380,8 @@ mod tests {
             Ok(DiagnosisModels {
                 reader: Some("vendor/cheap-1".to_string()),
                 synthesis: Some("vendor/cheap-1".to_string()),
+                reader_entry: Some("cheap".to_string()),
+                synthesis_entry: Some("cheap".to_string()),
             }),
             "by alias or by entry key"
         );
@@ -2409,6 +2499,7 @@ mod tests {
         let recorded = std::sync::Arc::clone(&outcomes);
         let site = SuccessionSite {
             provider: &provider,
+            diagnosis_providers: DiagnosisProviders::both(&provider),
             threshold: &threshold,
             model: None,
             focus: None,

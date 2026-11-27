@@ -89,9 +89,10 @@ pub(crate) use operator_guidance::*;
 pub(crate) use projection::route_approval_agent_event;
 use projection::{ProjectedTurn, TurnProjection, project_agent_events};
 pub(crate) use provider_record::*;
-use runtime_launch::{RuntimeLaunch, launch_turn_runtime};
+pub(crate) use runtime_launch::effort_capability_for_model;
 #[cfg(test)]
-use runtime_launch::{effort_capability_for_model, output_limit_for_model};
+use runtime_launch::output_limit_for_model;
+use runtime_launch::{RuntimeLaunch, launch_turn_runtime};
 pub(crate) use runtime_launch::{requested_effort, served_effort};
 use sandbox_approval::{
     SandboxDegradationApproval, SandboxDegradationApprovalRequest,
@@ -815,7 +816,26 @@ pub(super) async fn process_turn_with_composition_and_focus(
         None => (output, serde_json::json!({ "removed": true })),
         Some(succession_step) => {
             let succession_filler = succession_step.filler;
-            let (summariser, succession_fallback) = Box::pin(summariser_for(
+            let succession_provider =
+                crate::startup::conversation_completion_provider(state, &config).await;
+            let diagnosis_models = succession::diagnosis_models(&config);
+            let diagnosis_entries = diagnosis_models.as_ref().ok();
+            let reader_provider = succession::diagnosis_stage_provider(
+                state,
+                &config,
+                diagnosis_entries.and_then(|models| models.reader_entry.as_deref()),
+                &succession_provider,
+            )
+            .await;
+            let synthesis_provider = succession::diagnosis_stage_provider(
+                state,
+                &config,
+                diagnosis_entries.and_then(|models| models.synthesis_entry.as_deref()),
+                &succession_provider,
+            )
+            .await;
+
+            let (mut summariser, succession_fallback) = Box::pin(summariser_for(
                 state,
                 &config.experimentation,
                 &succession_filler,
@@ -825,56 +845,59 @@ pub(super) async fn process_turn_with_composition_and_focus(
                 Some(prepared_turn_id),
             ))
             .await;
+            summariser.use_provider(state, &succession_provider);
             let succession_summariser = summariser.describe();
+            let mut shadows = Box::pin(succession_shadows(
+                state,
+                &active_graph.graph,
+                &config,
+                session_id,
+                prepared_turn_id,
+                &slot_context,
+                Some(topic_id),
+            ))
+            .await;
+            for shadow in &mut shadows {
+                shadow.summariser.use_provider(state, &succession_provider);
+            }
             // Over the compaction threshold, or after the thread's recent turns kept
             // hitting walls, the turn runs on a successor: the same elements rendered
             // afresh, the older history summarised against them or diagnosed from
             // outside (turn/succession.rs). Otherwise the first assembly stands.
-            let output = Box::pin(
-                COMPLETION_ATTRIBUTION.scope(
-                    CompletionAttribution {
-                        session_id,
-                        turn_id: Some(prepared_turn_id),
-                    },
-                    succession::succeed_over_threshold(
-                        succession::SuccessionSite {
-                            provider: state.provider.as_ref(),
-                            threshold: &compaction_threshold(&config),
-                            model: Some(config.default_model_id())
-                                .filter(|model| !model.is_empty()),
-                            focus: compaction_focus.as_deref(),
-                            variables: &session_variables,
-                            tokeniser: &tokeniser,
-                            degradation: succession::recent_degradation(
-                                state.storage.as_ref(),
-                                thread_id,
-                            )
-                            .await,
-                            diagnosis_models: succession::diagnosis_models(&config),
-                            summariser,
-                            shadows: Box::pin(succession_shadows(
-                                state,
-                                &active_graph.graph,
-                                &config,
-                                session_id,
-                                prepared_turn_id,
-                                &slot_context,
-                                Some(topic_id),
-                            ))
-                            .await,
-                            summary_instructions: &succession::SessionSummaryInstructions {
-                                state,
-                                config: &config.experimentation,
-                                session_id,
-                                turn_id: prepared_turn_id,
-                            },
+            let output = Box::pin(COMPLETION_ATTRIBUTION.scope(
+                CompletionAttribution {
+                    session_id,
+                    turn_id: Some(prepared_turn_id),
+                },
+                succession::succeed_over_threshold(
+                    succession::SuccessionSite {
+                        provider: succession_provider.as_ref(),
+                        diagnosis_providers: succession::DiagnosisProviders {
+                            reader: reader_provider.as_ref(),
+                            synthesis: synthesis_provider.as_ref(),
                         },
-                        elements,
-                        output,
-                        assemble,
-                    ),
+                        threshold: &compaction_threshold(&config),
+                        model: Some(config.default_model_id()).filter(|model| !model.is_empty()),
+                        focus: compaction_focus.as_deref(),
+                        variables: &session_variables,
+                        tokeniser: &tokeniser,
+                        degradation:
+                            succession::recent_degradation(state.storage.as_ref(), thread_id).await,
+                        diagnosis_models,
+                        summariser,
+                        shadows,
+                        summary_instructions: &succession::SessionSummaryInstructions {
+                            state,
+                            config: &config.experimentation,
+                            session_id,
+                            turn_id: prepared_turn_id,
+                        },
+                    },
+                    elements,
+                    output,
+                    assemble,
                 ),
-            )
+            ))
             .await;
             (
                 output,

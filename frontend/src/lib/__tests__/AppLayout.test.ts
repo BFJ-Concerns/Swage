@@ -336,7 +336,7 @@ describe("AppLayout shell navigation", () => {
     expect(document.querySelector('nav[aria-label="Surface"]')).toBeNull();
     // The start control offers a session with no topic first.
     const options = Array.from(
-      document.querySelectorAll('select[aria-label="Topic"] option'),
+      document.querySelectorAll('.topic-choice select option'),
     ).map((option) => option.textContent);
     expect(options[0]).toContain("No topic");
   });
@@ -375,7 +375,7 @@ describe("AppLayout shell navigation", () => {
       },
     });
     const topic = document.querySelector(
-      'select[aria-label="Topic"]',
+      '.topic-choice select',
     ) as HTMLSelectElement;
     topic.value = "research";
     topic.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1259,7 +1259,7 @@ describe("scope labels and catalogue selection", () => {
     const search = document.querySelector<HTMLInputElement>('input[aria-label="Search start topics"]');
     expect(search).not.toBeNull();
     flushSync(() => { search!.value = "59"; search!.dispatchEvent(new Event("input", { bubbles: true })); });
-    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Topic"]')!;
+    const select = document.querySelector<HTMLSelectElement>('.topic-choice select')!;
     expect(Array.from(select.options).map(option => option.textContent)).toEqual(["No topic — general assistant", "Topic 59"]);
     flushSync(() => { select.value = "t-59"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     const button = Array.from(document.querySelectorAll("button")).find(button => button.textContent === "Start")!;

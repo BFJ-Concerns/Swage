@@ -5,11 +5,10 @@
 // reconnection with exponential backoff.
 
 import {
-  KNOWN_SERVER_EVENT_TYPES,
+  isKnownServerEventType,
   type ClientEvent,
   type ConnectionStatus,
   type KnownServerEvent,
-  type KnownServerEventType,
   type ServerEvent,
 } from "../types";
 
@@ -36,10 +35,6 @@ export interface WebSocketClientOptions {
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function isKnownServerEventType(type: string): type is KnownServerEventType {
-  return (KNOWN_SERVER_EVENT_TYPES as readonly string[]).includes(type);
 }
 
 function parseServerEventFrame(raw: unknown): ServerEvent {
@@ -206,7 +201,9 @@ export function createWebSocketClient(
       if (ws !== socket) return;
       if (pendingFrames.length > 0) {
         pendingFrames = [];
-        emitDeliveryFailure();
+        // After the upgrade the gateway may already have read these frames.
+        // Reconnect to recover their state without reporting failure or resending.
+        if (!opened) emitDeliveryFailure();
       }
       emitStatus("reconnecting");
       if (!opened) {

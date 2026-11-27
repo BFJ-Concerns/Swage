@@ -1126,6 +1126,44 @@ pub(crate) async fn selected_model_provider(
     create_provider(config, &state.secret_manager, &state.storage).await
 }
 
+/// The completion provider for a conversation. Codex uses the app server
+/// for turns and has no completion adapter, so no other endpoint may receive
+/// its history for a summary.
+pub(crate) async fn conversation_completion_provider(
+    state: &crate::state::AppState,
+    config: &swage_config::ResolvedConfig,
+) -> Arc<dyn swage_provider::LlmProvider> {
+    if config.default_provider_protocol() != swage_config::Protocol::Codex {
+        return selected_model_provider(state, config).await;
+    }
+    Arc::new(crate::completion_record::RecordingProvider::new(
+        Arc::new(swage_provider::UnsupportedLlmProvider::for_model(
+            CODEX_COMPLETION_UNSUPPORTED_REASON,
+            config.default_model_id(),
+        )),
+        Arc::clone(&state.storage),
+        state.secret_manager.as_ref().clone(),
+    ))
+}
+
+/// The provider that serves `entry_key`, a key of `config`'s model catalogue,
+/// on the provider that entry names — for a completion that asks for an
+/// entry other than the configuration's selected one, such as a judge's or a
+/// gate's model. Two entries may share an upstream model id on two
+/// providers, so the id alone cannot choose between them.
+pub(crate) async fn catalogue_entry_provider(
+    state: &crate::state::AppState,
+    config: &swage_config::ResolvedConfig,
+    entry_key: &str,
+) -> Arc<dyn swage_provider::LlmProvider> {
+    if config.models.default == entry_key {
+        return selected_model_provider(state, config).await;
+    }
+    let mut entry_config = config.clone();
+    entry_config.models.default = entry_key.to_owned();
+    selected_model_provider(state, &entry_config).await
+}
+
 fn runtime_serves_selected_route(
     runtime_config: &swage_config::ResolvedConfig,
     config: &swage_config::ResolvedConfig,
@@ -2601,6 +2639,89 @@ mod tests {
             initial_backoff: std::time::Duration::ZERO,
             max_backoff: std::time::Duration::ZERO,
         }
+    }
+
+    /// Two entries serve one upstream model on two providers — a
+    /// subscription beside a key — and a completion asking for either entry
+    /// is served, and billed, by the provider that entry names.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_entry_sharing_an_upstream_model_is_served_by_its_own_provider() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let subscription_calls = Arc::new(AtomicUsize::new(0));
+        let key_calls = Arc::new(AtomicUsize::new(0));
+        let subscription_url = spawn_openai_compatible_server(
+            Arc::clone(&subscription_calls),
+            StatusCode::OK,
+            "subscription reply",
+        )
+        .await;
+        let key_url =
+            spawn_openai_compatible_server(Arc::clone(&key_calls), StatusCode::OK, "key reply")
+                .await;
+        let config = swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "subscription".to_string(),
+                entries: [
+                    (
+                        "subscription".to_string(),
+                        endpoint(Protocol::OpenAi, subscription_url),
+                    ),
+                    ("key".to_string(), endpoint(Protocol::OpenAi, key_url)),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "via-subscription".to_string(),
+                entries: [
+                    (
+                        "via-subscription".to_string(),
+                        model("subscription", "shared-model"),
+                    ),
+                    ("via-key".to_string(), model("key", "shared-model")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..Default::default()
+        };
+        let runtime = create_provider_with_retry(
+            &config,
+            &secret_manager,
+            &(Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>),
+            no_retry(),
+        )
+        .await;
+        let state = crate::state::AppState::for_test(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            runtime,
+            config.clone(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let reply = catalogue_entry_provider(&state, &config, "via-key")
+            .await
+            .complete(selected_model_request("shared-model"))
+            .await
+            .expect("the key's entry answers");
+        assert_eq!(reply.content, "key reply");
+        assert_eq!(key_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(subscription_calls.load(Ordering::SeqCst), 0);
+
+        let reply = catalogue_entry_provider(&state, &config, "via-subscription")
+            .await
+            .complete(selected_model_request("shared-model"))
+            .await
+            .expect("the subscription's entry answers");
+        assert_eq!(reply.content, "subscription reply");
+        assert_eq!(subscription_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(key_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

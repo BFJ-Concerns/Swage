@@ -92,9 +92,8 @@ impl RequestJudge for GatewayRequestJudge {
             }
         };
         let prompt = build_judge_prompt(&request, instruction);
-        let response = self
-            .state
-            .active_provider()
+        let response = crate::startup::catalogue_entry_provider(&self.state, &config, &judge_key)
+            .await
             .complete(CompletionRequest {
                 effort: None,
                 messages: vec![ChatMessage::new(Role::User, prompt)],
@@ -429,10 +428,14 @@ mod tests {
             .expect("session");
         let provider = Arc::new(ScriptedJudgeProvider::new(reply));
         let mut config = swage_config::ResolvedConfig::default();
+        config.providers.entries.insert(
+            "judge-provider".into(),
+            swage_config::ProviderEndpointConfig::default(),
+        );
         config.models.entries.insert(
             "judge".into(),
             swage_config::ModelEndpointConfig {
-                provider_id: config.providers.default.clone(),
+                provider_id: "judge-provider".into(),
                 model_id: "small-judge".into(),
                 ..Default::default()
             },
