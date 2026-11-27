@@ -280,12 +280,12 @@ async fn try_summarise(
     }
 
     let mut midpoint = messages.len() / 2;
-    while midpoint > 0 && carries_tool_result(&messages[midpoint]) {
+    while midpoint > 0 && messages[midpoint].carries_tool_result() {
         midpoint -= 1;
     }
     if midpoint == 0 {
         midpoint = messages.len() / 2;
-        while midpoint < messages.len() && carries_tool_result(&messages[midpoint]) {
+        while midpoint < messages.len() && messages[midpoint].carries_tool_result() {
             midpoint += 1;
         }
     }
@@ -444,26 +444,16 @@ fn aggressive_truncate(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
 fn retained_start(messages: &[ChatMessage], keep: usize) -> usize {
     let proposed = messages.len().saturating_sub(keep);
     let mut start = proposed;
-    while start < messages.len() && carries_tool_result(&messages[start]) {
+    while start < messages.len() && messages[start].carries_tool_result() {
         start += 1;
     }
     if start == messages.len() && proposed < messages.len() {
         start = proposed;
-        while start > 0 && carries_tool_result(&messages[start]) {
+        while start > 0 && messages[start].carries_tool_result() {
             start -= 1;
         }
     }
     start
-}
-
-fn carries_tool_result(message: &ChatMessage) -> bool {
-    message.role() == Role::Tool
-        || message.tool_call_id().is_some()
-        || message.tool_replay().is_some_and(|parts| {
-            parts
-                .iter()
-                .any(|part| matches!(part, swage_core::ToolReplayPart::ToolResult { .. }))
-        })
 }
 
 // ---------------------------------------------------------------------------
