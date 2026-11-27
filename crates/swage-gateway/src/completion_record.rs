@@ -168,6 +168,13 @@ impl CompletionAccount {
                 "arguments": arguments,
             })),
             StreamChunk::ProviderResponseWitness(witness) => {
+                // The witness carries the provider's own totals, where a
+                // stream's usage chunks may report only part (Anthropic's
+                // carry no input count): take the larger of each, never both.
+                let input = self.input_tokens.get_or_insert(0);
+                *input = (*input).max(witness.usage.input_tokens);
+                let output = self.output_tokens.get_or_insert(0);
+                *output = (*output).max(witness.usage.output_tokens);
                 self.provider_witness = Some(witness.clone());
             }
             StreamChunk::ProviderAttempt(_)
@@ -785,5 +792,25 @@ mod tests {
         let events = completions(&storage, 1).await;
         assert_eq!(events[0].session_id, Some(session.id));
         assert_eq!(events[0].metadata["turn_id"], turn_id.to_string());
+    }
+
+    #[test]
+    fn a_streams_token_counts_take_the_witness_where_its_usage_chunks_fall_short() {
+        let mut account = CompletionAccount::new(&CutOffProvider::default(), None, None, true);
+        account.take_chunk(&StreamChunk::Usage(swage_core::TokenUsage {
+            input_tokens: 0,
+            output_tokens: 5,
+        }));
+        account.take_chunk(&StreamChunk::ProviderResponseWitness(
+            swage_core::ProviderResponseWitness {
+                usage: swage_core::TokenUsage {
+                    input_tokens: 40,
+                    output_tokens: 5,
+                },
+                ..Default::default()
+            },
+        ));
+        assert_eq!(account.input_tokens, Some(40));
+        assert_eq!(account.output_tokens, Some(5), "not counted twice");
     }
 }
