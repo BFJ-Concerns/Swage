@@ -168,6 +168,62 @@ mod tests {
             .unwrap()
     }
 
+    /// A record that is a JSON column stays readable when a registered value
+    /// is the whole of it, or a number in it, or a description that looks
+    /// like a document: the audit trail still lists its events.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_masked_json_record_is_still_read_back() {
+        use crate::model::NewAuditEvent;
+        use crate::store::{AuditStore, SecretStore};
+
+        let storage = SqliteStorage::in_memory().unwrap();
+        let metadata = serde_json::json!({ "reference": "secret://managed/a", "kind": "created" });
+        storage
+            .registered_secret_values()
+            .replace(vec![metadata.to_string(), "73918264".into()]);
+        for (entity_id, metadata) in [
+            ("whole", metadata.clone()),
+            ("number", serde_json::json!({ "pin": 73_918_264 })),
+        ] {
+            storage
+                .create_audit_event(NewAuditEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    session_id: None,
+                    entity_kind: "secret".into(),
+                    entity_id: entity_id.into(),
+                    event_kind: "revoked".into(),
+                    summary: "secret revoked".into(),
+                    metadata,
+                })
+                .await
+                .unwrap();
+        }
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE topics SET description = ?1 WHERE is_general = 1",
+                    [r#"{"pin":73918264}"#],
+                )
+            })
+            .await
+            .unwrap();
+
+        let events = storage.list_audit_events().await.unwrap();
+        let metadata_of = |id: &str| {
+            events
+                .iter()
+                .find(|event| event.entity_id == id)
+                .map(|event| event.metadata.clone())
+                .unwrap()
+        };
+        assert_eq!(metadata_of("whole"), serde_json::json!("[REDACTED_SECRET]"));
+        assert_eq!(
+            metadata_of("number"),
+            serde_json::json!({ "pin": "[REDACTED_SECRET]" })
+        );
+        assert!(rows_holding(&storage, "73918264").await.is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_registered_value_rests_in_no_conversation_record() {
         use crate::model::*;

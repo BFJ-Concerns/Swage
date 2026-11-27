@@ -76,12 +76,14 @@ pub fn mask_text(text: &mut String, values: &[impl AsRef<str>]) -> bool {
 
 /// Mask every value in `text`, reading it as the record it is.
 ///
-/// A JSON object or array is masked in its decoded strings and keys and
-/// written out again only when something was replaced, so a value that
-/// happens to match a number or the document's own syntax never turns the
-/// record into text that no longer parses. Numbers are left as they are.
-/// Any other text is masked as text, in the value's plain form and in the
-/// escaped form it takes when JSON is quoted inside it.
+/// A JSON object or array stays a JSON document: its decoded strings and
+/// keys are masked, a number or a part of the document holding a value
+/// becomes the marker string, and a document still holding a value across
+/// its own syntax becomes the marker string whole. It is written out again
+/// only when something was replaced, so no record is left holding the value
+/// and none is left unparsable. Any other text is masked as text, in the
+/// value's plain form and in the escaped form it takes when JSON is quoted
+/// inside it.
 pub fn mask_record_text(text: &mut String, values: &[String]) -> bool {
     if values.is_empty() {
         return false;
@@ -91,15 +93,20 @@ pub fn mask_record_text(text: &mut String, values: &[String]) -> bool {
         && let Ok(mut document) = serde_json::from_str::<serde_json::Value>(text)
     {
         let documents = registered_documents(values);
-        if documents.contains(&document) {
-            *text = REDACTED_SECRET.to_owned();
+        let changed = mask_document(&mut document, values, &documents);
+        let rendered = if changed {
+            document.to_string()
+        } else {
+            text.clone()
+        };
+        if holds_any_form(&rendered, values) {
+            *text = serde_json::Value::String(REDACTED_SECRET.to_owned()).to_string();
             return true;
         }
-        if mask_document(&mut document, values, &documents) {
-            *text = document.to_string();
-            return true;
+        if changed {
+            *text = rendered;
         }
-        return false;
+        return changed;
     }
     let mut changed = false;
     for value in values {
@@ -134,6 +141,16 @@ fn registered_documents(values: &[String]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Whether `text` holds any value, plain or escaped, outside the markers
+/// already in it.
+fn holds_any_form(text: &str, values: &[String]) -> bool {
+    let text = text.replace(REDACTED_SECRET, "");
+    values.iter().any(|value| {
+        let encoded = serde_json::to_string(value).expect("secret text serialises");
+        text.contains(value.as_str()) || text.contains(&encoded[1..encoded.len() - 1])
+    })
+}
+
 fn mask_document(
     value: &mut serde_json::Value,
     values: &[String],
@@ -159,7 +176,14 @@ fn mask_document(
                 map.insert(key, item);
             }
         }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+        serde_json::Value::Number(number) => {
+            let digits = number.to_string();
+            if values.iter().any(|value| digits.contains(value.as_str())) {
+                *value = serde_json::Value::String(REDACTED_SECRET.to_owned());
+                return true;
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) => {}
     }
     replaced
 }
@@ -231,20 +255,56 @@ mod tests {
         assert_eq!(parsed["output"], "key [REDACTED_SECRET] end");
     }
 
+    /// Masking a document never leaves the value in it and never leaves it
+    /// unparsable: a number holding the value, a part equal to it, the whole
+    /// document equal to it, and the value across the document's own syntax
+    /// each end as JSON holding only the marker where the value was.
     #[test]
-    fn a_value_matching_a_number_or_syntax_leaves_the_document_parsable() {
+    fn a_masked_document_holds_no_value_and_still_parses() {
         let set = RegisteredSecretValues::default();
-        set.replace(vec!["123456".into()]);
-        let mut text = r#"{"output":"PIN 123456","total_bytes":123456}"#.to_string();
-        assert!(set.mask(&mut text));
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["output"], "PIN [REDACTED_SECRET]");
-        assert_eq!(parsed["total_bytes"], 123_456);
+        let cases: [(&str, &str, serde_json::Value); 4] = [
+            (
+                "73918264",
+                r#"{"pin":73918264,"total_bytes":12}"#,
+                serde_json::json!({"pin": REDACTED_SECRET, "total_bytes": 12}),
+            ),
+            (
+                "73918264",
+                r#"{"output":"PIN 73918264"}"#,
+                serde_json::json!({"output": "PIN [REDACTED_SECRET]"}),
+            ),
+            (
+                r#"{"kind":"created","id":"a"}"#,
+                r#"{"kind": "created", "id": "a"}"#,
+                serde_json::json!(REDACTED_SECRET),
+            ),
+            (
+                r#"","#,
+                r#"{"a":"x","b":"y"}"#,
+                serde_json::json!(REDACTED_SECRET),
+            ),
+        ];
+        for (value, record, expected) in cases {
+            set.replace(vec![value.into()]);
+            let mut text = record.to_string();
+            assert!(set.mask(&mut text), "{record} holds {value}");
+            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(parsed, expected, "{record}");
+            assert!(!holds_any_form(&text, &[value.to_string()]));
+        }
+    }
 
-        set.replace(vec![r#"","#.into()]);
-        let mut text = r#"{"a":"x","b":"y"}"#.to_string();
-        assert!(!set.mask(&mut text));
-        assert_eq!(text, r#"{"a":"x","b":"y"}"#);
+    /// A string whose text looks like a document is masked as one, number
+    /// included, and the outer record stays a document.
+    #[test]
+    fn a_string_holding_a_document_with_the_value_as_a_number_is_masked() {
+        let set = RegisteredSecretValues::default();
+        set.replace(vec!["73918264".into()]);
+        let mut text = r#"{"description":"{\"pin\":73918264}"}"#.to_string();
+        assert!(set.mask(&mut text));
+        assert!(!text.contains("73918264"));
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(parsed["description"].is_string());
     }
 
     #[test]
@@ -255,7 +315,7 @@ mod tests {
 
         let mut text = value.to_string();
         assert!(set.mask(&mut text));
-        assert_eq!(text, REDACTED_SECRET);
+        assert_eq!(text, format!("\"{REDACTED_SECRET}\""));
 
         let mut text = r#"{"meta": {"token": "verifier-json-84c2"}, "n": 1}"#.to_string();
         assert!(set.mask(&mut text));
