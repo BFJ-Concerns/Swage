@@ -15782,7 +15782,7 @@ fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
         },
     );
     let anthropic = swage_provider::anthropic::AnthropicProvider::new("key", "claude-opus-5");
-    let capability = super::effort_capability_for_model(&config, "claude", &anthropic);
+    let capability = super::effort_capability_for_model(&config, "claude", Some(&anthropic));
     assert!(matches!(
         capability,
         swage_core::EffortCapability::Levels {
@@ -15800,14 +15800,14 @@ fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
         .capabilities
         .effort = Some(declared.clone());
     assert_eq!(
-        super::effort_capability_for_model(&config, "claude", &anthropic),
+        super::effort_capability_for_model(&config, "claude", Some(&anthropic)),
         declared,
         "the catalogue's own declaration wins over the adapter's"
     );
 
     let mock = MockProvider::new(vec![]);
     assert_eq!(
-        super::effort_capability_for_model(&config, "unknown", &mock),
+        super::effort_capability_for_model(&config, "unknown", Some(&mock)),
         swage_core::EffortCapability::None
     );
 }

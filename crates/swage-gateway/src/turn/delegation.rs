@@ -1213,7 +1213,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     let capability = super::runtime_launch::effort_capability_for_model(
                         &target_resolved,
                         &selection.model_key,
-                        child_provider.as_ref(),
+                        Some(child_provider.as_ref()),
                     );
                     swage_core::resolve_effort(requested, &capability)
                 });

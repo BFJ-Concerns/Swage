@@ -143,6 +143,16 @@ pub(crate) struct ShadowOutcome {
 }
 
 impl Summariser {
+    pub(super) fn use_provider(
+        &mut self,
+        state: &AppState,
+        provider: &std::sync::Arc<dyn LlmProvider>,
+    ) {
+        if let Self::Plugin(slot) = self {
+            slot.use_provider(state, provider);
+        }
+    }
+
     /// Run the succession pass with this summariser.
     async fn succeed(
         &self,
@@ -398,9 +408,13 @@ pub(super) async fn succeed_over_threshold(
                 async {
                     let established = succession::summarise(
                         selected_summary_instructions(&site).await?,
-                        &carried,
-                        &history[..successor.record.messages_removed],
-                        site.focus,
+                        &SuccessionRequest {
+                            carried: &carried,
+                            history: &history[..successor.record.messages_removed],
+                            focus: site.focus,
+                            model: site.model,
+                            retain_at_most: None,
+                        },
                         site.provider,
                         &mut calls,
                     )
@@ -410,6 +424,7 @@ pub(super) async fn succeed_over_threshold(
                             carried: &carried,
                             history: &history,
                             focus: site.focus,
+                            model: site.model,
                             retain_at_most: None,
                         },
                         successor.record.messages_removed,
@@ -486,6 +501,7 @@ pub(super) async fn succeed_over_threshold(
         carried: &carried,
         history: &history,
         focus: site.focus,
+        model: site.model,
         retain_at_most,
     };
     let mut calls = Vec::new();
@@ -1017,6 +1033,7 @@ async fn succeed_on_degradation(
             carried: &[],
             history,
             focus: site.focus,
+            model: site.model,
             retain_at_most: None,
         };
         match succession::successor_after(
@@ -1059,6 +1076,7 @@ async fn diagnose(
         carried: &[],
         history,
         focus: site.focus,
+        model: site.model,
         retain_at_most: Some(1),
     };
     let summarised = succession::split_point(&request)?;
@@ -2481,6 +2499,7 @@ mod tests {
         let recorded = std::sync::Arc::clone(&outcomes);
         let site = SuccessionSite {
             provider: &provider,
+            diagnosis_providers: DiagnosisProviders::both(&provider),
             threshold: &threshold,
             model: None,
             focus: None,

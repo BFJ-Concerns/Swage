@@ -4473,7 +4473,7 @@ async fn refuse_below_effort_floor(
             "no effort is set for the call and model '{model}' has no default effort"
         )),
         Some(requested) => {
-            let resolved = crate::turn::served_effort(state, config, requested).await;
+            let resolved = crate::turn::served_effort(config, requested);
             match resolved.control {
                 swage_core::EffortControl::Omitted => {
                     Some(format!("model '{model}' takes no effort control"))

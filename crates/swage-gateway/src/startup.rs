@@ -1105,6 +1105,26 @@ pub(crate) async fn selected_model_provider(
     create_provider(config, &state.secret_manager, &state.storage).await
 }
 
+/// The completion provider for a conversation. Codex uses the app server
+/// for turns and has no completion adapter, so no other endpoint may receive
+/// its history for a summary.
+pub(crate) async fn conversation_completion_provider(
+    state: &crate::state::AppState,
+    config: &swage_config::ResolvedConfig,
+) -> Arc<dyn swage_provider::LlmProvider> {
+    if config.default_provider_protocol() != swage_config::Protocol::Codex {
+        return selected_model_provider(state, config).await;
+    }
+    Arc::new(crate::completion_record::RecordingProvider::new(
+        Arc::new(swage_provider::UnsupportedLlmProvider::for_model(
+            CODEX_COMPLETION_UNSUPPORTED_REASON,
+            config.default_model_id(),
+        )),
+        Arc::clone(&state.storage),
+        state.secret_manager.as_ref().clone(),
+    ))
+}
+
 /// The provider that serves `entry_key`, a key of `config`'s model catalogue,
 /// on the provider that entry names — for a completion that asks for an
 /// entry other than the configuration's selected one, such as a judge's or a
