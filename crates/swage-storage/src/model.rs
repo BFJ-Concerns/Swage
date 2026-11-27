@@ -1546,6 +1546,14 @@ pub struct Message {
     /// Who authored the message: a person, the model, or the platform path
     /// (delegation, schedule, workflow, a notice) that composed it.
     pub origin: MessageOrigin,
+    /// Whether the platform handed this row to the agent as material produced
+    /// elsewhere — a delegated agent's result, a notice about the conversation
+    /// — rather than someone addressing the agent: a typed message, a
+    /// scheduled brief, a worker's prompt. Independent of `origin`, since one
+    /// origin composes both briefs and deliveries, and recorded by the route
+    /// that writes the row, so the history rebuild frames every delivered row
+    /// for the model without guessing from role or origin.
+    pub delivered: bool,
     pub content: String,
     /// Content parts submitted beside the text, one generic JSON value per
     /// part exactly as the client wire carried it. Storage keeps them
@@ -2326,6 +2334,9 @@ pub struct NewMessage {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub origin: MessageOrigin,
+    /// Handed to the agent as material rather than addressed to it; see
+    /// [`Message::delivered`].
+    pub delivered: bool,
     pub content: String,
     /// Content parts beside the text; empty for a text-only message.
     pub attachments: Vec<serde_json::Value>,
@@ -2402,6 +2413,9 @@ pub struct AppendMessage {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub origin: MessageOrigin,
+    /// Handed to the agent as material rather than addressed to it; see
+    /// [`Message::delivered`].
+    pub delivered: bool,
     pub content: String,
     /// Content parts beside the text; empty for a text-only message.
     pub attachments: Vec<serde_json::Value>,
@@ -3216,6 +3230,7 @@ mod tests {
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
             origin: MessageOrigin::User,
+            delivered: false,
             content: "hello".to_string(),
             position: 0,
             agent_id: "agent-1".to_string(),
@@ -3249,6 +3264,7 @@ mod tests {
             turn_id: None,
             role: Role::Assistant,
             origin: MessageOrigin::User,
+            delivered: false,
             content: "sure".to_string(),
             position: 1,
             agent_id: "agent-1".to_string(),
@@ -3273,6 +3289,7 @@ mod tests {
             turn_id: None,
             role: Role::User,
             origin: crate::model::MessageOrigin::User,
+            delivered: false,
             content: "test".to_string(),
             position: 0,
             agent_id: "agent-x".to_string(),
@@ -3289,6 +3306,7 @@ mod tests {
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
             origin: crate::model::MessageOrigin::User,
+            delivered: false,
             content: "hi".to_string(),
             position: 0,
             agent_id: "agent-y".to_string(),

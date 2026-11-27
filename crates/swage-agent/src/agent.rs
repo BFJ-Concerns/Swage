@@ -1146,8 +1146,21 @@ mod approval_tests {
                                 TurnState::Processing,
                                 "a durable result must no longer select the parent for restart resumption"
                             );
-                            assert!(call.result.as_deref().unwrap().contains("survey complete"));
-                            assert!(call.model_result.is_some());
+                            let result = call.result.as_deref().unwrap();
+                            assert!(result.contains("survey complete"));
+                            assert!(
+                                !result.contains("[Delivered material:"),
+                                "the stored result stays bare: {result}"
+                            );
+                            let replay: swage_core::CompactToolReplay = serde_json::from_str(
+                                call.model_result.as_deref().expect("model result"),
+                            )
+                            .expect("compact replay");
+                            assert!(
+                                replay.delivered && replay.preview == result,
+                                "a delegated agent's result is replayed as delivered material, \
+                                 its preview the bare result: {replay:?}"
+                            );
                             assert_eq!(
                                 call.execution,
                                 Some(
@@ -1783,6 +1796,22 @@ impl Agent {
         request: TurnRequest,
         event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<OutboundMessage, AgentError> {
+        // Every completion the turn makes on this task is attributed to its
+        // session and turn in the gateway's record of completions.
+        let attribution = swage_provider::attribution::CompletionAttribution {
+            session_id: request.execution.session_id,
+            turn_id: request.existing_turn_id,
+        };
+        swage_provider::attribution::COMPLETION_ATTRIBUTION
+            .scope(attribution, self.run_turn_streaming(request, event_tx))
+            .await
+    }
+
+    async fn run_turn_streaming(
+        &self,
+        request: TurnRequest,
+        event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<OutboundMessage, AgentError> {
         let execution = request.execution;
         let thread_id = execution.thread_id;
         let user_message = request.user_message;
@@ -2240,14 +2269,33 @@ impl Agent {
 
                     // Leak detection on tool result before feeding back to the model.
                     let scanned_result = self.scan_output(result_content);
-                    let model_result = compact_tool_result_for_model_with_reference(
-                        &scanned_result,
-                        is_error,
-                        tool_result_reference(&turn.id.to_string(), &call.call_id),
-                    );
+                    let reference = tool_result_reference(&turn.id.to_string(), &call.call_id);
+                    // Delivered material is compacted bare, so the replay's
+                    // preview and digest match the stored result, and carries
+                    // the flag that has every reader frame the whole of it;
+                    // the immediate result carries the same frame.
+                    let (model_result, immediate_result) = if dispatch_result.delivered {
+                        (
+                            swage_core::compact_delivered_tool_result_for_model(
+                                &scanned_result,
+                                is_error,
+                                Some(reference),
+                            ),
+                            self.config.delivered_material_frame.wrap(&scanned_result),
+                        )
+                    } else {
+                        (
+                            compact_tool_result_for_model_with_reference(
+                                &scanned_result,
+                                is_error,
+                                reference,
+                            ),
+                            scanned_result,
+                        )
+                    };
 
                     let model_result = dispatch_result.model_content(&model_result);
-                    let safe_result = dispatch_result.model_content(&scanned_result);
+                    let safe_result = dispatch_result.model_content(&immediate_result);
 
                     // Settle the started row. The raw result stays in the
                     // store; the scanned model-facing text is what history
@@ -2616,6 +2664,7 @@ impl Agent {
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: safe_content.clone(),
                 agent_id: self.config.agent_id.clone(),
             })
@@ -2631,6 +2680,7 @@ impl Agent {
                         turn_id: Some(turn.id),
                         role: Role::User,
                         origin: swage_storage::MessageOrigin::Platform,
+                        delivered: true,
                         content: format!(
                             "Response incomplete: {} ({reason}).",
                             if reason == "content_filter" {
@@ -3781,6 +3831,7 @@ impl Agent {
                         is_error: true,
                         status: "error".to_string(),
                         approval_note: None,
+                        delivered: false,
                         execution: swage_protocol::client::conversation::ToolExecution::refused(),
                     });
                 }
@@ -3829,7 +3880,10 @@ impl Agent {
                             success: incomplete_reason.is_none(),
                         });
                         let result_str = serde_json::to_string(&result).unwrap_or_default();
-                        Ok((result_str, false, "success".to_string()).into())
+                        let mut delivered: ToolDispatchResult =
+                            (result_str, false, "success".to_string()).into();
+                        delivered.delivered = true;
+                        Ok(delivered)
                     }
                     Ok(crate::delegation::DelegationOutcome::Detached(detached)) => {
                         // The delegate has started, not completed. The actual
@@ -4318,6 +4372,7 @@ impl Agent {
                 turn_id: Some(execution.turn_id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: safe_content.clone(),
                 agent_id: self.config.agent_id.clone(),
             })
@@ -4342,6 +4397,7 @@ impl Agent {
                 turn_id: Some(turn_id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: safe_content.clone(),
                 agent_id: self.config.agent_id.clone(),
             })

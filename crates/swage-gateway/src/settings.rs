@@ -468,12 +468,9 @@ where
         }
         return Err(ApiError::from(swage_core::GatewayError::Storage(error)));
     }
-    let provider = crate::startup::create_provider(
-        &runtime_config,
-        &state.secret_manager,
-        state.storage.as_ref(),
-    )
-    .await;
+    let provider =
+        crate::startup::create_provider(&runtime_config, &state.secret_manager, &state.storage)
+            .await;
     let tool_dispatcher = crate::startup::build_tool_dispatcher(
         &runtime_config,
         state.storage.clone(),

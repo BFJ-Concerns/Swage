@@ -109,6 +109,8 @@ impl ModelOutputWitness {
 ///
 /// The task belongs to the returned stream: dropping the stream aborts the
 /// forwarder even when it is waiting for provider output or a retry timer.
+/// The task runs under the completion attribution of the code that asked for
+/// the stream, so a provider it calls still records the turn it serves.
 pub(crate) fn spawn_stream_forwarder<T, F, Fut>(
     forwarder: F,
 ) -> Pin<Box<dyn Stream<Item = T> + Send>>
@@ -117,9 +119,13 @@ where
     F: FnOnce(tokio::sync::mpsc::UnboundedSender<T>) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    let attribution = crate::attribution::current_attribution();
     let lazy_receiver = futures::stream::once(async move {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let task = AbortTaskOnDrop(tokio::spawn(forwarder(tx)));
+        let task = AbortTaskOnDrop(tokio::spawn(crate::attribution::carried(
+            attribution,
+            forwarder(tx),
+        )));
         futures::stream::poll_fn(move |cx| {
             let _keep_task_until_stream_is_dropped = &task;
             rx.poll_recv(cx)

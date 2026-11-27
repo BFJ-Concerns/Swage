@@ -2860,6 +2860,7 @@ mod tests {
                     } else {
                         swage_storage::MessageOrigin::Assistant
                     },
+                    delivered: false,
                     content: format!("history message {index}"),
                     agent_id: "gateway".to_string(),
                 })
@@ -5239,6 +5240,7 @@ mod tests {
                 turn_id: None,
                 role: swage_core::Role::User,
                 origin: swage_storage::MessageOrigin::User,
+                delivered: false,
                 content: "hello".into(),
                 position: 0,
                 agent_id: "gateway".into(),
@@ -5252,6 +5254,7 @@ mod tests {
                 turn_id: None,
                 role: swage_core::Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "draft".into(),
                 position: 1,
                 agent_id: "gateway".into(),
@@ -5293,6 +5296,7 @@ mod tests {
                 turn_id: None,
                 role: swage_core::Role::User,
                 origin: swage_storage::MessageOrigin::User,
+                delivered: false,
                 content: "parent continues".into(),
                 position: 2,
                 agent_id: "gateway".into(),

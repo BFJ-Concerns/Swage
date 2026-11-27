@@ -57,6 +57,42 @@ pub const LOCATION_REQUEST_JUDGE_PROMPT: &str = "prompts.request_judge";
 /// is the first variant.
 pub const LOCATION_SUCCESSION_SUMMARY_PROMPT: &str = "prompts.succession_summary";
 
+/// The delivered-material frame: the wording around material nobody in the
+/// conversation wrote — a delegated agent's result, a platform notice — when
+/// it reaches the model. The authored frame is the first variant; a session
+/// draws once, and its history rebuild, its agent's immediate results and its
+/// result read-backs all serve the drawn frame.
+pub const LOCATION_DELIVERED_MATERIAL_FRAME: &str = "prompts.delivered_material_frame";
+
+/// The registered delivered-material frames, by variant name.
+fn delivered_material_frames() -> [(&'static str, swage_core::DeliveredMaterialFrame); 1] {
+    [("authored", swage_core::DeliveredMaterialFrame::authored())]
+}
+
+/// Select and record the delivered-material frame a session's turn serves.
+pub async fn select_delivered_material_frame(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Option<Uuid>,
+) -> Result<swage_core::DeliveredMaterialFrame, VariantSelectionError> {
+    let frames = delivered_material_frames();
+    let names = frames.each_ref().map(|(name, _)| *name);
+    let decision = select_session_variant(
+        state,
+        &state.active_config().experimentation,
+        LOCATION_DELIVERED_MATERIAL_FRAME,
+        &names,
+        frames[0].0,
+        session_id,
+        turn_id,
+    )
+    .await?;
+    Ok(frames
+        .into_iter()
+        .find_map(|(name, frame)| (name == decision.variant).then_some(frame))
+        .unwrap_or_default())
+}
+
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -93,8 +93,86 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("065_turn_execution_isolation", ADD_TURN_EXECUTION_ISOLATION),
         ("066_turn_failure_message", ADD_TURN_FAILURE_MESSAGE),
+        ("067_tool_call_audit", CREATE_TOOL_CALL_AUDIT_TRIGGERS),
     ]
 }
+
+/// Every settled tool call is an audit event of its own family, attributed
+/// to the session its turn belongs to and carrying the arguments it ran with
+/// and the result it returned, so the record lists a session's tool calls
+/// beside its state transitions and configuration changes. A call settles
+/// when its status is written: ordinarily an update after the row was
+/// created with no status, or an insert that already carries one into a turn
+/// still in flight (a call recorded whole once it has run). A settled row
+/// inserted into a turn that has already ended is a copy of a call that ran
+/// before — a branch carrying its ancestor's history — and is no event.
+const CREATE_TOOL_CALL_AUDIT_TRIGGERS: &str = "
+    CREATE TRIGGER IF NOT EXISTS trg_tool_calls_settled_audit
+    AFTER UPDATE OF status ON tool_calls
+    WHEN NEW.status IS NOT NULL AND (OLD.status IS NULL OR OLD.status <> NEW.status)
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT threads.session_id FROM turns
+                JOIN threads ON threads.id = turns.thread_id
+                WHERE turns.id = NEW.turn_id),
+            'tool_call',
+            NEW.id,
+            'tool_call',
+            'tool ' || NEW.tool || ' ' || NEW.status,
+            json_object(
+                'tool', NEW.tool,
+                'status', NEW.status,
+                'turn_id', NEW.turn_id,
+                'call_id', NEW.call_id,
+                'agent_id', NEW.agent_id,
+                'duration_ms', NEW.duration_ms,
+                'parent_call_id', NEW.parent_call_id,
+                'display_summary', NEW.display_summary,
+                'arguments', NEW.arguments,
+                'result', NEW.result,
+                'truncated', NEW.truncated <> 0
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tool_calls_inserted_settled_audit
+    AFTER INSERT ON tool_calls
+    WHEN NEW.status IS NOT NULL
+        AND (SELECT state FROM turns WHERE id = NEW.turn_id)
+            IN ('pending', 'processing', 'awaiting_approval', 'delegating')
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT threads.session_id FROM turns
+                JOIN threads ON threads.id = turns.thread_id
+                WHERE turns.id = NEW.turn_id),
+            'tool_call',
+            NEW.id,
+            'tool_call',
+            'tool ' || NEW.tool || ' ' || NEW.status,
+            json_object(
+                'tool', NEW.tool,
+                'status', NEW.status,
+                'turn_id', NEW.turn_id,
+                'call_id', NEW.call_id,
+                'agent_id', NEW.agent_id,
+                'duration_ms', NEW.duration_ms,
+                'parent_call_id', NEW.parent_call_id,
+                'display_summary', NEW.display_summary,
+                'arguments', NEW.arguments,
+                'result', NEW.result,
+                'truncated', NEW.truncated <> 0
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+";
 
 /// A turn's execution isolation, recorded when its dispatcher settles:
 /// isolated or degraded, with the degradation reason stored as its detail.
@@ -1209,6 +1287,11 @@ const COMPLETE_SCHEMA: &str = "
         -- path that composed it. Keyed by the UI's author label; a row with
         -- no recorded origin is refused rather than guessed from its role.
         origin       TEXT    NOT NULL CHECK (origin IN ('user', 'assistant', 'tool', 'delegation', 'schedule', 'workflow', 'platform')),
+        -- Whether the row was handed to the agent as material produced
+        -- elsewhere (a delegated agent's result, a platform notice) rather
+        -- than typed or addressed to it. The history rebuild frames delivered
+        -- rows for the model; views show the content as stored either way.
+        delivered    INTEGER NOT NULL DEFAULT 0,
         content      TEXT    NOT NULL,
         -- Content parts submitted beside the text, as a JSON array of the
         -- client wire's tagged attachment values; '[]' for text-only rows.

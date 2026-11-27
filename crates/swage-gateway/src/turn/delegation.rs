@@ -1399,10 +1399,13 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .offered_tools()
                     .contains(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
             );
+            // A delegated child serves the authored frame, as its agent
+            // config does: its session draws no variant of its own.
             let history = match super::history::rebuild_thread_history_messages_with_retrieval(
                 &self.state,
                 existing.thread_id,
                 retrieval,
+                &target_agent_config.delivered_material_frame,
             )
             .await
             {
@@ -2059,6 +2062,7 @@ mod settlement_tests {
                 turn_id: Some(turn.id),
                 role: swage_core::Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: if ending == TurnState::Cancelled {
                     "Partial child reply"
                 } else {
