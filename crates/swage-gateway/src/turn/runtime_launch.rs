@@ -59,7 +59,7 @@ fn codex_effort_capability(
 /// would serve a turn on it declares it — the same capability the turn's
 /// launch resolves against, so a check made before a turn starts agrees with
 /// the turn.
-pub(crate) async fn served_effort_capability(
+async fn served_effort_capability(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
 ) -> swage_core::EffortCapability {

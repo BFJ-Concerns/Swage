@@ -46,7 +46,7 @@ struct GeminiThinkingConfig {
 /// The documented Gemini 2.5 Flash control is a numeric thinking budget from
 /// zero through 24,576 tokens. The adapter vouches only for that family;
 /// catalogue declarations govern every other Google model.
-fn google_effort_capability(model: &str) -> Option<EffortCapability> {
+pub(crate) fn google_effort_capability(model: &str) -> Option<EffortCapability> {
     let model = model.trim().to_ascii_lowercase();
     if model.starts_with("gemini-2.5-flash-lite") {
         Some(EffortCapability::Budget {

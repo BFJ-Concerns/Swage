@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use swage_core::{
     ChatMessage, DelegateCompletionMode, DispatchContextComposition, MessageKind, Role,
-    render_message_for_model_context, role_label_for_model_context,
+    transcript_for_model_context,
 };
 use swage_hook::HookRegistry;
 use swage_provider::LlmProvider;
@@ -634,17 +634,7 @@ fn build_delegated_history(
     let mut context = Vec::new();
 
     if !transferred_context.is_empty() {
-        let inherited = transferred_context
-            .iter()
-            .map(|message| {
-                format!(
-                    "[{}] {}",
-                    role_label_for_model_context(message.role()),
-                    render_message_for_model_context(message)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let inherited = transcript_for_model_context(transferred_context);
         context.push(ChatMessage::new(
             Role::User,
             format!(
@@ -791,6 +781,25 @@ mod tests {
     use swage_storage::{SessionStore, SqliteStorage, TurnStore};
 
     use super::*;
+
+    #[test]
+    fn inherited_history_labels_tool_results_as_the_tools() {
+        let tool_result = ChatMessage::with_tool_replay(
+            Role::User,
+            vec![swage_core::ToolReplayPart::ToolResult {
+                call_id: "fetch".into(),
+                content: "Fetched page".into(),
+                is_error: false,
+            }],
+        );
+        let history = build_delegated_history(&[tool_result], "Read the page");
+
+        assert!(
+            history[0]
+                .text_content()
+                .contains("[tool] [tool_result tool_use_id=fetch")
+        );
+    }
 
     struct NeverCalledProvider;
 

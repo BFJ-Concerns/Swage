@@ -21,7 +21,7 @@ use swage_core::{
     ToolCompletionResponse, ToolReplayPart,
 };
 
-use crate::openai::{is_openai_reasoning_model, openai_effort_capability, openai_reasoning_effort};
+use crate::openai::{model_effort_capability, openai_reasoning_effort};
 
 use crate::http::{HttpClient, SseEvent};
 use crate::provider::{LlmProvider, ModelOutputWitness, ProviderConfig, spawn_stream_forwarder};
@@ -656,7 +656,7 @@ impl LlmProvider for ResponsesProvider {
     }
 
     fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
-        is_openai_reasoning_model(model).then(openai_effort_capability)
+        model_effort_capability(model)
     }
 
     fn provider_request_snapshot(&self, request: &CompletionRequest, stream: bool) -> Value {
@@ -804,6 +804,7 @@ impl LlmProvider for ResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::openai::openai_effort_capability;
     use crate::test_support::{empty_completion_request, local_provider_config};
     use swage_core::{ChatMessage, Role, ToolCall};
 

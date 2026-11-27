@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, ProviderError, Role,
-    render_message_for_model_context, role_label_for_model_context,
+    render_message_for_model_context, speaker_label_for_model_context,
 };
 use swage_provider::LlmProvider;
 
@@ -211,7 +211,7 @@ fn build_extraction_prompt(messages: &[ChatMessage]) -> String {
     prompt.push_str("\n\n<conversation_to_record>\n");
 
     for (i, message) in messages.iter().enumerate() {
-        let role_label = role_label_for_model_context(message.role());
+        let role_label = speaker_label_for_model_context(message);
         let text = render_message_for_model_context(message);
         let _ = writeln!(prompt, "[Turn {i}] ({role_label}): {text}");
     }
@@ -489,7 +489,7 @@ mod tests {
 
         assert!(prompt.contains("tool_use id=call_read name=file_read"));
         assert!(prompt.contains(r#""path":"Cargo.toml""#));
-        assert!(prompt.contains("tool_result tool_use_id=call_read"));
+        assert!(prompt.contains("(tool): [tool_result tool_use_id=call_read"));
         assert!(prompt.contains(r#""contents""#));
     }
 
