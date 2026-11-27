@@ -2142,7 +2142,9 @@ plugin's tools register beside the built-ins; a scope that does not enable
 the plugin (`PUT /api/plugins/{name}/enablement`, per install or topic) has
 them withheld at the turn. The script's `swage.callTool` runs through the
 turn's own dispatcher as a nested call, so a plugin's effects meet the same
-permission, approval and audit gates as the model's.
+permission, approval and audit gates as the model's. A package whose tool
+takes a built-in tool's name (`PROTECTED_NAMES`, or any tool the dispatcher
+registers as built in) is refused at install, the refusal naming the tool.
 
 
 <!-- source: agent-docs/workflow-engine.md -->

@@ -1150,7 +1150,9 @@ parameters = { type = "object", properties = { url = { type = "string" } }, requ
 A plugin is enabled for the whole install or for one topic (`PUT
 /api/plugins/{name}/enablement`); in a scope that does not enable it the
 plugin serves nothing — a session there does not see its tools, and a turn
-there runs none of its slots or hooks.
+there runs none of its slots or hooks. A package whose tool takes the name
+of a built-in tool is refused when it is installed, and the refusal names
+the tool.
 
 Some of the gateway's own parts are plugins it ships: a package compiled
 into the binary (`shipped/plugins/<name>/`) that the gateway installs at

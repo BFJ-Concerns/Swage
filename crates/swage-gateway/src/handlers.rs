@@ -110,14 +110,7 @@ pub async fn install_plugin(
             "source_path must name the package directory".to_string(),
         ));
     }
-    let reserved: Vec<String> = state
-        .active_tool_dispatcher()
-        .registry()
-        .list()
-        .into_iter()
-        .filter(|name| !state.plugins.provides_tool(name))
-        .map(str::to_owned)
-        .collect();
+    let reserved = crate::plugin::built_in_tool_names(&state);
     let outcome = state.plugins.install(&source, &reserved, None).await;
     // An install that was applied but could not be recorded has changed the
     // live set as much as a recorded one; the dispatcher follows it either way.

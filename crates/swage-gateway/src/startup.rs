@@ -154,14 +154,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
     // themselves once per shipped version, through the same path an
     // operator's package takes, with provenance `shipped`.
     {
-        let reserved: Vec<String> = state
-            .active_tool_dispatcher()
-            .registry()
-            .list()
-            .into_iter()
-            .filter(|name| !state.plugins.provides_tool(name))
-            .map(str::to_owned)
-            .collect();
+        let reserved = crate::plugin::built_in_tool_names(&state);
         let names: Vec<&str> = crate::shipped_plugins::SHIPPED_PLUGINS
             .iter()
             .map(|plugin| plugin.name)

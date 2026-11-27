@@ -62,6 +62,12 @@ const PROTECTED_NAMES: &[&str] = &[
     "model_list",
 ];
 
+/// Whether `name` is a built-in tool's: reserved on every host, whether or
+/// not that host registers the tool, so no other tool can take it.
+pub fn is_built_in_name(name: &str) -> bool {
+    PROTECTED_NAMES.contains(&name)
+}
+
 /// Registry of tools available for dispatch.
 ///
 /// Maintains a protected namespace of built-in tool names that cannot be

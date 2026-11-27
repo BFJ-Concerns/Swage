@@ -374,8 +374,9 @@ impl PluginService {
     /// it under the install root, load its isolate, record the revision and
     /// make it the one serving. `reserved_tool_names` are the names the
     /// dispatcher already holds for built-ins; a package whose tools collide
-    /// with those, or with another plugin's, is refused before anything is
-    /// copied.
+    /// with those, with a built-in's name this host does not register, or
+    /// with another plugin's, is refused before anything is copied, the
+    /// refusal naming the tool.
     pub async fn install(
         &self,
         source: &Path,
@@ -523,7 +524,9 @@ impl PluginService {
         let next_revision = {
             let installed = self.read();
             for tool in &package.manifest.provides.tools {
-                if reserved_tool_names.contains(&tool.name) {
+                if reserved_tool_names.contains(&tool.name)
+                    || swage_tool::registry::is_built_in_name(&tool.name)
+                {
                     return Err(PluginServiceError::Refused(format!(
                         "tool '{}' is the name of a built-in tool; a plugin cannot provide it",
                         tool.name
@@ -865,6 +868,19 @@ impl PluginService {
     }
 }
 
+/// The tools the live dispatcher holds that no plugin provides: the
+/// built-ins this host registered, whose names a package cannot take.
+pub(crate) fn built_in_tool_names(state: &AppState) -> Vec<String> {
+    state
+        .active_tool_dispatcher()
+        .registry()
+        .list()
+        .into_iter()
+        .filter(|name| !state.plugins.provides_tool(name))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Rebuild the live tool dispatcher so the plugins' current tools are in
 /// it: after an install, and after any change that adds or removes a
 /// plugin tool. Enablement needs no rebuild — it is read at each turn.
@@ -1150,6 +1166,37 @@ mod tests {
         );
         assert!(!dir.path().join("plugins").exists());
         assert!(storage.list_plugin_revisions().await.unwrap().is_empty());
+    }
+
+    /// A built-in's name is reserved on a host that does not register the
+    /// built-in: `browser_click` is offered to no install here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_package_taking_a_built_in_name_this_host_does_not_register_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("plugin.toml"),
+            MANIFEST.replace(
+                "name = \"echo\"\n        description = \"Echo the",
+                "name = \"browser_click\"\n        description = \"Echo the",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("plugin.js"),
+            r#"swage.provide.tool("browser_click", (p) => p);"#,
+        )
+        .unwrap();
+        let (service, _storage) = service(dir.path());
+        let error = service
+            .install(&source, &[], None)
+            .await
+            .expect_err("refused");
+        assert!(
+            matches!(&error, PluginServiceError::Refused(message) if message.contains("'browser_click'") && message.contains("built-in")),
+            "{error}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
