@@ -540,8 +540,9 @@ pub fn binary_size_description(len: Option<u64>) -> String {
 }
 
 /// Reads the classification sample from the start of `source`, returning it
-/// when it contains valid UTF-8 without NUL bytes and `None` otherwise.
-/// The sample includes the rest of any character split by its byte limit.
+/// for text and `None` for binary content. A NUL in the sample marks binary
+/// content. Valid UTF-8 is text. For malformed UTF-8, the rounded-down
+/// percentage of non-ASCII bytes must be 30 or less for the sample to be text.
 pub fn read_text_sample(source: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     let mut sample = Vec::with_capacity(BINARY_SAMPLE_BYTES);
     source
@@ -551,19 +552,26 @@ pub fn read_text_sample(source: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     if sample.contains(&0) {
         return Ok(None);
     }
-    if let Err(error) = std::str::from_utf8(&sample) {
-        if error.error_len().is_some() || sample.len() < BINARY_SAMPLE_BYTES {
-            return Ok(None);
-        }
+    let sample_len = sample.len();
+    let error = match std::str::from_utf8(&sample) {
+        Ok(_) => return Ok(Some(sample)),
+        Err(error) => error,
+    };
+    if error.error_len().is_none() && sample_len == BINARY_SAMPLE_BYTES {
         // The sample ends inside a character. Read just enough to finish it.
         let incomplete = &sample[error.valid_up_to()..];
         let remaining = incomplete[0].leading_ones() as usize - incomplete.len();
         source.take(remaining as u64).read_to_end(&mut sample)?;
-        if std::str::from_utf8(&sample).is_err() {
-            return Ok(None);
+        if std::str::from_utf8(&sample[error.valid_up_to()..]).is_ok() {
+            return Ok(Some(sample));
         }
     }
-    Ok(Some(sample))
+
+    let non_ascii = sample[..sample_len]
+        .iter()
+        .filter(|b| !b.is_ascii())
+        .count();
+    Ok((non_ascii * 100 / sample_len <= 30).then_some(sample))
 }
 
 /// Truncates `content` to at most `max_bytes` bytes at a valid UTF-8 boundary.
@@ -1244,9 +1252,9 @@ mod tests {
     }
 
     #[test]
-    fn text_sample_refuses_invalid_utf8_even_among_ascii() {
-        let mixed = b"mostly plain text\xff\n";
-        assert!(read_text_sample(&mut mixed.as_slice()).unwrap().is_none());
+    fn text_sample_refuses_mostly_non_ascii_malformed_bytes() {
+        let binary = b"\xff\xfe\xfd\xfc";
+        assert!(read_text_sample(&mut binary.as_slice()).unwrap().is_none());
     }
 
     // --- truncate_output ---

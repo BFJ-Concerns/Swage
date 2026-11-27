@@ -275,6 +275,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_mostly_ascii_text_with_legacy_encoding() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("note.txt"), b"Meet at the caf\xe9.\n").unwrap();
+        let result = tool(&dir)
+            .execute(json!({ "path": "note.txt" }), &ctx(&dir))
+            .await
+            .unwrap();
+        assert_eq!(result["output"], "Meet at the caf\u{fffd}.\n");
+    }
+
+    #[tokio::test]
     async fn rejects_path_outside_workspace() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)
