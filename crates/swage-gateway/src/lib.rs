@@ -54,6 +54,7 @@ pub mod capability_bundle;
 pub mod channel_gateway;
 pub mod cli;
 pub mod codex;
+pub mod completion_record;
 pub mod config_change;
 pub mod context;
 pub mod device;

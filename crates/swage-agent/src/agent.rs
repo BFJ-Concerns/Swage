@@ -1745,6 +1745,22 @@ impl Agent {
         request: TurnRequest,
         event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<OutboundMessage, AgentError> {
+        // Every completion the turn makes on this task is attributed to its
+        // session and turn in the gateway's record of completions.
+        let attribution = swage_provider::attribution::CompletionAttribution {
+            session_id: request.execution.session_id,
+            turn_id: request.existing_turn_id,
+        };
+        swage_provider::attribution::COMPLETION_ATTRIBUTION
+            .scope(attribution, self.run_turn_streaming(request, event_tx))
+            .await
+    }
+
+    async fn run_turn_streaming(
+        &self,
+        request: TurnRequest,
+        event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<OutboundMessage, AgentError> {
         let execution = request.execution;
         let thread_id = execution.thread_id;
         let user_message = request.user_message;

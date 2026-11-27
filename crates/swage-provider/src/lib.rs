@@ -6,6 +6,7 @@
 
 // Concrete providers
 pub mod anthropic;
+pub mod attribution;
 pub mod credential_transport;
 pub mod google;
 pub mod http;
