@@ -78,6 +78,22 @@
     return [{ id: JSON.stringify(path), label: fieldLabel(path), prior: priorValue, next: nextValue }];
   }
 
+  // What a tool call or completion gave back, as the text it was, rather
+  // than escaped inside the event's JSON detail.
+  function returnedText({ event_kind, metadata }: AuditEventView): string | null {
+    if (!isRecord(metadata)) return null;
+    if (event_kind === "tool_call") {
+      return typeof metadata.result === "string" ? metadata.result : null;
+    }
+    if (event_kind !== "completion") return null;
+    const parts: string[] = [];
+    if (typeof metadata.content === "string" && metadata.content) parts.push(metadata.content);
+    if (Array.isArray(metadata.tool_calls) && metadata.tool_calls.length > 0) {
+      parts.push(formatState(metadata.tool_calls));
+    }
+    return parts.length > 0 ? parts.join("\n\n") : null;
+  }
+
   function auditFilter(before?: AuditEventCursor) {
     return {
       sessionId: auditSessionId.trim() || undefined,
@@ -156,12 +172,24 @@
     {:else}
       <div class="entries">
         {#each auditEvents as event (event.id)}
+          {@const returned = returnedText(event)}
+          {@const error = event.event_kind === "completion" && isRecord(event.metadata)
+            && typeof event.metadata.error === "string" ? event.metadata.error : null}
           <article class="history-entry audit-entry">
             <div class="entry-heading">
               <strong>{event.event_kind} · {event.entity_kind} · {event.entity_id}</strong>
               <time datetime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time>
             </div>
             <p>{event.summary} · session <span class="mono">{event.session_id ?? "none"}</span></p>
+            {#if error}
+              <p><strong>Error</strong> {error}</p>
+            {/if}
+            {#if returned !== null}
+              <details class="returned">
+                <summary>What it returned</summary>
+                <pre>{returned}</pre>
+              </details>
+            {/if}
             <details>
               <summary>Recorded detail</summary>
               <pre>{formatState(event.metadata)}</pre>

@@ -295,7 +295,7 @@ describe("WorkflowRunDetail", () => {
     expect(call).not.toContain("default model");
   });
 
-  it("words a redispatch after an interruption apart from a fallback", async () => {
+  it("names the recorded redispatch cause and distinguishes it from a fallback", async () => {
     const first = baseCall.dispatch!.attempts[0];
     await render(
       runWith({
@@ -305,6 +305,7 @@ describe("WorkflowRunDetail", () => {
           attempts: [
             first,
             { ...first, cause: { cause: "after_interruption" }, model: "test-model" },
+            { ...first, cause: { cause: "after_provider_failure", failure: "provider unavailable" }, model: "test-model" },
           ],
         },
       } as unknown as WorkflowAgentCallDetail),
@@ -312,6 +313,7 @@ describe("WorkflowRunDetail", () => {
     let attempts = document.querySelector(".attempts")!.textContent!;
     expect(attempts).toContain("attempt 2 — dispatched again after a gateway interruption");
     expect(attempts).toContain("attempt 1's outcome is unknown");
+    expect(attempts).toContain("attempt 3 — dispatched again after a recorded provider failure (provider unavailable)");
     expect(attempts).toContain("may have been applied twice");
     expect(attempts).not.toContain("fallback");
 
@@ -482,7 +484,7 @@ describe("complete worker detail", () => {
     expect(attempts[1].querySelector("a")?.getAttribute("href")).toBe("/conversations/later-session");
     expect(document.querySelector(".liveness")?.textContent).toContain(new Date("2026-09-02T11:00:00Z").toLocaleString());
     expect(document.querySelector(".liveness")?.textContent).toContain(new Date("2026-09-02T11:00:04Z").toLocaleString());
-    expect(document.body.textContent).toContain("narrowed nothing");
+    expect(document.body.textContent).toContain("Uses the worker’s tool permissions");
     expect(document.body.textContent).toContain("/Worktree/ExactCase");
     expect(document.querySelector('a[href="/conversations/worker-session"]')).not.toBeNull();
   });
@@ -490,7 +492,7 @@ describe("complete worker detail", () => {
   it("reads an outstanding journal worker through its terminal account", async () => {
     const detail = runWith({ ...baseCall, termination: { termination: "outstanding" } });
     detail.run.state = "completed";
-    detail.run.terminal_account = { ending: { ending: "returned" }, settled_at: "2026-09-02T10:05:00Z", workers: { done: [], failed: [], unsettled: [], cut_short: [{ journal_entry_id: "entry-1", seq: 0, redispatched_after_interruption: false, termination: { termination: "cut_short", cause: "run_returned", detail: "The script returned" } }] } };
+    detail.run.terminal_account = { ending: { ending: "returned" }, settled_at: "2026-09-02T10:05:00Z", workers: { done: [], failed: [], unsettled: [], cut_short: [{ journal_entry_id: "entry-1", seq: 0, redispatch_causes: [], termination: { termination: "cut_short", cause: "run_returned", detail: "The script returned" } }] } };
     await render(detail);
     expect(document.querySelector(".termination")?.textContent).toBe("Cut short");
     expect(document.body.textContent).not.toContain("Still working");

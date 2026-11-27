@@ -223,6 +223,7 @@ impl SecretManager {
             .create_audit_event(created_secret_event(SecretAuditSubject::from(&record)))
             .await
             .map_err(GatewayError::Storage)?;
+        self.refresh_registered_values().await;
         Ok(secret_response(record, request.value))
     }
 
@@ -263,7 +264,9 @@ impl SecretManager {
         writes.events.push(event);
         self.storage
             .write_credentials_with_audit(writes.creations, writes.rotations, writes.events)
-            .await
+            .await?;
+        self.refresh_registered_values().await;
+        Ok(())
     }
 
     pub async fn generate_secret(
@@ -360,6 +363,7 @@ impl SecretManager {
             .create_audit_event(rotated_secret_event(SecretAuditSubject::from(&rotated)))
             .await
             .map_err(GatewayError::Storage)?;
+        self.refresh_registered_values().await;
         Ok(secret_response(rotated, request.value))
     }
 
@@ -371,6 +375,7 @@ impl SecretManager {
             .map_err(GatewayError::Storage)?;
         self.audit_secret_event(&record, "revoked", "secret revoked", json!({}))
             .await?;
+        self.refresh_registered_values().await;
         Ok(secret_response(record, None))
     }
 
@@ -382,6 +387,7 @@ impl SecretManager {
             .map_err(GatewayError::Storage)?;
         self.audit_secret_event(&record, "restored", "secret restored", json!({}))
             .await?;
+        self.refresh_registered_values().await;
         Ok(secret_response(record, None))
     }
 
@@ -409,11 +415,23 @@ impl SecretManager {
     }
 
     pub async fn resolve(&self, reference: &str) -> Result<ResolvedSecret, GatewayError> {
+        self.resolve_for_session(reference, None).await
+    }
+
+    /// Resolve a reference on a session's behalf — a tool call carrying a
+    /// `secret://` parameter — so the access event names the session that
+    /// used the secret.
+    pub async fn resolve_for_session(
+        &self,
+        reference: &str,
+        session_id: Option<Uuid>,
+    ) -> Result<ResolvedSecret, GatewayError> {
         let id = parse_secret_reference(reference)?;
         let record = self.required_secret(id).await?;
         if record.status != "active" {
-            self.audit_secret_event(
+            self.audit_secret_event_for_session(
                 &record,
+                session_id,
                 "access_failed",
                 "secret access failed",
                 json!({"reason": "revoked_or_inactive"}),
@@ -427,8 +445,9 @@ impl SecretManager {
 
         let BackendValue { value, observed_at } = self.read_backend_value(&record).await?;
         validate_resolved_material(&record.material_kind, &value)?;
-        self.audit_secret_event(
+        self.audit_secret_event_for_session(
             &record,
+            session_id,
             "accessed",
             "secret accessed",
             json!({"observed_at": observed_at}),
@@ -441,12 +460,24 @@ impl SecretManager {
         })
     }
 
+    /// Read every active secret's current value from its backend and make
+    /// it the set the store masks out of what it records. Called whenever
+    /// the set may have changed, and at startup; a failed read leaves the
+    /// set as it was and is logged, since the change it follows has already
+    /// been made.
+    pub async fn refresh_registered_values(&self) {
+        if let Err(error) = self.known_values().await {
+            tracing::warn!(%error, "registered secret values could not be read; record masking keeps the previous set");
+        }
+    }
+
     /// Every active secret's current value, for redacting captured provider
     /// traffic. Read from the backends at call time — the same reads
     /// `resolve` makes — so a value that changed since the last turn is
     /// redacted under its new form. A backend that cannot currently be read
     /// (an env variable unset, a file not yet written) contributes nothing
-    /// rather than failing the capture.
+    /// rather than failing the capture. The values read become the set the
+    /// store masks out of every record it writes.
     pub async fn known_values(&self) -> Result<Vec<String>, GatewayError> {
         let records = self
             .storage
@@ -467,7 +498,9 @@ impl SecretManager {
                 Err(_) => {}
             }
         }
-        Ok(values)
+        let registered = self.storage.registered_secret_values();
+        registered.replace(values);
+        Ok(registered.current().as_ref().clone())
     }
 
     /// Bring a harness-owned credential store under governance: the Codex
@@ -629,13 +662,30 @@ impl SecretManager {
         summary: &str,
         metadata: Value,
     ) -> Result<(), GatewayError> {
+        self.audit_secret_event_for_session(record, None, event_kind, summary, metadata)
+            .await
+    }
+
+    /// A secret event with the session it happened in, where one did: the
+    /// operator's management of secrets has none; a tool's use of one does.
+    async fn audit_secret_event_for_session(
+        &self,
+        record: &SecretRecord,
+        session_id: Option<Uuid>,
+        event_kind: &str,
+        summary: &str,
+        metadata: Value,
+    ) -> Result<(), GatewayError> {
         self.storage
-            .create_audit_event(secret_event(
-                SecretAuditSubject::from(record),
-                event_kind,
-                summary,
-                metadata,
-            ))
+            .create_audit_event(NewAuditEvent {
+                session_id,
+                ..secret_event(
+                    SecretAuditSubject::from(record),
+                    event_kind,
+                    summary,
+                    metadata,
+                )
+            })
             .await
             .map_err(GatewayError::Storage)?;
         Ok(())
@@ -1179,6 +1229,40 @@ pub(crate) mod tests {
         assert!(values.contains(&"live-refresh".to_string()));
     }
 
+    /// The store masks a value from the moment it is registered, and stops
+    /// once it is revoked, without waiting for a turn to read the values.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_store_masks_a_value_from_its_registration_to_its_revocation() {
+        let _guard = with_secret_env();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let manager = SecretManager::new(storage.clone());
+        let masked = |storage: &SqliteStorage| {
+            let mut text = "key registered-now-value".to_string();
+            storage.registered_secret_values().mask(&mut text);
+            text
+        };
+        assert_eq!(masked(&storage), "key registered-now-value");
+
+        let secret = manager
+            .create_secret(CreateSecretRequest {
+                name: "managed".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "service".into(),
+                backend_kind: MANAGED_BACKEND.into(),
+                scope_kind: "gateway".into(),
+                scope_id: None,
+                metadata: None,
+                value: Some("registered-now-value".into()),
+                external_reference: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(masked(&storage), "key [REDACTED_SECRET]");
+
+        manager.revoke_secret(secret.id).await.unwrap();
+        assert_eq!(masked(&storage), "key registered-now-value");
+    }
+
     /// Redaction reads every backend the same way resolution does, and an
     /// external backend that cannot be read right now contributes nothing
     /// rather than failing the capture.
@@ -1218,6 +1302,63 @@ pub(crate) mod tests {
         assert_eq!(
             values,
             vec!["file-value".to_string(), "managed-value".to_string()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tools_secret_access_is_attributed_to_its_session() {
+        use swage_storage::store::{SessionStore, TopicStore};
+        // The managed backend needs its encryption key; each test supplies
+        // it, since the suite may run one test per process.
+        let _guard = with_secret_env();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let manager = SecretManager::new(storage.clone());
+        let managed = manager
+            .create_secret(CreateSecretRequest {
+                name: "Managed provider key".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "service".into(),
+                backend_kind: "managed".into(),
+                scope_kind: "gateway".into(),
+                scope_id: None,
+                metadata: None,
+                value: Some("managed-key".into()),
+                external_reference: None,
+            })
+            .await
+            .unwrap();
+
+        manager
+            .resolve_for_session(&managed.reference, Some(session.id))
+            .await
+            .unwrap();
+        manager.resolve(&managed.reference).await.unwrap();
+
+        let accesses: Vec<_> = storage
+            .list_audit_events()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind == "accessed")
+            .collect();
+        assert_eq!(accesses.len(), 2);
+        assert_eq!(
+            accesses
+                .iter()
+                .filter(|event| event.session_id == Some(session.id))
+                .count(),
+            1,
+            "the tool's access names its session; the operator's names none: {accesses:?}"
+        );
+        assert!(
+            accesses
+                .iter()
+                .all(|event| event.session_id.is_none() || event.session_id == Some(session.id))
         );
     }
 }

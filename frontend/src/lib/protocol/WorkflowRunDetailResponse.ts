@@ -5,7 +5,11 @@ import type { WorkflowRun } from "./WorkflowRun";
 import type { WorkflowRunHold } from "./WorkflowRunHold";
 import type { WorkflowWakeMetrics } from "./WorkflowWakeMetrics";
 
-export type WorkflowRunDetailResponse = { run: WorkflowRun, journal: Array<WorkflowJournalEntry>,
+export type WorkflowRunDetailResponse = { run: WorkflowRun,
+/**
+ * The recorded timer deadline when a timer can wake this parked run.
+ */
+timer_wake_at?: string | null, journal: Array<WorkflowJournalEntry>,
 /**
  * The run's own wake economics, derived from the journal and event
  * queue — the falsification signal for a gated long run: a sustained

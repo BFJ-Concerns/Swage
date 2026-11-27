@@ -93,8 +93,88 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("065_turn_execution_isolation", ADD_TURN_EXECUTION_ISOLATION),
         ("066_turn_failure_message", ADD_TURN_FAILURE_MESSAGE),
+        ("067_tool_call_audit", CREATE_TOOL_CALL_AUDIT_TRIGGERS),
+        ("068_plugins", CREATE_PLUGIN_TABLES),
+        ("069_turn_graph", CREATE_TURN_GRAPH_REVISIONS),
     ]
 }
+
+/// Every settled tool call is an audit event of its own family, attributed
+/// to the session its turn belongs to and carrying the arguments it ran with
+/// and the result it returned, so the record lists a session's tool calls
+/// beside its state transitions and configuration changes. A call settles
+/// when its status is written: ordinarily an update after the row was
+/// created with no status, or an insert that already carries one into a turn
+/// still in flight (a call recorded whole once it has run). A settled row
+/// inserted into a turn that has already ended is a copy of a call that ran
+/// before — a branch carrying its ancestor's history — and is no event.
+const CREATE_TOOL_CALL_AUDIT_TRIGGERS: &str = "
+    CREATE TRIGGER IF NOT EXISTS trg_tool_calls_settled_audit
+    AFTER UPDATE OF status ON tool_calls
+    WHEN NEW.status IS NOT NULL AND (OLD.status IS NULL OR OLD.status <> NEW.status)
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT threads.session_id FROM turns
+                JOIN threads ON threads.id = turns.thread_id
+                WHERE turns.id = NEW.turn_id),
+            'tool_call',
+            NEW.id,
+            'tool_call',
+            'tool ' || NEW.tool || ' ' || NEW.status,
+            json_object(
+                'tool', NEW.tool,
+                'status', NEW.status,
+                'turn_id', NEW.turn_id,
+                'call_id', NEW.call_id,
+                'agent_id', NEW.agent_id,
+                'duration_ms', NEW.duration_ms,
+                'parent_call_id', NEW.parent_call_id,
+                'display_summary', NEW.display_summary,
+                'arguments', NEW.arguments,
+                'result', NEW.result,
+                'truncated', NEW.truncated <> 0
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tool_calls_inserted_settled_audit
+    AFTER INSERT ON tool_calls
+    WHEN NEW.status IS NOT NULL
+        AND (SELECT state FROM turns WHERE id = NEW.turn_id)
+            IN ('pending', 'processing', 'awaiting_approval', 'delegating')
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT threads.session_id FROM turns
+                JOIN threads ON threads.id = turns.thread_id
+                WHERE turns.id = NEW.turn_id),
+            'tool_call',
+            NEW.id,
+            'tool_call',
+            'tool ' || NEW.tool || ' ' || NEW.status,
+            json_object(
+                'tool', NEW.tool,
+                'status', NEW.status,
+                'turn_id', NEW.turn_id,
+                'call_id', NEW.call_id,
+                'agent_id', NEW.agent_id,
+                'duration_ms', NEW.duration_ms,
+                'parent_call_id', NEW.parent_call_id,
+                'display_summary', NEW.display_summary,
+                'arguments', NEW.arguments,
+                'result', NEW.result,
+                'truncated', NEW.truncated <> 0
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+";
 
 /// A turn's execution isolation, recorded when its dispatcher settles:
 /// isolated or degraded, with the degradation reason stored as its detail.
@@ -103,9 +183,51 @@ const ADD_TURN_EXECUTION_ISOLATION: &str = "
     ALTER TABLE turns ADD COLUMN isolation_detail TEXT;
 ";
 
+/// Installed plugins: one row per installed revision, at most one active per
+/// plugin, and one enablement row per scope — `install`, or a topic's id.
+const CREATE_PLUGIN_TABLES: &str = "
+    CREATE TABLE plugin_revisions (
+        id             TEXT    NOT NULL PRIMARY KEY,
+        plugin_name    TEXT    NOT NULL,
+        revision       INTEGER NOT NULL,
+        version        TEXT    NOT NULL,
+        description    TEXT    NOT NULL,
+        manifest       TEXT    NOT NULL,
+        installed_from TEXT    NOT NULL,
+        provenance     TEXT    NOT NULL CHECK (provenance IN ('shipped', 'installed')),
+        install_dir    TEXT    NOT NULL,
+        installed_at   TEXT    NOT NULL,
+        active         INTEGER NOT NULL CHECK (active IN (0, 1)),
+        UNIQUE (plugin_name, revision)
+    );
+    CREATE UNIQUE INDEX plugin_revisions_one_active
+        ON plugin_revisions(plugin_name) WHERE active = 1;
+    CREATE TABLE plugin_enablement (
+        plugin_name TEXT    NOT NULL,
+        scope       TEXT    NOT NULL,
+        enabled     INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        changed_at  TEXT    NOT NULL,
+        PRIMARY KEY (plugin_name, scope)
+    );
+";
+
 /// The explanation a turn that ended without a reply carried to the person
 /// (the provider or request error), kept so the conversation shows it after
 /// a reload as it did live.
+/// The turn graph's revisions: the declaration as proposed, one active at a
+/// time, a failed one kept with why.
+const CREATE_TURN_GRAPH_REVISIONS: &str = "
+    CREATE TABLE turn_graph_revisions (
+        revision   INTEGER NOT NULL PRIMARY KEY,
+        graph      TEXT    NOT NULL,
+        activation TEXT    NOT NULL CHECK (activation IN ('active', 'failed', 'superseded')),
+        failure    TEXT,
+        created_at TEXT    NOT NULL
+    );
+    CREATE UNIQUE INDEX turn_graph_revisions_one_active
+        ON turn_graph_revisions(activation) WHERE activation = 'active';
+";
+
 const ADD_TURN_FAILURE_MESSAGE: &str = "
     ALTER TABLE turns ADD COLUMN failure_message TEXT;
 ";
@@ -363,6 +485,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         dispatch_bound_task_definition_ids_json TEXT NOT NULL,
         workflow_call_tools_json TEXT,
         wake_at              TEXT,
+        timer_wake_at        TEXT,
         inherited_worker_placement_json TEXT,
         -- The terminal account a run leaves when it ends by any path: the
         -- ending, the partition of its workers, and the completed work
@@ -930,6 +1053,7 @@ const COMPLETE_SCHEMA: &str = "
         schedule_run_id TEXT REFERENCES schedule_runs(id) ON DELETE CASCADE,
         attended    INTEGER NOT NULL CHECK (attended IN (0, 1)),
         client_id   TEXT,
+        requested_model TEXT,
         UNIQUE (session_id, seq)
     );
     CREATE TABLE turn_queue_channel_messages (
@@ -1209,6 +1333,11 @@ const COMPLETE_SCHEMA: &str = "
         -- path that composed it. Keyed by the UI's author label; a row with
         -- no recorded origin is refused rather than guessed from its role.
         origin       TEXT    NOT NULL CHECK (origin IN ('user', 'assistant', 'tool', 'delegation', 'schedule', 'workflow', 'platform')),
+        -- Whether the row was handed to the agent as material produced
+        -- elsewhere (a delegated agent's result, a platform notice) rather
+        -- than typed or addressed to it. The history rebuild frames delivered
+        -- rows for the model; views show the content as stored either way.
+        delivered    INTEGER NOT NULL DEFAULT 0,
         content      TEXT    NOT NULL,
         -- Content parts submitted beside the text, as a JSON array of the
         -- client wire's tagged attachment values; '[]' for text-only rows.
@@ -1229,7 +1358,6 @@ const COMPLETE_SCHEMA: &str = "
     -- parent_call_id supports nested / sub-tool invocations (NULL = top-level).
     CREATE TABLE IF NOT EXISTS tool_calls (
         execution TEXT,
-        model_arguments TEXT,
         model_result TEXT,
         provider_round INTEGER NOT NULL DEFAULT 0,
         display_summary TEXT,
@@ -2698,7 +2826,7 @@ mod tests {
     #[test]
     fn tool_calls_replay_columns_exist() {
         let conn = open_migrated();
-        for column in &["model_arguments", "model_result", "provider_round"] {
+        for column in &["model_result", "provider_round"] {
             let col_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('tool_calls') WHERE name=?1",
@@ -2720,9 +2848,6 @@ mod tests {
         let turn_id = insert_turn(&conn, &thread_id, &now);
         let call_id = "recorded_call";
 
-        let arguments = swage_core::compact_tool_arguments_for_model(
-            &serde_json::json!({"cmd": "missing-command"}),
-        );
         let result = swage_core::compact_tool_result_for_model_with_reference(
             "command not found",
             true,
@@ -2731,9 +2856,9 @@ mod tests {
         conn.execute(
             "INSERT INTO tool_calls
              (id, turn_id, call_id, tool, arguments, agent_id, result, status,
-              duration_ms, truncated, total_bytes, position, created_at, model_arguments, model_result)
+              duration_ms, truncated, total_bytes, position, created_at, model_result)
              VALUES (?1, ?2, ?3, 'shell', ?4, 'agent-test', ?5, 'error',
-                     12, 0, 17, 0, ?6, ?7, ?8)",
+                     12, 0, 17, 0, ?6, ?7)",
             rusqlite::params![
                 uuid::Uuid::new_v4().to_string(),
                 &turn_id,
@@ -2741,25 +2866,18 @@ mod tests {
                 r#"{"cmd":"missing-command"}"#,
                 "command not found",
                 now,
-                arguments,
                 result,
             ],
         )
         .expect("insert tool call with model replay");
 
-        let (model_arguments, model_result): (String, String) = conn
+        let model_result: String = conn
             .query_row(
-                "SELECT model_arguments, model_result
-                 FROM tool_calls
-                 WHERE call_id = ?1",
+                "SELECT model_result FROM tool_calls WHERE call_id = ?1",
                 rusqlite::params![call_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
-            .expect("select recorded replay columns");
-
-        let arguments: serde_json::Value =
-            serde_json::from_str(&model_arguments).expect("native model arguments");
-        assert_eq!(arguments, serde_json::json!({"cmd": "missing-command"}));
+            .expect("select recorded replay column");
 
         let result: swage_core::CompactToolReplay =
             serde_json::from_str(&model_result).expect("result compact replay");

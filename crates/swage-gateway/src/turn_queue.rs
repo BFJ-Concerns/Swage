@@ -3,8 +3,8 @@
 //! A person's message is never refused for arriving mid-turn: it is
 //! accepted, held durably in arrival order, shown as queued to every open
 //! view, and becomes input when the running turn ends. Consecutive messages
-//! for the same thread share a turn, each recorded as its own message with
-//! the origin it arrived with; a different destination starts the next group. Stopping a turn leaves the queue intact:
+//! for the same thread and model choice share a turn. Each is recorded as
+//! its own message with the origin it arrived with. Stopping a turn leaves the queue intact:
 //! the person decides what happens next. A gateway restart drains any queue
 //! it finds once the orphaned turns are settled. One queue serves every
 //! entry point; the HTTP and WebSocket person paths enqueue here, and a
@@ -53,6 +53,7 @@ impl SessionEventDelivery {
 pub fn queued_message_view(queued: &QueuedTurnInput) -> Result<QueuedMessageView, GatewayError> {
     Ok(QueuedMessageView {
         id: queued.id,
+        thread_id: queued.thread_id,
         client_id: queued.client_id,
         origin: queued.origin,
         content: queued.content.clone(),
@@ -70,11 +71,22 @@ pub async fn queue_input(
     thread_id: Uuid,
     input: TurnInput,
 ) -> Result<QueuedMessageView, GatewayError> {
+    queue_input_with_model(state, session_id, thread_id, input, None).await
+}
+
+pub(crate) async fn queue_input_with_model(
+    state: &AppState,
+    session_id: Uuid,
+    thread_id: Uuid,
+    input: TurnInput,
+    requested_model: Option<String>,
+) -> Result<QueuedMessageView, GatewayError> {
     queue_input_with_attribution(
         state,
         session_id,
         thread_id,
         input,
+        requested_model,
         None,
         Vec::new(),
         TurnAttendance::Attended,
@@ -90,6 +102,7 @@ pub(crate) async fn queue_input_with_attribution(
     session_id: Uuid,
     thread_id: Uuid,
     input: TurnInput,
+    requested_model: Option<String>,
     schedule_run_id: Option<Uuid>,
     channel_message_ids: Vec<Uuid>,
     attendance: TurnAttendance,
@@ -98,6 +111,7 @@ pub(crate) async fn queue_input_with_attribution(
     let queued = state
         .storage
         .enqueue_turn_input(NewQueuedTurnInput {
+            requested_model,
             delivery_targets: delivery_targets
                 .into_iter()
                 .map(serde_json::to_value)
@@ -204,6 +218,11 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
     };
     let turn = drained.turn;
     let thread_id = turn.thread_id;
+    let turn_id = turn.id;
+    let requested_model = drained
+        .inputs
+        .first()
+        .and_then(|input| input.requested_model.clone());
 
     let cancellation = tokio_util::sync::CancellationToken::new();
     state
@@ -233,20 +252,25 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
                 },
             }
         }
+        listeners
+            .finish_queued_turn_events(session_id, turn_id)
+            .await;
     });
     state.turn_event_deliveries.lock().await.insert(
         turn.id,
         Arc::new(Mutex::new(Some(SessionEventDelivery { finish, task }))),
     );
     let result = async {
-        // Every recorded row reaches every open view; then the queue is
-        // announced empty.
-        for recorded in &drained.messages {
+        // Each recorded row replaces the queued input it came from. Then
+        // the view starts displaying the new turn on that thread.
+        for (recorded, input) in drained.messages.iter().zip(&drained.inputs) {
             state
                 .send_to_session(
                     session_id,
-                    &ServerEvent::MessageAppended {
+                    &ServerEvent::QueuedMessageSent {
                         session_id,
+                        queued_id: input.id,
+                        client_id: input.client_id,
                         message: message_view(recorded.clone(), pending_turn_state(), Vec::new())?,
                     },
                 )
@@ -259,7 +283,7 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
                     session_id,
                     turn_id: turn.id,
                     thread_id: turn.thread_id,
-                    queued_ids: drained.queued_ids.clone(),
+                    queued_ids: drained.inputs.iter().map(|input| input.id).collect(),
                 },
             )
             .await;
@@ -299,6 +323,7 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
             },
             Default::default(),
             None,
+            requested_model,
             None,
             None,
             true,
@@ -732,7 +757,7 @@ mod tests {
         assert_eq!(
             later
                 .iter()
-                .filter(|e| matches!(e, ServerEvent::MessageAppended { session_id: s, .. } if *s == session_id))
+                .filter(|e| matches!(e, ServerEvent::QueuedMessageSent { session_id: s, .. } if *s == session_id))
                 .count(),
             2
         );
@@ -924,7 +949,7 @@ mod tests {
                 ServerEvent::TurnComplete { turn_id, .. } if *turn_id == first_turn => {
                     Some("first_complete")
                 }
-                ServerEvent::MessageAppended { .. } => Some("next_row"),
+                ServerEvent::QueuedMessageSent { .. } => Some("next_row"),
                 ServerEvent::QueueDrained { .. } => Some("next_drain"),
                 ServerEvent::Token { .. } => Some("next_token"),
                 ServerEvent::TurnComplete { .. } => Some("next_complete"),
@@ -961,6 +986,41 @@ mod tests {
             }
             swage_hook::HookOutcome::Continue
         }
+    }
+
+    #[tokio::test]
+    async fn a_listener_joining_after_a_rejected_approval_receives_the_active_queue_start() {
+        let (state, session_id) = make_state_with_session(vec![]).await;
+        let turn_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        state
+            .send_to_session(
+                session_id,
+                &ServerEvent::QueueDrained {
+                    session_id,
+                    turn_id,
+                    thread_id,
+                    queued_ids: vec![Uuid::new_v4()],
+                },
+            )
+            .await;
+        state
+            .send_to_session(
+                session_id,
+                &ServerEvent::ApprovalExpired {
+                    approval_id: Uuid::new_v4(),
+                    timeout_policy: "reject".into(),
+                },
+            )
+            .await;
+
+        let (listener, mut events) = mpsc::unbounded_channel();
+        state.listen_to_session(session_id, listener).await;
+        assert!(matches!(
+            events.try_recv(),
+            Ok(ServerEvent::QueueDrained { turn_id: turn, thread_id: thread, .. })
+                if turn == turn_id && thread == thread_id
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1015,6 +1075,14 @@ mod tests {
                 break turn_id;
             }
         };
+        let (late_listener, mut late_events) = mpsc::unbounded_channel();
+        state.listen_to_session(session_id, late_listener).await;
+        assert!(matches!(
+            late_events.try_recv(),
+            Ok(ServerEvent::QueueDrained { turn_id, thread_id, .. })
+                if turn_id == first_turn && thread_id == thread.id
+        ));
+
         let second = queue_input(
             &state,
             session_id,
@@ -1094,7 +1162,7 @@ mod tests {
                 ServerEvent::Error { code, .. } if code == "sandbox_unavailable" => {
                     delivered.push("setup_error")
                 }
-                ServerEvent::MessageAppended { .. } => delivered.push("next_row"),
+                ServerEvent::QueuedMessageSent { .. } => delivered.push("next_row"),
                 ServerEvent::QueueDrained { .. } => delivered.push("next_drain"),
                 ServerEvent::Token { .. } => delivered.push("next_token"),
                 ServerEvent::TurnComplete { .. } => delivered.push("next_complete"),
@@ -1228,6 +1296,7 @@ mod tests {
         state
             .storage
             .enqueue_turn_input(NewQueuedTurnInput {
+                requested_model: None,
                 delivery_targets: Vec::new(),
                 attended: true,
                 client_id: None,

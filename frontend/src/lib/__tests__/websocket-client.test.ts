@@ -675,6 +675,7 @@ describe("queued input transport", () => {
     latestWs().simulateOpen();
     const queued = {
       id: "queued-1", origin: "user", content: "follow up", attachments: [],
+      thread_id: "root-1",
       queued_at: "2026-10-04T10:00:01Z",
     };
     latestWs().simulateMessage({ type: "message_queued", session_id: "conv-1", queued });

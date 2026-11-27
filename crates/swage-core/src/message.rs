@@ -265,6 +265,19 @@ impl ChatMessage {
         self.tool_replay.as_deref()
     }
 
+    /// Whether this message carries a tool's result, in either stored shape:
+    /// a tool-role message answering a call id, or the user-role message a
+    /// tool round's results are replayed in.
+    pub fn carries_tool_result(&self) -> bool {
+        self.role == Role::Tool
+            || self.tool_call_id.is_some()
+            || self.tool_replay.as_deref().is_some_and(|parts| {
+                parts
+                    .iter()
+                    .any(|part| matches!(part, ToolReplayPart::ToolResult { .. }))
+            })
+    }
+
     pub fn text_content(&self) -> String {
         self.content
             .iter()

@@ -8,6 +8,7 @@
 //! as the foundation that all other crates build upon.
 
 pub mod config;
+pub mod delivered_material;
 pub mod dispatch;
 pub mod effort;
 pub mod error;
@@ -15,10 +16,12 @@ pub mod message;
 pub mod message_rendering;
 pub mod messaging;
 pub mod output_limit;
+pub mod quoted_text;
 pub mod request;
 pub mod runtime;
 pub mod scope;
 pub mod secret;
+pub mod secret_masking;
 pub mod tags;
 pub mod tool;
 
@@ -40,6 +43,10 @@ pub fn json_schema_validator(schema: &serde_json::Value) -> Result<jsonschema::V
 // Convenience re-exports
 // ---------------------------------------------------------------------------
 
+pub use delivered_material::{
+    AUTHORED_DELIVERED_MATERIAL_CLOSING, AUTHORED_DELIVERED_MATERIAL_OPENING,
+    DeliveredMaterialFrame,
+};
 pub use dispatch::{DispatchContextComposition, validate_context_assembly_name};
 pub use effort::{EffortControl, ResolvedEffort, resolve_effort};
 pub use error::{
@@ -49,7 +56,7 @@ pub use error::{
 };
 pub use message::{ChatMessage, ContentPart, Role, ToolReplayPart};
 pub use message_rendering::{
-    render_message_for_model_context, role_label_for_model_context, transcript_for_model_context,
+    render_message_for_model_context, speaker_label_for_model_context, transcript_for_model_context,
 };
 pub use messaging::{ContextTransferMode, MessageKind, MessageStatus};
 pub use output_limit::{OutputLimitSource, ResolvedOutputLimit, resolve_output_limit};
@@ -59,13 +66,14 @@ pub use request::{
     ToolCompletionRequest, ToolCompletionResponse,
 };
 pub use scope::ScopeLocation;
+pub use secret_masking::{REDACTED_SECRET, RegisteredSecretValues};
 pub use swage_protocol::client::settings::{Effort, EffortCapability};
 pub use tool::{
     CompactToolReplay, ReplayRetrieval, ToolCall, ToolDefinition, ToolReplayReasoning, ToolResult,
     build_tool_round_messages, build_tool_round_messages_with_reasoning,
-    compact_tool_arguments_for_model, compact_tool_result_for_model,
-    compact_tool_result_for_model_with_reference, extract_tool_result_metadata,
-    parse_tool_result_reference, tool_result_reference,
+    compact_delivered_tool_result_for_model, compact_tool_arguments_for_model,
+    compact_tool_result_for_model, compact_tool_result_for_model_with_reference,
+    extract_tool_result_metadata, parse_tool_result_reference, tool_result_reference,
 };
 
 pub use swage_protocol::client::context::{ProviderAttemptOutcome, ProviderAttemptRecord};

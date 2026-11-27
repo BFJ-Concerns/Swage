@@ -14,6 +14,7 @@ use super::{
 pub(super) struct ContextChoices {
     pub(super) assembly_name: String,
     pub(super) working_norms_scaffold: swage_context::working_norms::WorkingNormsScaffold,
+    pub(super) material_quoting: crate::material::MaterialQuoting,
 }
 
 const WORKING_NORMS_AUTHORED_V1: &str = "authored-v1";
@@ -80,9 +81,29 @@ pub(super) async fn select_context_assembly(
         _ => swage_context::working_norms::WorkingNormsScaffold::Native,
     };
 
+    // How much reference material the turn quotes whole is its own
+    // location. The authored limits are the only variant registered.
+    let quoting_variants = [crate::material::MaterialQuoting::AUTHORED];
+    let quoting_decision = crate::experimentation::select_session_variant(
+        state,
+        &config.experimentation,
+        crate::experimentation::LOCATION_MATERIAL_QUOTING,
+        &quoting_variants.map(|variant| variant.variant),
+        crate::material::MaterialQuoting::AUTHORED.variant,
+        session_id,
+        Some(turn_id),
+    )
+    .await
+    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
+    let material_quoting = quoting_variants
+        .into_iter()
+        .find(|variant| variant.variant == quoting_decision.variant)
+        .unwrap_or(crate::material::MaterialQuoting::AUTHORED);
+
     Ok(ContextChoices {
         assembly_name: decision.variant,
         working_norms_scaffold,
+        material_quoting,
     })
 }
 

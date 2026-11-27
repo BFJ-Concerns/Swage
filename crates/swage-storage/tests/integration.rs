@@ -6,7 +6,7 @@
 
 use uuid::Uuid;
 
-use swage_core::{Role, compact_tool_arguments_for_model, compact_tool_result_for_model};
+use swage_core::{Role, compact_tool_result_for_model};
 use swage_storage::model::NewTopic;
 use swage_storage::store::{
     MessageStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
@@ -81,6 +81,7 @@ async fn create_full_hierarchy(
             agent_id: agent_id.to_string(),
             role: Role::User,
             origin: swage_storage::MessageOrigin::User,
+            delivered: false,
             content: "Hello from integration test".to_string(),
             position: 0,
         })
@@ -95,9 +96,6 @@ async fn create_full_hierarchy(
             call_id: "toolu_int_01".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"cmd":"echo hi"}"#.to_string(),
-            model_arguments: compact_tool_arguments_for_model(
-                &serde_json::json!({"cmd": "echo hi"}),
-            ),
             result: Some("hi".to_string()),
             model_result: Some(compact_tool_result_for_model("hi", false)),
             status: Some("success".to_string()),
@@ -556,6 +554,7 @@ async fn messages_ordered_within_thread() {
             agent_id: AGENT_A.to_string(),
             role: Role::User,
             origin: swage_storage::MessageOrigin::User,
+            delivered: false,
             content: "second".into(),
             position: 1,
         })
@@ -570,6 +569,7 @@ async fn messages_ordered_within_thread() {
             agent_id: AGENT_A.to_string(),
             role: Role::User,
             origin: swage_storage::MessageOrigin::User,
+            delivered: false,
             content: "first".into(),
             position: 0,
         })
@@ -584,6 +584,7 @@ async fn messages_ordered_within_thread() {
             agent_id: AGENT_A.to_string(),
             role: Role::Assistant,
             origin: swage_storage::MessageOrigin::Assistant,
+            delivered: false,
             content: "third".into(),
             position: 2,
         })

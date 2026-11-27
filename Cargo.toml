@@ -20,6 +20,7 @@ members = [
     "crates/swage-python",
     "crates/swage-workflow",
     "crates/swage-isolate",
+    "crates/swage-plugin",
     "crates/swage-client",
     "crates/swage-device",
 ]
@@ -170,7 +171,7 @@ axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # Database
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "functions"] }
 
 # Pattern matching (leak detection)
 aho-corasick = "1"

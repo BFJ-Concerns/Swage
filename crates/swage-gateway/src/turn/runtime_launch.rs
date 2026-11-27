@@ -59,7 +59,7 @@ fn codex_effort_capability(
 /// would serve a turn on it declares it — the same capability the turn's
 /// launch resolves against, so a check made before a turn starts agrees with
 /// the turn.
-pub(crate) async fn served_effort_capability(
+async fn served_effort_capability(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
 ) -> swage_core::EffortCapability {
@@ -275,6 +275,9 @@ pub(super) async fn launch_turn_runtime(
             .storage(state.storage.clone())
             .tool_dispatcher(dispatcher)
             .approval_registrar(build_approval_registrar(state.approval_channels.clone()))
+            .request_judge(Arc::new(crate::request_judge::GatewayRequestJudge::new(
+                state.clone(),
+            )))
             .delegation_handler(Arc::new(GatewayDelegationHandler::new(state.clone())))
             .context_transfer_config(config.communication.context_transfer.clone());
         if let Some(hook_registry) = state.hook_registry.clone() {

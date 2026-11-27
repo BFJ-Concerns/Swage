@@ -69,6 +69,18 @@ pub enum ClientError {
     #[error("Gateway is not running: {reason}")]
     GatewayNotRunning { reason: String },
 
+    /// The bind host is not an IP address.
+    #[error("Invalid gateway host '{host}'. Use an IPv4 or IPv6 address.")]
+    InvalidBindHost { host: String },
+
+    /// The daemon exited during startup or did not become ready.
+    #[error("Gateway start failed: {reason}")]
+    GatewayStartFailed { reason: String },
+
+    /// The requested CLI run could not complete.
+    #[error("{reason}")]
+    RunFailed { reason: String },
+
     /// A start was requested while a live gateway already owned the runtime.
     #[error("Gateway is already running: {reason}")]
     GatewayAlreadyRunning { reason: String },

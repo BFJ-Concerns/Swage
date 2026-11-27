@@ -24,6 +24,8 @@
   import ProviderSettingsPanel from "./settings/ProviderSettingsPanel.svelte";
   import RecoverySettingsPanel from "./settings/RecoverySettingsPanel.svelte";
   import MemoryPanel from "./MemoryPanel.svelte";
+  import PluginsPanel from "./PluginsPanel.svelte";
+  import TurnGraphPanel from "./TurnGraphPanel.svelte";
   import type { MemoryPageAddress } from "../router";
   import SkillsPanel from "./SkillsPanel.svelte";
   import VoiceSettingsPanel from "./settings/VoiceSettingsPanel.svelte";
@@ -40,6 +42,7 @@
     | "security"
     | "automation"
     | "plugins"
+    | "turn-graph"
     | "channels"
     | "devices"
     | "voice"
@@ -224,6 +227,7 @@
       tool_permissions: settings.tool_permissions,
       hitl: settings.hitl,
       sandbox: settings.sandbox,
+      judge: settings.judge,
       context: settings.context,
       pricing: settings.pricing,
       observability: settings.observability,
@@ -393,7 +397,11 @@
     },
     plugins: {
       title: "Plugins",
-      sub: "Managed and workspace plugin bundles. Plugins extend tools and skills available to agents.",
+      sub: "Installed plugins: what each provides, the grants and secrets it holds, its revisions, and where it is enabled — for the install, or for the selected topic.",
+    },
+    "turn-graph": {
+      title: "Turn graph",
+      sub: "The versioned declaration of the turn's steps: which revision serves, what each revision changed, what fills each step, the hooks attached and the branches that shadow it.",
     },
     channels: {
       title: "Channels",
@@ -433,6 +441,7 @@
     "commands",
     "skills",
     "plugins",
+    "turn-graph",
     "channels",
     "devices",
     "voice",
@@ -442,7 +451,6 @@
     "account",
   ]);
   const NON_FUNCTIONAL_TABS: ReadonlySet<SettingsTabId> = new Set([
-    "plugins",
     "devices",
     "account",
   ]);
@@ -528,10 +536,9 @@
       {:else if tab === "memory"}
         <MemoryPanel {topics} page={memoryPage} />
       {:else if tab === "plugins"}
-        <!--
-          Swage has no plugin registry yet, so this page only describes the capability.
-        -->
-        <InformationalSettingsPanel {tab} />
+        <PluginsPanel {topicId} />
+      {:else if tab === "turn-graph"}
+        <TurnGraphPanel />
       {:else if tab === "channels"}
         <ChannelsPanel {topicId} {topics} />
       {:else if tab === "devices"}

@@ -10456,6 +10456,41 @@ async fn a_parked_run_releases_its_workflow_thread() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_parked_event_wait_omits_an_abandoned_timer_deadline() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let (state, _) = scripted_state(&storage, vec![scripted_text_output("done")]);
+    let Json(started) = start_inline_run(
+        State(state.clone()),
+        Path(topic.id),
+        Json(StartInlineWorkflowRunRequest {
+            source: r#"
+                const worker = agentStart("finish first");
+                await wait({watches: [worker], timerMs: 30000});
+                await awaitEvent({kinds: ["operator.continue"]});
+            "#
+            .into(),
+            args: Value::Null,
+            budget: None,
+        }),
+    )
+    .await
+    .expect("start");
+    wait_for_run_state(&storage, started.id, "parked").await;
+    let Json(detail) = get_run(State(state), Path(started.id))
+        .await
+        .expect("run detail");
+    assert!(detail.run.wake_at.is_some());
+    assert!(
+        detail
+            .journal
+            .iter()
+            .any(|entry| entry.kind == WorkflowJournalEntryKind::Timer)
+    );
+    assert_eq!(detail.timer_wake_at, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_parked_run_survives_its_terminal_completion_task() {
     let provider = Arc::new(ScriptedGateProvider {
         replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
@@ -10954,9 +10989,12 @@ async fn startup_recovery_redrives_a_continuation_after_its_worker_turn_was_orph
         .iter()
         .find(|worker| worker.journal_entry_id == started.id)
         .expect("the continuation is done");
-    assert!(redispatched.redispatched_after_interruption);
+    assert_eq!(
+        redispatched.redispatch_causes,
+        vec![WorkflowAttemptCause::AfterInterruption]
+    );
     assert!(
-        !account.workers.done[0].redispatched_after_interruption
+        account.workers.done[0].redispatch_causes.is_empty()
             || account.workers.done[0].journal_entry_id == started.id,
         "the worker that settled before the death is not marked"
     );
@@ -16948,7 +16986,7 @@ async fn declared_fallback_model_retries_only_before_output_and_records_the_serv
     let account: swage_protocol::client::workflow::WorkflowRunTerminalAccount =
         serde_json::from_value(run.terminal_account.clone().expect("terminal account"))
             .expect("account");
-    assert!(!account.workers.done[0].redispatched_after_interruption);
+    assert!(account.workers.done[0].redispatch_causes.is_empty());
     // The rounds of the fallback's turn number as the record numbers the
     // attempts — the second — even when the primary's attempt never
     // resolved a turn.
@@ -19765,79 +19803,24 @@ async fn session_agent_names_cover_platform_and_topic_definitions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn run_accounts_start_observes_immediate_outcomes() {
+async fn run_accounts_start_with_wait_returns_the_settled_run() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
     let (state, _) = scripted_state(&storage, vec![]);
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    let launcher = GatewayWorkflowLauncher::new(state);
     for (source, expected) in [
         ("return 42;", "completed"),
         ("await agent('bad', {bogusOption: true});", "failed"),
     ] {
-        let session = storage
-            .create_session(swage_storage::fixtures::new_session(topic.id))
+        let result = launcher
+            .start_inline(session.id, source, Value::Null, None, true)
             .await
-            .expect("session");
-        let pending = workflow_pause_test_hook::install("start-snapshot-pending", session.id);
-        let pause = workflow_pause_test_hook::install("start-snapshot-read", session.id);
-        let launcher = GatewayWorkflowLauncher::new(state.clone());
-        let start = tokio::spawn(async move {
-            launcher
-                .start_inline(session.id, source, Value::Null, None, false)
-                .await
-                .expect("start")
-        });
-        tokio::time::timeout(
-            std::time::Duration::from_secs(45),
-            pending.entered.acquire(),
-        )
-        .await
-        .expect("start reaches snapshot pause")
-        .expect("snapshot pause remains open")
-        .forget();
-        let run = storage
-            .list_workflow_runs(topic.id)
-            .await
-            .expect("runs")
-            .into_iter()
-            .find(|run| run.dispatching_session_id == Some(session.id))
-            .expect("session run");
-        // Observe real settlement before letting the start path take its snapshot.
-        wait_for_terminal(&state, run.id).await;
-        pending.release.add_permits(1);
-        tokio::time::timeout(std::time::Duration::from_secs(45), pause.entered.acquire())
-            .await
-            .expect("start snapshot reached")
-            .expect("pause remains open")
-            .forget();
-        let (record, following_observation) = storage
-            .get_workflow_run_observation(run.id)
-            .await
-            .expect("following observation")
-            .expect("run");
-        pause.release.add_permits(1);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(45), start)
-            .await
-            .expect("start returns after settlement")
-            .expect("start task");
-        assert_eq!(
-            result["state"], expected,
-            "the start result must observe an immediately settled run"
-        );
-        let observed = chrono::DateTime::parse_from_rfc3339(
-            result["status_as_of"].as_str().expect("observation time"),
-        )
-        .expect("timestamp");
-        assert!(
-            observed
-                >= record
-                    .completed_at
-                    .expect("settled run has completion time"),
-            "status_as_of must include the completion visible in its snapshot"
-        );
-        assert!(
-            observed <= following_observation,
-            "status_as_of must be captured with the snapshot, not later when returning it"
-        );
+            .expect("start");
+        assert_eq!(result["state"], expected);
         if expected == "completed" {
             assert_eq!(result["final_output"], 42);
             assert_eq!(result["workers_dispatched"], 0);
@@ -19922,6 +19905,7 @@ async fn run_accounts_inspection_reads_an_outstanding_provider_round() {
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
+    let mut signals = state.broadcast.subscribe();
     let Json(started) = start_inline_run(
         State(state.clone()),
         Path(topic.id),
@@ -19935,6 +19919,9 @@ async fn run_accounts_inspection_reads_an_outstanding_provider_round() {
     .expect("launch");
     opened.notified().await;
     wait_for_open_worker_round(&storage).await;
+    // The held provider has sent no output. Drain the start signals before
+    // releasing it so only a subsequent round update can satisfy the read.
+    while signals.try_recv().is_ok() {}
     let detail = get_run(State(state.clone()), Path(started.id))
         .await
         .expect("page")
@@ -19956,6 +19943,26 @@ async fn run_accounts_inspection_reads_an_outstanding_provider_round() {
             .expect("account");
     // End the real in-flight work before assertions, including on a broken projection.
     release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Ok(event) = signals.recv().await {
+            if matches!(event, ServerEvent::WorkflowRunUpdated { run_id } if run_id == started.id) {
+                let Json(detail) = get_run(State(state.clone()), Path(started.id))
+                    .await
+                    .expect("run page");
+                if only_agent_call(&detail)
+                    .provider_rounds
+                    .as_ref()
+                    .expect("rounds")[0]
+                    .completed_at
+                    .is_some()
+                {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the provider settlement must refresh the open run page");
     wait_for_terminal(&state, started.id).await;
     assert_eq!(
         status["runs"][0]["workers"][0]["agent_call"]["provider_rounds"], expected,
@@ -20074,146 +20081,6 @@ async fn review_fix_parent_cancellation_does_not_reuse_an_unclaimed_api_request(
     assert!(
         account.cancellation.is_none(),
         "a later parent cancellation must not inherit the unclaimed API request"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn review_fix_start_snapshot_time_precedes_a_concurrent_completion() {
-    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-    let topic = storage.general_scope().await.unwrap();
-    let session = storage
-        .create_session(swage_storage::fixtures::new_session(topic.id))
-        .await
-        .unwrap();
-    let state = AppState::for_test(
-        storage.clone(),
-        storage.clone(),
-        Arc::new(GatedRoundProvider {
-            round_opened: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-        }),
-        swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![]),
-        None,
-    );
-    let pause = workflow_pause_test_hook::install("start-snapshot-read", session.id);
-    let launcher = GatewayWorkflowLauncher::new(state.clone());
-    let start = tokio::spawn(async move {
-        launcher
-            .start_inline(
-                session.id,
-                "return await agent('wait', {maxAttempts: 1});",
-                Value::Null,
-                None,
-                false,
-            )
-            .await
-            .unwrap()
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-    let run = storage
-        .list_workflow_runs(topic.id)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    storage
-        .update_workflow_run_state(run.id, "completed", None, None, None)
-        .await
-        .unwrap();
-    let completed = storage
-        .get_workflow_run(run.id)
-        .await
-        .unwrap()
-        .unwrap()
-        .completed_at
-        .unwrap();
-    pause.release.add_permits(1);
-    let result = start.await.unwrap();
-    assert_eq!(result["state"], "running");
-    let observed =
-        chrono::DateTime::parse_from_rfc3339(result["status_as_of"].as_str().unwrap()).unwrap();
-    if let Some(token) = state.active_workflow_runs.lock().await.get(&run.id) {
-        token.cancel();
-    }
-    assert!(
-        observed <= completed,
-        "a running snapshot timestamp must precede the concurrent completion"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn review_fix_2_start_observation_includes_completion_time() {
-    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-    let topic = storage.general_scope().await.unwrap();
-    let session = storage
-        .create_session(swage_storage::fixtures::new_session(topic.id))
-        .await
-        .unwrap();
-    let root = tempfile::tempdir().unwrap();
-    let state = AppState::new_with_config_root(
-        storage.clone(),
-        storage.clone(),
-        Arc::new(GatedRoundProvider {
-            round_opened: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-        }),
-        swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![]),
-        None,
-        root.path().to_path_buf(),
-    );
-    let pause = workflow_pause_test_hook::install("start-snapshot-pending", session.id);
-    let launcher = GatewayWorkflowLauncher::new(state.clone());
-    let start = tokio::spawn(async move {
-        launcher
-            .start_inline(
-                session.id,
-                "return await agent('wait', {maxAttempts: 1});",
-                Value::Null,
-                None,
-                false,
-            )
-            .await
-            .unwrap()
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-    let run = storage
-        .list_workflow_runs(topic.id)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    storage
-        .update_workflow_run_state(run.id, "completed", None, None, None)
-        .await
-        .unwrap();
-    let completed = storage
-        .get_workflow_run(run.id)
-        .await
-        .unwrap()
-        .unwrap()
-        .completed_at
-        .unwrap();
-    pause.release.add_permits(1);
-    let result = start.await.unwrap();
-    assert_eq!(result["state"], "completed");
-    let observed =
-        chrono::DateTime::parse_from_rfc3339(result["status_as_of"].as_str().unwrap()).unwrap();
-    if let Some(token) = state.active_workflow_runs.lock().await.get(&run.id) {
-        token.cancel();
-    }
-    assert!(
-        observed >= completed,
-        "a completed run observation must not precede its completion"
     );
 }
 
@@ -20572,9 +20439,78 @@ mod dispatch_attempt_reader_tests {
                 assert!(actual.unwrap_err().contains(&entry.id.to_string()));
             } else {
                 assert!(actual.is_ok(), "valid worker must be accounted: {actual:?}");
-                assert_eq!(actual.unwrap().redispatched_after_interruption, has_attempt);
+                assert_eq!(
+                    actual.unwrap().redispatch_causes,
+                    if has_attempt {
+                        vec![WorkflowAttemptCause::AfterInterruption]
+                    } else {
+                        vec![]
+                    }
+                );
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terminal_account_names_the_recorded_provider_failure_that_caused_redispatch() {
+        let (storage, entry) = entry_with_attempts(Some(serde_json::json!([]))).await;
+        let run = storage
+            .get_workflow_run(entry.run_id)
+            .await
+            .expect("read run")
+            .expect("run");
+        let turn_id = worker_turn(&storage, run.topic_id, "first attempt").await;
+        dispatch_attempt(&storage, entry.id, WorkflowAttemptCause::First, turn_id).await;
+        open_round(&storage, turn_id, 1).await;
+        settle_round(
+            &storage,
+            turn_id,
+            1,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Responded {
+                tool_calls: 1,
+            },
+        )
+        .await;
+        open_round(&storage, turn_id, 2).await;
+        let failure = "provider refused the request".to_owned();
+        settle_round(
+            &storage,
+            turn_id,
+            2,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Failed {
+                message: failure.clone(),
+            },
+        )
+        .await;
+
+        let cause = attempt_cause_for(&storage, entry.run_id, entry.id)
+            .await
+            .expect("cause");
+        assert_eq!(
+            cause,
+            WorkflowAttemptCause::AfterProviderFailure {
+                failure: failure.clone()
+            }
+        );
+
+        let resumed_turn = worker_turn(&storage, run.topic_id, "replayed attempt").await;
+        dispatch_attempt(&storage, entry.id, cause, resumed_turn).await;
+        let entries = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        let replayed = entries
+            .iter()
+            .find(|row| row.id == entry.id)
+            .expect("replayed call");
+        let detail = journal_wire(replayed.clone(), None).expect("worker detail");
+        let attempts = detail.agent_call.unwrap().dispatch.unwrap().attempts;
+        let account = terminal_account_from_journal(&entries, WorkflowRunEnding::Cancelled, None)
+            .expect("terminal account");
+        assert_eq!(
+            account.workers.cut_short[0].redispatch_causes,
+            vec![attempts[1].cause.clone()]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

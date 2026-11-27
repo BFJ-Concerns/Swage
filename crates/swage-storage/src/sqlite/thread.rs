@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use swage_core::{
-    StorageError, compact_tool_result_for_model_with_reference, tool_result_reference,
+    CompactToolReplay, StorageError, compact_tool_result_for_model_with_reference,
+    tool_result_reference,
 };
 
 use crate::model::{NewThread, Thread, ThreadBranch, ThreadState};
@@ -77,9 +78,9 @@ fn copy_tool_calls_for_branch(
     child_turn_id: &str,
 ) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT agent_id, call_id, tool, arguments, model_arguments, result, status,
+        "SELECT agent_id, call_id, tool, arguments, result, status,
                 duration_ms, truncated, total_bytes, provider_round, position, created_at,
-                parent_call_id, display_summary
+                parent_call_id, display_summary, model_result
          FROM tool_calls
          WHERE turn_id = ?1
          ORDER BY provider_round ASC, position ASC",
@@ -92,13 +93,13 @@ fn copy_tool_calls_for_branch(
             row.get::<_, String>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
-            row.get::<_, Option<String>>(6)?,
-            row.get::<_, Option<i64>>(7)?,
-            row.get::<_, i64>(8)?,
-            row.get::<_, Option<i64>>(9)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<i64>>(8)?,
+            row.get::<_, i32>(9)?,
             row.get::<_, i32>(10)?,
-            row.get::<_, i32>(11)?,
-            row.get::<_, String>(12)?,
+            row.get::<_, String>(11)?,
+            row.get::<_, Option<String>>(12)?,
             row.get::<_, Option<String>>(13)?,
             row.get::<_, Option<String>>(14)?,
         ))
@@ -111,7 +112,6 @@ fn copy_tool_calls_for_branch(
         call_id,
         tool,
         arguments,
-        model_arguments,
         result,
         status,
         duration_ms,
@@ -122,22 +122,43 @@ fn copy_tool_calls_for_branch(
         created_at,
         parent_call_id,
         display_summary,
+        source_model_result,
     ) in calls
     {
-        let model_result = result.as_deref().map(|result| {
-            compact_tool_result_for_model_with_reference(
-                result,
-                status.as_deref() != Some("success"),
-                tool_result_reference(child_turn_id, &call_id),
-            )
+        // The source's stored replay carries what the raw result does not —
+        // an approval account before the envelope, the flag that a delivered
+        // result is framed for the model — so the branch keeps it whole and
+        // points its envelope at the branch's own copy. A replay with no
+        // compact envelope is rebuilt from the result.
+        let kept_replay = source_model_result.as_deref().and_then(|stored| {
+            let (account, envelope) = match stored.rsplit_once('\n') {
+                Some((account, envelope)) => (Some(account), envelope),
+                None => (None, stored),
+            };
+            let mut replay = serde_json::from_str::<CompactToolReplay>(envelope).ok()?;
+            replay.full_result_ref = Some(tool_result_reference(child_turn_id, &call_id));
+            let envelope = replay.to_stable_json();
+            Some(match account {
+                Some(account) => format!("{account}\n{envelope}"),
+                None => envelope,
+            })
+        });
+        let model_result = kept_replay.or_else(|| {
+            result.as_deref().map(|result| {
+                compact_tool_result_for_model_with_reference(
+                    result,
+                    status.as_deref() != Some("success"),
+                    tool_result_reference(child_turn_id, &call_id),
+                )
+            })
         });
 
         conn.execute(
             "INSERT INTO tool_calls
-	             (id, turn_id, agent_id, call_id, tool, arguments, model_arguments, result,
+	             (id, turn_id, agent_id, call_id, tool, arguments, result,
 	              model_result, status, duration_ms, truncated, total_bytes, provider_round,
 	              position, created_at, parent_call_id, display_summary)
-	             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+	             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 Uuid::new_v4().to_string(),
                 child_turn_id,
@@ -145,7 +166,6 @@ fn copy_tool_calls_for_branch(
                 call_id,
                 tool,
                 arguments,
-                model_arguments,
                 result,
                 model_result,
                 status,
@@ -424,7 +444,7 @@ impl ThreadStore for SqliteStorage {
             )?;
 
             let mut stmt = conn.prepare(
-                "SELECT turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin
+                "SELECT turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin, delivered
                  FROM messages
                  WHERE thread_id = ?1 AND position <= ?2
                  ORDER BY position ASC",
@@ -443,6 +463,7 @@ impl ThreadStore for SqliteStorage {
                         row.get::<_, String>(7)?,
                         row.get::<_, String>(8)?,
                         row.get::<_, String>(9)?,
+                        row.get::<_, bool>(10)?,
                     ))
                 },
             )?;
@@ -549,14 +570,15 @@ impl ThreadStore for SqliteStorage {
                     created_at,
                     attachments,
                     origin,
+                    delivered,
                 ) = row;
                 let child_turn_id = turn_id
                     .as_ref()
                     .and_then(|turn_id| turn_id_map.get(turn_id))
                     .cloned();
                 conn.execute(
-                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin, delivered)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         Uuid::new_v4().to_string(),
                         child_thread_id.to_string(),
@@ -570,6 +592,7 @@ impl ThreadStore for SqliteStorage {
                         created_at,
                         attachments,
                         origin,
+                        delivered,
                     ],
                 )?;
             }
@@ -639,8 +662,8 @@ mod tests {
     use crate::model::{NewMessage, NewSession, NewToolCall, NewTopic, NewTurn, TurnState};
     use crate::store::{MessageStore, SessionStore, ToolCallStore, TopicStore, TurnStore};
     use swage_core::{
-        Role, compact_tool_arguments_for_model, compact_tool_result_for_model,
-        compact_tool_result_for_model_with_reference, tool_result_reference,
+        Role, compact_tool_result_for_model, compact_tool_result_for_model_with_reference,
+        tool_result_reference,
     };
 
     use super::*;
@@ -1022,6 +1045,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "hello".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1035,6 +1059,7 @@ mod tests {
                 turn_id: None,
                 role: Role::Assistant,
                 origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
                 content: "world".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1082,6 +1107,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "use a tool".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1095,14 +1121,13 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
                 origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
                 content: "done".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
             })
             .await
             .unwrap();
-        let expected_model_arguments =
-            compact_tool_arguments_for_model(&serde_json::json!({"cmd": "pwd"}));
         storage
             .create_tool_call(NewToolCall {
                 execution: None,
@@ -1111,7 +1136,6 @@ mod tests {
                 call_id: "call_1".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"pwd"}"#.into(),
-                model_arguments: expected_model_arguments.clone(),
                 result: Some("workspace".into()),
                 model_result: Some(compact_tool_result_for_model("workspace", false)),
                 status: Some("success".into()),
@@ -1157,15 +1181,207 @@ mod tests {
             tool_result_reference(&child_turns[0].id.to_string(), "call_1"),
         );
         assert_eq!(child_tool_calls[0].call_id, "call_1");
-        assert_eq!(
-            child_tool_calls[0].model_arguments,
-            expected_model_arguments
-        );
+        assert_eq!(child_tool_calls[0].arguments, r#"{"cmd":"pwd"}"#);
         assert_eq!(
             child_tool_calls[0].model_result.as_deref(),
             Some(expected_model_result.as_str())
         );
         assert_eq!(child_tool_calls[0].provider_round, 2);
+    }
+
+    /// A branch copies its ancestor's settled tool calls; the copies are not
+    /// calls that ran again, so the audit record gains no tool_call event.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn branching_records_no_tool_call_event_for_copied_calls() {
+        let (storage, _, session_id) = make_session().await;
+        let parent = ThreadStore::create(&storage, new_thread(session_id))
+            .await
+            .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: parent.id,
+                agent_id: "agent-1".into(),
+                state: TurnState::Processing,
+                user_input: Some("use a tool".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .create_tool_call(NewToolCall {
+                execution: None,
+                turn_id: turn.id,
+                agent_id: "agent-1".into(),
+                call_id: "call_1".into(),
+                tool: "shell".into(),
+                arguments: r#"{"cmd":"pwd"}"#.into(),
+                result: Some("workspace".into()),
+                model_result: Some(compact_tool_result_for_model("workspace", false)),
+                status: Some("success".into()),
+                duration_ms: Some(12),
+                truncated: false,
+                total_bytes: Some(9),
+                provider_round: 1,
+                position: 0,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .update_turn_state(turn.id, TurnState::Completed)
+            .await
+            .unwrap();
+        for (position, (role, origin)) in [
+            (Role::User, crate::model::MessageOrigin::User),
+            (Role::Assistant, crate::model::MessageOrigin::Assistant),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            storage
+                .create_message(NewMessage {
+                    thread_id: parent.id,
+                    attachments: Vec::new(),
+                    turn_id: Some(turn.id),
+                    role,
+                    origin,
+                    delivered: false,
+                    content: "text".into(),
+                    position: position as i32,
+                    agent_id: "agent-1".into(),
+                })
+                .await
+                .unwrap();
+        }
+        let tool_call_events = || async {
+            crate::AuditStore::list_audit_events_filtered(
+                &storage,
+                crate::AuditEventFilter {
+                    event_kind: Some("tool_call".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .len()
+        };
+        assert_eq!(tool_call_events().await, 1, "the call that ran");
+
+        let assistant = storage
+            .list_messages_by_thread(parent.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|message| message.role == Role::Assistant)
+            .unwrap();
+        let branch = storage
+            .create_branch(parent.id, assistant.id)
+            .await
+            .unwrap();
+        let child_turn = &storage
+            .list_turns_by_thread(branch.child_thread_id)
+            .await
+            .unwrap()[0];
+        assert_eq!(
+            storage
+                .list_tool_calls_by_turn(child_turn.id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the branch carries the call"
+        );
+        assert_eq!(tool_call_events().await, 1, "and records it no second time");
+    }
+
+    /// A branch keeps a replay the raw result cannot rebuild: the approval
+    /// account before the envelope and the flag that frames a delivered
+    /// result for the model.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_branch_keeps_an_approved_delivered_replay() {
+        let (storage, _, session_id) = make_session().await;
+        let parent = ThreadStore::create(&storage, new_thread(session_id))
+            .await
+            .unwrap();
+        let parent_turn = storage
+            .create_turn(NewTurn {
+                thread_id: parent.id,
+                agent_id: "agent-1".into(),
+                state: TurnState::Completed,
+                user_input: Some("delegate".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let assistant_message = storage
+            .create_message(NewMessage {
+                thread_id: parent.id,
+                attachments: Vec::new(),
+                turn_id: Some(parent_turn.id),
+                role: Role::Assistant,
+                origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
+                content: "done".into(),
+                position: 0,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        let account = "The user approved this call once.";
+        storage
+            .create_tool_call(NewToolCall {
+                execution: None,
+                turn_id: parent_turn.id,
+                agent_id: "agent-1".into(),
+                call_id: "call_1".into(),
+                tool: "delegate".into(),
+                arguments: "{}".into(),
+                result: Some("the child's answer".into()),
+                model_result: Some(format!(
+                    "{account}\n{}",
+                    swage_core::compact_delivered_tool_result_for_model(
+                        "the child's answer",
+                        false,
+                        Some(tool_result_reference(&parent_turn.id.to_string(), "call_1")),
+                    )
+                )),
+                status: Some("success".into()),
+                duration_ms: Some(1),
+                truncated: false,
+                total_bytes: None,
+                provider_round: 0,
+                position: 0,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+
+        let branch = storage
+            .create_branch(parent.id, assistant_message.id)
+            .await
+            .unwrap();
+        let child_turn = storage
+            .list_turns_by_thread(branch.child_thread_id)
+            .await
+            .unwrap()
+            .remove(0);
+        let copied = storage
+            .list_tool_calls_by_turn(child_turn.id)
+            .await
+            .unwrap()
+            .remove(0)
+            .model_result
+            .expect("copied replay");
+        let (copied_account, envelope) = copied.rsplit_once('\n').expect("account kept");
+        assert_eq!(copied_account, account);
+        let replay: CompactToolReplay = serde_json::from_str(envelope).unwrap();
+        assert!(replay.delivered, "the delivered flag survives the branch");
+        assert_eq!(
+            replay.full_result_ref,
+            Some(tool_result_reference(&child_turn.id.to_string(), "call_1"))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1191,6 +1407,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "use a tool".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1204,6 +1421,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
                 origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
                 content: "done".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1218,9 +1436,6 @@ mod tests {
                 call_id: "call_future".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"pwd"}"#.into(),
-                model_arguments: compact_tool_arguments_for_model(&serde_json::json!({
-                    "cmd": "pwd"
-                })),
                 result: Some("workspace".into()),
                 model_result: Some(compact_tool_result_for_model("workspace", false)),
                 status: Some("success".into()),
@@ -1279,6 +1494,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "a".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1292,6 +1508,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "b".into(),
                 position: 0,
                 agent_id: "agent-1".into(),

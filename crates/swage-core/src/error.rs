@@ -332,6 +332,11 @@ pub enum ToolError {
     #[error("tool {name} requires approval before execution")]
     RequiresApproval {
         name: String,
+        /// The arguments of the call the gate paused — the call as the
+        /// dispatcher's gates saw it, which a hook may have rewritten from
+        /// the one the model raised. An approval is of this call, and the
+        /// approved dispatch runs it.
+        arguments: serde_json::Value,
         /// Optional timeout in seconds; `None` means wait indefinitely.
         timeout_secs: Option<u64>,
         /// Policy applied if the timeout elapses without a decision.
@@ -956,11 +961,13 @@ mod tests {
     fn requires_approval_constructible() {
         let err = ToolError::RequiresApproval {
             name: "deploy".to_string(),
+            arguments: serde_json::json!({}),
             timeout_secs: Some(300),
             timeout_policy: Some(ApprovalTimeoutPolicy::Reject),
         };
         if let ToolError::RequiresApproval {
             name,
+            arguments: _,
             timeout_secs,
             timeout_policy,
         } = &err
@@ -977,10 +984,12 @@ mod tests {
     fn requires_approval_optional_fields_none() {
         let err = ToolError::RequiresApproval {
             name: "bash".to_string(),
+            arguments: serde_json::json!({}),
             timeout_secs: None,
             timeout_policy: None,
         };
         if let ToolError::RequiresApproval {
+            arguments: _,
             timeout_secs,
             timeout_policy,
             ..
@@ -997,6 +1006,7 @@ mod tests {
     fn requires_approval_is_not_retriable() {
         let err = ToolError::RequiresApproval {
             name: "deploy".to_string(),
+            arguments: serde_json::json!({}),
             timeout_secs: Some(60),
             timeout_policy: Some(ApprovalTimeoutPolicy::Interrupt),
         };
@@ -1010,6 +1020,7 @@ mod tests {
     fn requires_approval_display_includes_tool_name() {
         let err = ToolError::RequiresApproval {
             name: "deploy".to_string(),
+            arguments: serde_json::json!({}),
             timeout_secs: Some(300),
             timeout_policy: None,
         };
@@ -1300,6 +1311,7 @@ mod tests {
     fn tool_requires_approval_is_not_retriable() {
         let err = ToolError::RequiresApproval {
             name: "shell".to_string(),
+            arguments: serde_json::json!({}),
             timeout_secs: None,
             timeout_policy: None,
         };
@@ -1310,6 +1322,7 @@ mod tests {
     fn tool_requires_approval_with_timeout_is_not_retriable() {
         let err = ToolError::RequiresApproval {
             name: "shell".to_string(),
+            arguments: serde_json::json!({}),
             timeout_secs: Some(30),
             timeout_policy: Some(ApprovalTimeoutPolicy::Reject),
         };
@@ -1320,6 +1333,7 @@ mod tests {
     fn tool_requires_approval_display_includes_name() {
         let err = ToolError::RequiresApproval {
             name: "shell".to_string(),
+            arguments: serde_json::json!({}),
             timeout_secs: None,
             timeout_policy: None,
         };
@@ -1335,6 +1349,7 @@ mod tests {
         // Verify all optional field combinations compile and are constructible.
         let err = ToolError::RequiresApproval {
             name: "write_file".to_string(),
+            arguments: serde_json::json!({}),
             timeout_secs: Some(60),
             timeout_policy: Some(ApprovalTimeoutPolicy::Interrupt),
         };

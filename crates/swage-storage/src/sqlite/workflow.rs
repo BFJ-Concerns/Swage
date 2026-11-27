@@ -182,6 +182,7 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                 Box::new(error),
             )
         })?,
+        timer_wake_at: row.get::<_, Option<String>>(29)?.map(time).transpose()?,
         created_at: time(row.get(19)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
@@ -236,7 +237,7 @@ const RUN_COLUMNS: &str = "id, topic_id, parent_run_id, parent_seq, script_versi
     COALESCE((SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_id), \
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
-    carrying_skill, task, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json, terminal_account_json, dispatching_session_id, interruptions_json";
+    carrying_skill, task, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json, terminal_account_json, dispatching_session_id, interruptions_json, timer_wake_at";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, terminal_metadata_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at, dispatch_json, dispatch_attempts_json, termination_json";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 
@@ -567,21 +568,11 @@ impl WorkflowStore for SqliteStorage {
     }
 
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {
-        Ok(self
-            .get_workflow_run_observation(id)
-            .await?
-            .map(|(record, _)| record))
-    }
-
-    async fn get_workflow_run_observation(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<(WorkflowRunRecord, chrono::DateTime<chrono::Utc>)>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
                 &format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"),
                 [id.to_string()],
-                |row| Ok((run_row(row)?, chrono::Utc::now())),
+                run_row,
             )
             .optional()
         })
@@ -625,7 +616,7 @@ impl WorkflowStore for SqliteStorage {
             // second write, so a claimed cancellation needs no follow-up to
             // be a finished run.
             let count = conn.execute(
-                "UPDATE workflow_runs SET state=?3, wake_at=NULL, \
+                "UPDATE workflow_runs SET state=?3, wake_at=NULL, timer_wake_at=NULL, \
                  completed_at=CASE WHEN ?3 IN ('completed', 'failed', 'cancelled') \
                      THEN ?4 ELSE NULL END \
                  WHERE id=?1 AND state=?2",
@@ -643,7 +634,7 @@ impl WorkflowStore for SqliteStorage {
     ) -> Result<(), StorageError> {
         self.with_conn(move |conn| {
             conn.execute(
-                "UPDATE workflow_runs SET state='parked', wake_at=?2, completed_at=NULL WHERE id=?1",
+                "UPDATE workflow_runs SET state='parked', wake_at=?2, timer_wake_at=?2, completed_at=NULL WHERE id=?1",
                 params![id.to_string(), wake_at.to_rfc3339()],
             )?;
             Ok(())
@@ -661,7 +652,7 @@ impl WorkflowStore for SqliteStorage {
             .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         self.with_conn(move |conn| {
             let changed = conn.execute(
-                "UPDATE workflow_runs SET state='parked', wake_at=?2, completed_at=NULL \
+                "UPDATE workflow_runs SET state='parked', wake_at=?2, timer_wake_at=NULL, completed_at=NULL \
                  WHERE id=?1 AND state='running' AND NOT EXISTS (\
                      SELECT 1 FROM workflow_run_events \
                      WHERE run_id=?1 AND delivered_at IS NULL \
@@ -742,7 +733,7 @@ impl WorkflowStore for SqliteStorage {
         let now = Utc::now().to_rfc3339();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            let changed = tx.execute("UPDATE workflow_runs SET state=?2, final_output_json=?3, handover_json=?4, error_message=?5, wake_at=NULL, completed_at=CASE WHEN ?2='running' THEN NULL ELSE ?6 END WHERE id=?1 AND (?2 NOT IN ('completed', 'failed', 'cancelled') OR state NOT IN ('completed', 'failed', 'cancelled'))", params![id.to_string(),state,output,handover,error,now])?;
+            let changed = tx.execute("UPDATE workflow_runs SET state=?2, final_output_json=?3, handover_json=?4, error_message=?5, wake_at=NULL, timer_wake_at=NULL, completed_at=CASE WHEN ?2='running' THEN NULL ELSE ?6 END WHERE id=?1 AND (?2 NOT IN ('completed', 'failed', 'cancelled') OR state NOT IN ('completed', 'failed', 'cancelled'))", params![id.to_string(),state,output,handover,error,now])?;
             if changed > 0 && matches!(state.as_str(), "completed" | "failed" | "cancelled") {
                 tx.execute("UPDATE workflow_run_holds SET state='closed' WHERE run_id=?1 AND state='open'", [id.to_string()])?;
             }
@@ -788,7 +779,7 @@ impl WorkflowStore for SqliteStorage {
             let claimed = tx.execute(
                 "UPDATE workflow_runs \
                  SET state='cancelled', terminal_account_json=?2, final_output_json=NULL, \
-                     handover_json=NULL, error_message=NULL, wake_at=NULL, completed_at=?3 \
+                     handover_json=NULL, error_message=NULL, wake_at=NULL, timer_wake_at=NULL, completed_at=?3 \
                  WHERE id=?1 AND state='parked'",
                 params![run_id, account, now],
             )? > 0;
@@ -1193,7 +1184,7 @@ impl WorkflowStore for SqliteStorage {
     ) -> Result<bool, StorageError> {
         self.with_conn(move |conn| {
             let changed = conn.execute(
-                "UPDATE workflow_runs SET state='parked', wake_at=?2, completed_at=NULL \
+                "UPDATE workflow_runs SET state='parked', wake_at=?2, timer_wake_at=NULL, completed_at=NULL \
                  WHERE id=?1 AND state='running' AND EXISTS (\
                      SELECT 1 FROM workflow_run_holds \
                      WHERE id=?3 AND run_id=?1 AND state='open'\

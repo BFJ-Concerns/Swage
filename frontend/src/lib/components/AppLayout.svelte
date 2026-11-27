@@ -27,7 +27,8 @@
   import TopicSettingsPage from "./TopicSettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
   import WorkflowRunDetail from "./WorkflowRunDetail.svelte";
-  import { UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
+  import { openSharedWorkSurfaceChannel } from "../api/work-surface";
+  import { ApiError } from "../api/error";
   import { fetchWorkflowRun } from "../api/workflow-runs";
   import { conversationPath } from "../router";
   import type { DisplayPreferences } from "../display-preferences";
@@ -162,27 +163,54 @@
     if (!requestedRunId) return;
     workflowRunLoadState = "loading";
     let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    async function refresh() {
-      let terminal = false;
+    let reading = false;
+    let changedDuringRead = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryDelay = 1000;
+    async function refresh(runId: string) {
+      if (disposed || runId !== workflowRunId) return;
+      if (reading) {
+        changedDuringRead = true;
+        return;
+      }
+      clearTimeout(retryTimer);
+      reading = true;
       try {
-        const loaded = await fetchWorkflowRun(requestedRunId!);
-        if (disposed || requestedRunId !== workflowRunId) return;
+        const loaded = await fetchWorkflowRun(runId);
+        if (disposed || runId !== workflowRunId) return;
+        retryDelay = 1000;
         workflowRunDetail = loaded;
         workflowRunLoadState = loaded === null ? "absent" : "loaded";
         workflowRunError = "";
-        terminal = loaded === null || ["completed", "failed", "cancelled"].includes(loaded.run.state);
       } catch (error: unknown) {
-        if (disposed || requestedRunId !== workflowRunId) return;
+        if (disposed || runId !== workflowRunId) return;
         workflowRunError = error instanceof Error ? error.message : String(error);
         workflowRunLoadState = "error";
+        if (!(error instanceof ApiError) || error.status >= 500 || error.status === 429) {
+          retryTimer = setTimeout(() => { void refresh(runId); }, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 30_000);
+        }
+      } finally {
+        reading = false;
+        if (changedDuringRead) {
+          changedDuringRead = false;
+          void refresh(runId);
+        }
       }
-      if (!disposed && !terminal) timer = setTimeout(refresh, UNSETTLED_RUN_REFRESH_MS);
     }
-    void refresh();
+    const channel = openSharedWorkSurfaceChannel();
+    const refreshRun = () => { void refresh(requestedRunId); };
+    channel.onSignal((event) => {
+      if (event.type === "lagged" || (event.type === "workflow_run_updated" && event.run_id === requestedRunId)) {
+        refreshRun();
+      }
+    });
+    channel.onReconnect(refreshRun);
+    refreshRun();
     return () => {
       disposed = true;
-      clearTimeout(timer);
+      clearTimeout(retryTimer);
+      channel.close();
     };
   });
   const settingsTab = $derived(route?.settingsTab ?? null);
@@ -294,6 +322,8 @@
         <button class:active={settingsTab === "voice"} onclick={() => onNavigate?.("/settings/voice")}>Voice</button>
         <button class:active={settingsTab === "channels"} onclick={() => onNavigate?.("/settings/channels")}>Channels</button>
         <button class:active={settingsTab === "memory"} onclick={() => onNavigate?.("/settings/memory")}>Memory</button>
+        <button class:active={settingsTab === "plugins"} onclick={() => onNavigate?.("/settings/plugins")}>Plugins</button>
+        <button class:active={settingsTab === "turn-graph"} onclick={() => onNavigate?.("/settings/turn-graph")}>Turn graph</button>
         {#each topicStore?.topics ?? [] as topic (topic.id)}
           <button
             class="topic-tab"

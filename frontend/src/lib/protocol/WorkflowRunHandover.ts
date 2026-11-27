@@ -4,9 +4,7 @@ import type { WorkflowHandoverFailedCall } from "./WorkflowHandoverFailedCall";
 import type { WorkflowHandoverFailedCallRef } from "./WorkflowHandoverFailedCallRef";
 
 /**
- * The durable account a failed run leaves behind: what stopped it, which
- * call failed, and where the pending event queue stood, so whoever picks
- * the work up starts from the record instead of a re-run.
+ * The account a failed run leaves, with the detail the gateway recovered.
  */
 export type WorkflowRunHandover = { "classification": "author_error", failure: string, } | { "classification": "interrupted", failure: string, failed_call: WorkflowHandoverFailedCall,
 /**

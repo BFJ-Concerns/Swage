@@ -77,11 +77,29 @@ pub struct CompactToolReplay {
     pub full_result_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
+    /// The result is material produced elsewhere — a delegated agent's
+    /// answer — so whatever reads it to the model wraps it in the
+    /// delivered-material frame. The preview and digest cover the bare
+    /// result. Stored, never shown: [`Self::for_model`] clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delivered: bool,
 }
 
 impl CompactToolReplay {
     pub fn to_stable_json(&self) -> String {
         serde_json::to_string(self).expect("compact replay envelope serialises")
+    }
+
+    /// The replay as the model reads it: the envelope without the stored
+    /// delivered flag, inside `frame` when the flag is set.
+    pub fn for_model(mut self, frame: &crate::DeliveredMaterialFrame) -> String {
+        let delivered = std::mem::take(&mut self.delivered);
+        let envelope = self.to_stable_json();
+        if delivered {
+            frame.wrap(&envelope)
+        } else {
+            envelope
+        }
     }
 
     /// The replay as the model of a later turn reads it. An elided result
@@ -180,6 +198,18 @@ pub fn compact_tool_result_for_model_with_reference(
     .to_stable_json()
 }
 
+/// The stored replay of a result that is delivered material: compacted from
+/// the bare result, with the flag that has every reader frame it.
+pub fn compact_delivered_tool_result_for_model(
+    content: &str,
+    is_error: bool,
+    full_result_ref: Option<String>,
+) -> String {
+    let mut replay = compact_tool_replay("tool_result", content, Some(is_error), full_result_ref);
+    replay.delivered = true;
+    replay.to_stable_json()
+}
+
 pub fn tool_result_reference(turn_id: &str, call_id: &str) -> String {
     format!("tool_call:{turn_id}:{call_id}:result")
 }
@@ -265,6 +295,7 @@ fn compact_tool_replay(
         note: None,
         full_result_ref,
         is_error,
+        delivered: false,
     }
 }
 

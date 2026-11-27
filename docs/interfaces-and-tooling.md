@@ -125,7 +125,13 @@ is no direct page-editing interface — every change runs through the curator.
 
 The operator history pane shows a timeline of configuration changes,
 variant selections, and assembly decisions, all read from the gateway's
-local audit trail.
+local audit trail, above the audit record itself: every event the trail
+holds, filterable by session, entity and event kind. Among them is each
+tool call that ran (`tool_call`), with its arguments and result, and each
+completion the gateway asked a model provider for (`completion`), with the
+model, why it stopped — a response cut off at its length limit included —
+the tokens used and what it returned. Both name the session they ran in, and
+an entry that returned something shows it as text under "What it returned".
 
 Each configuration change entry names the changed fields with their prior
 and new values. Nested settings appear by their path — for example,
@@ -225,6 +231,27 @@ part for OpenAI Responses, an `image` block for Anthropic, and `inlineData`
 or `fileData` for Google. Text-only messages keep the plain string form.
 Stored messages carry their attachments as records that survive round-trips
 through the API.
+
+## Reference material
+
+The composer's **Attach files** and **Attach folder** controls give a session
+material to work from. A PNG or JPEG image (chosen, or pasted into the message
+field) goes with the next message as an [image attachment](#image-attachments).
+A text file, and each text file of a chosen folder, is registered at once as
+the session's reference material through `POST /api/materials`, titled by its
+name or, for a folder, by its path within the folder. A folder brings in at
+most 500 files; files in hidden directories, empty files, files over 1 MB and
+files that are not text are skipped, and the composer says how many. The list
+under the message field shows the session's active material, and **Remove**
+archives one.
+
+Each turn's context carries the active material of its session and, inside a
+topic, of that topic: one entry per material with its title, type, size and
+id. A short material (up to 4 KiB, and 16 KiB across all of them) is quoted
+whole beneath its entry. The agent reads any material with `material_read`
+by that id, a part at a time when it is longer than the tool output limit
+(`[tools] max_output_bytes`). Archived material, and material of another
+session or topic, is neither listed nor readable.
 
 ## Provider setup
 
@@ -997,9 +1024,14 @@ one is available.
 two sandbox-eligible tools.
 
 `python_execute` runs each program in a fresh interpreter with Python's standard
-built-ins and standard-library imports. The default Python sandbox starts it in
-a private working directory with no network access. The supplied `swage` module
-can call the file, shell and web tools available to the turn.
+built-ins and standard-library imports. It starts in the session's working
+directory under the turn's own sandbox, as `shell` runs: the same files
+writable, the same private paths masked and the same network. The supplied `swage` module
+can call the file, shell and web tools available to the turn. Those calls run
+under the answer already given for the `python_execute` call — the person's
+approval, or the turn's pass where it asks nothing — so a tool on the approval
+list does not ask again; a tool the turn is denied stays refused, and every
+call keeps the turn's grants and sandbox.
 
 **Browser** — `browser_navigate`, `browser_snapshot`, `browser_click`,
 `browser_type`, `browser_select`, and `browser_scroll`.
@@ -1081,7 +1113,224 @@ Local gateway tool output does not create files or directories in an attached
 workspace. Paired-device execution still stores artefacts relative to its
 working directory at `.swage/tool-output/` and reports relative paths.
 
-Operators can register additional tools through plugins; plugin tool names come
-from the plugin manifest rather than the gateway's built-in set. A plugin
-whose tool takes a built-in tool's name, or a name another tool already has,
-is left out at startup with a warning in the gateway's log.
+### Plugins
+
+A plugin is a package — a directory holding a `plugin.toml` manifest and the
+script it names — installed from Settings → Plugins by its path on the
+gateway's host, or through `POST /api/plugins`. The manifest declares the
+tools the plugin provides, the host grants it needs (`tools`, to call the
+session's tools), the secrets it holds and, optionally, the function it is a
+variant of. Each install is a new revision under the data root's `plugins/`
+directory; the revision serving now, every earlier one, and the install and
+enablement events are in the audit trail.
+
+The plugin's script runs in a V8 isolate of its own inside the gateway,
+with its own heap and execution-time limits and no ambient access: it
+registers a handler per tool with `swage.provide.tool(name, handler)`, and
+reaches the session only through the host API — `swage.callTool(name,
+arguments)` under the `tools` grant, which runs the named tool through the
+session's own dispatcher with the session's grants, approvals and record, and
+`swage.log(message)`. A handler's parameters are the model's arguments; its
+second argument carries the session, agent, call id and working directory.
+A call ends when the isolate is idle, not when the handler's promise
+settles: work a handler starts and does not await still completes inside
+that call, and a failure in it is that call's failure. An isolate that
+crosses a limit is terminated, the termination recorded as
+`plugin_terminated` with what it was serving — a tool, a slot or a hook
+point — and the plugin starts afresh on its next call. The limits are the manifest's `[limits]`:
+`heap_mib` (64 by default, and at least 4, the least the engine starts in)
+and `continuous_execution_secs` (5 by default).
+
+A plugin that needs a real runtime — packages, native code, a long-lived
+driver — declares a `[process]` instead of a script: a command in the
+package the gateway starts for a session on its first call to one of the
+plugin's tools, keeps for that session, and stops when the session closes,
+after `idle_secs` without a call (300 by default), or when the gateway
+stops — each stop announced to the process with its reason, and recorded
+as `plugin_process_started`, `plugin_process_stopped` and
+`plugin_process_exited` audit events. The process runs under the same
+boundary the session's turn runs its commands under — the sandbox with its
+filesystem rules, the permitted fallback's rules alone, or none where the
+turn itself has none — with a clean environment, and speaks the
+plugin-process contract over the Unix socket named in
+`SWAGE_PLUGIN_SOCKET`: one JSON object per line — it announces its tools
+(`{"kind":"ready","tools":[…]}`), answers each `invoke` with a `result` or
+a `failure`, and asks the gateway for anything it needs with a `call`
+(`callTool`, `log`) that is answered under the plugin's grants exactly as
+the isolate's door is. The contract is the `plugin-process` schema under
+`crates/swage-protocol/schema/`; `crates/swage-plugin/src/bin/
+swage-plugin-fixture.rs` is a complete process written against it.
+
+```toml
+name = "driver"
+version = "1.0.0"
+description = "Drives a browser it keeps for the session."
+grants = ["tools"]
+
+[process]
+command = "driver"
+args = ["--serve"]
+idle_secs = 600
+
+[[provides.tools]]
+name = "driver_open"
+description = "Open a page in the session's browser."
+parameters = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
+```
+
+A plugin is enabled for the whole install or for one topic (`PUT
+/api/plugins/{name}/enablement`); in a scope that does not enable it the
+plugin serves nothing — a session there does not see its tools, and a turn
+there runs none of its slots or hooks. A package whose tool takes the name
+of a built-in tool is refused when it is installed, and the refusal names
+the tool.
+
+Some of the gateway's own parts are plugins it ships: a package compiled
+into the binary (`shipped/plugins/<name>/`) that the gateway installs at
+startup through the same path an operator's package takes, once per
+shipped version — a newer shipped version installs a new revision, an
+enablement choice already made stands, and a revision you install over a
+shipped one stays the one serving. A shipped plugin is governed,
+presented and invoked exactly as an installed one; its `provenance`
+(`shipped` rather than `installed`, on the plugin and on each revision) is
+the one thing that tells them apart in Settings → Plugins. Two ship now:
+`context-program`, which composes the turn's context on the shipped turn
+graph under its `context` grant, and `succession-summariser`, which fills
+the succession step: it sends the step's request to the model under its
+`model` grant and answers the model's summary.
+
+A plugin that declares `variant_of = "slot.<slot>"` is a candidate for that
+step wherever it is enabled: at the step, the gateway draws between the
+revision's named filler and the candidates through the experimentation
+seam at location `slot.<slot>`, so a topic's `config.toml` can pin an
+installed variant over the shipped part —
+
+```toml
+[experimentation.locations."slot.succession"]
+forced_variant = "my-summariser"
+```
+
+— experimentation off keeps the named filler, and every draw is recorded
+like any other variant decision. A session's recorded choice serves while
+it is still the named filler or a candidate for the scope; a choice that is
+neither — the variant disabled since, the revision's filler changed — gives
+way to the named filler, and the turn's record says why.
+
+```toml
+name = "echo"
+version = "1.0.0"
+description = "Echoes its input."
+script = "plugin.js"
+grants = ["tools"]
+
+[[provides.tools]]
+name = "echo"
+description = "Echo the text back."
+parameters = { type = "object", properties = { text = { type = "string" } }, required = ["text"] }
+```
+
+```js
+swage.provide.tool("echo", async (params, context) => {
+  swage.log(`echoing for session ${context.sessionId}`);
+  return { echoed: params.text };
+});
+```
+
+### The turn graph
+
+The turn pipeline is a versioned graph the gateway's kernel executes. Its
+declaration names the turn's steps in order — `context_program`,
+`succession`, `tool_dispatch`, `curator`, `judge` — and what fills each:
+`builtin` (the kernel's own implementation), `plugin` (an installed plugin
+that provides the slot with `swage.provide.slot(name, handler)`), or
+`workflow` (a saved workflow in the general scope, run with the step's
+input as its arguments and its return value as the step's output). It also
+names the hooks attached — a plugin's `swage.provide.hook(point, handler)`
+at `message_inbound`, `tool_call`, `turn_start` or `turn_end`, in mode
+`observe`, `rewrite` or `veto` — and the branches that shadow a live step:
+a branch runs the same input beside the live step and is only recorded,
+drawn per session through the experimentation location
+`turn_graph.<branch>`, so experimentation off for that location keeps the
+path single.
+
+Revision 0 is the shipped graph: the context-program step filled by the
+shipped `context-program` plugin and the succession step by the shipped
+`succession-summariser` plugin, every other slot the kernel's own. `POST
+/api/turn-graph/revisions` proposes
+a new one: it is validated against what is installed now — known slots,
+each once on the live path and every one present but `succession` (a
+revision without the succession step runs no succession pass, and the
+turn's record says the step was removed), a filler of a kind the slot's kernel point
+runs (`context_program` takes a plugin; `succession` a plugin or a
+workflow; `tool_dispatch`, `curator` and `judge` are the kernel's own
+until their points take one), a plugin that provides the slot, a saved
+workflow by name, a hook mode within what the plugin declares, each
+plugin attached once at a point, a branch of exactly one step from the
+live `succession` step — recorded either way, and activated when it
+validates. A revision that fails validation is recorded as `failed` with
+why, and the revision that served before keeps serving. `GET
+/api/turn-graph` lists the active revision and every one recorded, `GET
+/api/turn-graph/revisions/{n}` one of them, `GET
+/api/turn-graph/diff/{from}/{to}` what changed (a step is the same step
+when its id and slot match; hooks reordered is a change), and `POST
+/api/turn-graph/revisions/{n}/activate` makes an earlier good one serve
+again, re-validated — a refusal there is recorded as a failed revision of
+its own, naming the candidate and why. Settings → Turn graph shows the
+same.
+
+A plugin filling a slot runs in its isolate with the `model` grant's
+`swage.complete({ messages, model?, max_tokens?, temperature? })` answered
+by the gateway's active provider — `{ content, model, input_tokens,
+output_tokens, cost, finish_reason }`, `finish_reason` being `length` when
+the reply was cut at its output limit — and recorded as the plugin's
+completion;
+the succession slot receives the summariser's request as those same fields,
+its completions are the compaction record's summary calls, and a summary
+written from a completion cut at its limit is refused as cut, the turn
+falling back as it does when the kernel's summary is cut. The context-program
+slot receives the turn's elements with their messages in the
+conversation's own shape and answers with messages handed back as given
+or composed afresh as `{ role, content }` text; a message in neither
+shape fails the slot and the kernel's assembly serves. Under the `context`
+grant, `swage.context({ operation })` counts messages (`count_messages`),
+compacts history to a budget (`compact_history`) or runs the configured
+named assembly (`named_assembly`); the operations take messages in the
+same two shapes. What the turn's report records of the slot is the
+gateway's own account: each element as the gateway supplied it, a
+compaction only where the composition carries what the compaction
+answered, and the named assembly's account where the composition carries
+that assembly. A report the plugin returns chooses which supplied elements
+it carried and what it declared left out, and adds its warnings. A hook at
+`tool_call` sees the model's call before the dispatcher's gates, and a
+rewritten call meets them as if the model had raised it — an approval
+asked for is of the rewritten call, and the rewrite is recorded as
+`tool_call_rewritten` against the call the model raised. A plugin's own
+calls through `swage.callTool` are not hooked. A turn takes the active
+revision once at its start, and its assembly report names that revision
+and what served each slot — the filler, or the kernel's own with why the
+filler did not; the succession step's summariser is named as having
+served only on a turn the step ran — and which hooks ran or were
+skipped. The turn's context inspector shows the same under "Turn graph".
+
+```toml
+[[provides.slots]]
+name = "succession"
+
+[[provides.hooks]]
+point = "tool_call"
+mode = "veto"
+```
+
+```js
+swage.provide.slot("succession", async (input) => {
+  const reply = await swage.complete({
+    messages: input.messages,
+    model: input.model,
+    max_tokens: input.max_tokens,
+    temperature: input.temperature,
+  });
+  return { summary: reply.content };
+});
+swage.provide.hook("tool_call", (event) =>
+  event.name === "shell" ? { action: "veto", reason: "no shells here" } : { action: "continue" });
+```

@@ -678,7 +678,8 @@ forced_variant = "family-fallback"
 Restart the gateway after changing either key.
 
 Location ids are application-defined strings. The shipped locations are
-`context.assembly`, `context.working_norms`, `task.prompt`,
+`context.assembly`, `context.working_norms`,
+`context.material_quoting` (how much reference material a turn quotes whole), `task.prompt`,
 `prompts.memory_curator`, and `prompts.succession_summary` (the instruction a
 conversation summary is written under, selected when a session first needs a
 summary).
@@ -740,7 +741,7 @@ which stay out. If the final composition ends up genuinely empty (every
 baseline element was declared omitted and the script added nothing else),
 the assembly also falls back to the default.
 
-The other shipped locations (`context.working_norms`, `task.prompt`,
+The other shipped locations (`context.working_norms`, `context.material_quoting`, `task.prompt`,
 `prompts.memory_curator`, `prompts.succession_summary`) have their alternatives defined in the gateway
 source and cannot be extended through configuration. For
 `context.working_norms` the registered variants are `authored-v1` (the
@@ -1022,6 +1023,23 @@ The whole prior and new objects are kept collapsed beneath each entry.
 The pane also shows variant selections (location, variant, reason, session,
 turn) and assembly decisions.
 
+Two event families record what the gateway paid for and ran. A `tool_call`
+event is written by storage triggers (migration `067_tool_call_audit`) when a
+`tool_calls` row's status is set, carrying the tool, status, arguments, result
+and duration, attributed to the turn's session. A `completion` event is
+written by `RecordingProvider` (`crates/swage-gateway/src/completion_record.rs`),
+which `startup::create_provider` wraps around each model's adapter beneath
+retry and failover, so each attempt is recorded under the model that served it:
+one event per `complete`, `complete_with_tools` or `stream` call, carrying the
+model, `max_tokens`, `finish_reason`, an `outcome` (`cut off at its length
+limit`, `interrupted` for a stream dropped before it ended, `failed`, …),
+tokens, cost and the returned content, reasoning and tool calls, masked of
+registered secret values. Its session and turn come from
+`swage_provider::attribution::COMPLETION_ATTRIBUTION`, which
+`Agent::process_turn_streaming` sets around each turn; a completion made off
+a turn's task has none. The pane shows a `result`, `content`, `tool_calls` or
+`error` field under "What it returned".
+
 ## Turn context inspector
 
 Each assistant message with a `turn_id` shows a "context" button
@@ -1176,6 +1194,27 @@ column of the `messages` table (`TEXT NOT NULL DEFAULT '[]'`). The
 Text-only messages keep the plain string form on the wire; messages with
 image parts use the provider-specific typed content array.
 
+## Reference material
+
+The composer's **Attach files** and **Attach folder** controls give a session
+material to work from. A PNG or JPEG image (chosen, or pasted into the message
+field) goes with the next message as an [image attachment](#image-attachments).
+A text file, and each text file of a chosen folder, is registered at once as
+the session's reference material through `POST /api/materials`, titled by its
+name or, for a folder, by its path within the folder. A folder brings in at
+most 500 files; files in hidden directories, empty files, files over 1 MB and
+files that are not text are skipped, and the composer says how many. The list
+under the message field shows the session's active material, and **Remove**
+archives one.
+
+Each turn's context carries the active material of its session and, inside a
+topic, of that topic: one entry per material with its title, type, size and
+id. A short material (up to 4 KiB, and 16 KiB across all of them) is quoted
+whole beneath its entry. The agent reads any material with `material_read`
+by that id, a part at a time when it is longer than the tool output limit
+(`[tools] max_output_bytes`). Archived material, and material of another
+session or topic, is neither listed nor readable.
+
 ## Provider setup
 
 The gateway starts without a provider/model pair; messaging remains unavailable
@@ -1254,6 +1293,18 @@ A provider entry in `config.toml` has two credential fields
 `api_key_secret_ref` first; if absent, it falls back to `api_key_env`. The
 resolved secret must have `material_kind` `"provider_key"`. OAuth-token
 records are not provider-key secrets.
+
+For credentials sent over `http://` to a non-loopback address,
+`plaintext_credentials` applies to provider requests and model discovery.
+The provider form under **Settings → Providers** exposes the policy as
+**Plaintext credentials**.
+
+- `warn` (the default) records the warning once in the audit trail
+  (`provider_credential_exposure`) and sends the request. If the audit
+  record cannot be written, the gateway logs the warning and still sends
+  the request.
+- `refuse` blocks the request and records the refusal once.
+- `allow` sends the request without a warning.
 
 The built-in Codex app server (`protocol = "codex"`, the gateway spawning
 `codex app-server` and driving it over stdio) is temporarily disabled.
@@ -1807,11 +1858,11 @@ tests), followed by a separate `cargo test --workspace --doc` stage for
 doctests (nextest cannot run doctests). When set to `cargo`, Rust tests run
 under `cargo test --workspace --no-fail-fast`.
 
-Gateway integration tests (`scratch_tempdir` in
-`crates/swage-gateway/tests/integration/support.rs`) and the browser E2E
-launchers (`frontend/e2e/scratch-root.mjs`) create their disposable roots
-under `SWAGE_TEST_SCRATCH_DIR` when it is set, otherwise under the system
-temporary directory.
+`just verify` clears any inherited `SWAGE_HOME`. Gateway test state owns a
+temporary data root, and tests of discovery set their own roots explicitly.
+Gateway integration tests, browser E2E runs and desktop smoke tests create
+disposable browser state under `SWAGE_TEST_SCRATCH_DIR` when it is set.
+Otherwise they use the system temporary directory.
 
 When both tests and projections fail, both errors surface in one message.
 The test suite aggregates Rust, frontend, and desktop-smoke failures rather
@@ -2014,6 +2065,7 @@ two sandbox-eligible tools.
 |---|---|
 | `workflow_run` | `workflow_run.rs` |
 | `workflow_list` | `workflow_list.rs` |
+| `model_list` | `model_list.rs` — the session's model catalogue: ids, aliases, provider model name, vendor family (`ModelFamily` in `swage-context`), and the effort levels each serves unclamped (`served_effort_capability`). |
 | `workflow_save` | `workflow_save.rs` |
 | `workflow_run_account` | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session topic; a run in another topic reads as absent. |
 | `workflow_run_status` | `workflow_run_status.rs` — lists the topic's runs that have not ended, each with its undelivered events (a pipeline's pending hold among them), or reads one named run in any state. Same topic scoping as `workflow_run_account`. |
@@ -2049,6 +2101,7 @@ two sandbox-eligible tools.
 | `agent_memory` | `agent_memory.rs` |
 | `memory` | `memory.rs` — sandbox-eligible; reads and writes the shared memory files of the session's scope — the topic's memory when a topic is selected, the general memory otherwise |
 | `tool_result_read` | `tool_result_read.rs` |
+| `material_read` | `material.rs` — reads an active reference material of the session or its topic by id, in parts past the output limit; see [Reference material](#reference-material) |
 
 ### Delegation
 
@@ -2100,8 +2153,21 @@ does not create files or directories in an attached workspace.
 Paired-device execution still stores artefacts in its working directory at
 `.swage/tool-output/` and reports relative paths.
 
-Plugin tools (`plugin.rs`) are dynamically registered from operator
-configuration; their names come from the plugin manifest.
+Plugin tools come from installed plugins (`crates/swage-plugin`, the kernel;
+`crates/swage-gateway/src/plugin/`, the install records, enablement and the
+`PluginTool` wrapper). A plugin is a package directory with a `plugin.toml`
+manifest and a script; the manifest declares the tools it provides, the host
+grants it needs, the secrets it holds and the function it is a variant of.
+Installing (`POST /api/plugins`, Settings → Plugins) copies the package under
+`<data root>/plugins/<name>/<revision>/`, records the revision, loads the
+script in a V8 isolate of its own and rebuilds the tool dispatcher. A
+plugin's tools register beside the built-ins; a scope that does not enable
+the plugin (`PUT /api/plugins/{name}/enablement`, per install or topic) has
+them withheld at the turn. The script's `swage.callTool` runs through the
+turn's own dispatcher as a nested call, so a plugin's effects meet the same
+permission, approval and audit gates as the model's. A package whose tool
+takes a built-in tool's name (`PROTECTED_NAMES`, or any tool the dispatcher
+registers as built in) is refused at install, the refusal naming the tool.
 
 
 <!-- source: agent-docs/workflow-engine.md -->
@@ -2198,7 +2264,7 @@ override, but `undefined` at the call site falls back to the default.
 
 | Function | Returns | Notes |
 |---|---|---|
-| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Every option is optional: a worker needs no `agent` or `task` definition (model, effort and prompt suffice; `agent` given but empty is refused with `AgentRequiredError`). Accepted options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `timeoutMs`, `cwd`, `isolation`, `schema`, `maxAttempts`, `label`, `phase`, `identity`, `session`, `worker`, `elements`, `variables`, `assembly`; any other key throws `UnknownAgentOptionError` before a worker spawns. `identity` (boolean) preserves the call's identity through fan-in, `phase` (string) groups the call in the journal, and `assembly` (string) selects the context assembly strategy. |
+| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Every option is optional: a worker needs no `agent` or `task` definition (model, effort and prompt suffice; `agent` given but empty is refused with `AgentRequiredError`). Accepted options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `minEffort`, `timeoutMs`, `cwd`, `isolation`, `schema`, `maxAttempts`, `label`, `phase`, `identity`, `session`, `worker`, `elements`, `variables`, `assembly`; any other key throws `UnknownAgentOptionError` before a worker spawns. `identity` (boolean) preserves the call's identity through fan-in, `phase` (string) groups the call in the journal, and `assembly` (string) selects the context assembly strategy. |
 | `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`, and `.workingDirectory` after completion; the latter is the host-resolved child directory, including a provisioned isolated worktree. Accepts the same options as `agent()`. |
 | `session(options?)` | `Promise<HeldWorker>` | Opens a held worker. Creation options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `cwd`, `isolation`, `label`. |
 | `send(worker, prompt, options?)` | `Promise<Value>` | Runs the held worker's next sequential turn. Turn options: `schema`, `maxAttempts`, `timeoutMs`, `label`. |
@@ -2207,9 +2273,9 @@ override, but `undefined` at the call site falls back to the default.
 | `wait({ watches?, timerMs? })` | `Promise<WakeResult>` | Races handle completions against a journalled timer. Returns `{wake: "completion", handle, value/error}` or `{wake: "timer"}`. |
 | `workflow(name, args?)` | `Promise<Value>` | Child workflow call. Only present when `capabilities.composition` is true. |
 | `deliver(payload, options?)` | `Promise<EffectReceipt>` | Delivery effect. Only present when `capabilities.delivery` is true. |
-| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue and resolves to the stored event `{ seq, kind, payload, source }`. `kind` is any namespaced name — two or more non-empty segments joined by `.`, `:`, `/`, `_` or `-` (`worker.report`, `decision.needed`); a bare word such as `escalation` is refused with `RunEventError`. |
+| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue and resolves to the stored event `{ seq, kind, payload, source }`. `kind` is any namespaced name — two or more non-empty segments joined by `.`, `:` or `/`, each made of ASCII letters, digits, `_` and `-` (`worker.report`, `decision.needed`); a bare word such as `escalation` is refused with `RunEventError`, and so is `worker-report`, which is one segment. |
 | `awaitEvent({ kinds })` | `Promise<Value>` | Parks the run until an undelivered event whose `kind` is in `kinds` (each namespaced) arrives, and resolves to the earliest such event in the same `{ seq, kind, payload, source }` shape, marking it delivered. Replay returns the recorded event. |
-| `hold({ content, verdicts })` | `Promise<{ verdict }>` | Parks the run on a decision: `content` is the question, `verdicts` the accepted answers (at least two distinct strings, or the raise is refused). Resolves with the chosen verdict once a person at the run page or an agent holding the `workflow_hold` tool answers; see *Decision holds*. |
+| `hold({ content, verdicts })` | `Promise<{ verdict }>` | Parks the run on a decision: `content` is the question, `verdicts` the accepted answers (at least two distinct strings, or the raise is refused). Resolves with the chosen verdict once an agent holding the `workflow_hold` tool answers; see *Decision holds*. |
 | `gate(options?)` | `Promise<Value>` | Wake-gate evaluation. Options: `criteria` (string), `model` (optional override). |
 | `deliverEvents(upToSeq)` | `Promise<Value>` | Stamps pending events as delivered up to a sequence number. |
 | `parallel(thunks)` | `Promise<Array>` | `Promise.all` with per-thunk worker-failure swallowing (a failed worker collapses its slot to `null`). A pre-spawn author error propagates and fails the run. |
@@ -2231,6 +2297,35 @@ result records `served_model`, the catalogue model that actually served the
 call. Continuation calls ignore `fallbackModel` and never make a fallback
 attempt; they use the worker's persisted model selection, including a fallback
 selected at creation.
+
+### Effort floor
+
+`agent()` and `agentStart()` accept `minEffort`, the least effort the call
+accepts being served at, in the `effort` vocabulary. `session()` and `send()`
+do not take it. Before the call's worker exists, `refuse_below_effort_floor`
+(`crates/swage-gateway/src/workflow.rs`) resolves the call's effort against
+the model it would run on and fails the call with `EffortFloorError`, naming
+the shortfall, in three cases: the requested level clamps to one below the
+floor, the call sets no effort and its model's catalogue entry has no
+`default_effort`, or the model declares no effort control. The refusal is
+journalled with the call and no provider request is made. A call served by
+its declared `fallbackModel` is not checked against the floor.
+
+The clamp is `resolve_effort`'s (`crates/swage-core/src/effort.rs`): a level
+the model lacks becomes the nearest supported level below it, or the lowest
+supported level when none is below it. `off` is never that level. It is
+served only to a call that requests `off`, on a model that can switch
+reasoning off; requested of a model that cannot, it clamps to the model's
+lowest level.
+
+A script's author reads the catalogue with the `model_list` tool
+(`crates/swage-gateway/src/tool/model_list.rs`). It returns each model's
+`id`, `aliases`, provider `model` name and vendor `family`, with
+`effort_levels`, the levels the model serves as asked, lowest first and
+including `off` where the model can switch reasoning off. Its `default` is
+the id a call runs on when neither the call nor the script's `defaults`
+header gives a `model`, an `agent` or a `task`. The ids it lists are the ones
+`model` and `fallbackModel` accept.
 
 ### Structured output extraction
 
@@ -2568,10 +2663,10 @@ relaunches them by replay.
 `postEvent(kind, payload)` appends to the run's durable pending-event
 queue and resolves to the stored event `{ seq, kind, payload, source }`.
 `kind` is any namespaced name: two or more non-empty segments joined by
-`.`, `:`, `/`, `_` or `-`, drawn from letters, digits and those
-separators — `worker.report`, `decision.needed`, `device.reply`. A bare
-word (`escalation`, `completion`) is refused with `RunEventError`, as is
-an empty or malformed name. Events are journalled (exactly-once under
+`.`, `:` or `/`, each segment made of ASCII letters, digits, `_` and `-` —
+`worker.report`, `decision.needed`, `device.reply`. A bare word
+(`escalation`, `completion`) is refused with `RunEventError`, as is
+`worker-report`, which is one segment, and an empty or malformed name. Events are journalled (exactly-once under
 replay) and assigned a monotonic `seq`. Each event record links to its
 journal entry via `journal_entry_id`. The same validation applies to an
 event posted from outside the run through the `run_event_post` tool.
@@ -2592,9 +2687,9 @@ run must wait on is a hold (below), which validates the answer.
 `hold({ content, verdicts })` parks the run on a decision. The script names
 the question and the verdicts it accepts — at least two distinct strings; a
 hold with fewer is refused at raise and never reaches a decider. The hold is
-registered on the run: the run page lists it, and an agent granted the
-`workflow_hold` tool lists the open holds in its topic (`action: "list"`)
-and answers one (`action: "answer"` with the `hold_id` and a `verdict` from
+registered on the run: the run page shows it and takes no answer, and an
+agent granted the `workflow_hold` tool lists the open holds in its topic
+(`action: "list"`) and answers one (`action: "answer"` with the `hold_id` and a `verdict` from
 the set), the answering session recorded; the script names no decider. An
 answer outside the set is refused with feedback and the hold keeps waiting.
 The run resumes with `{ verdict }`; cancelling the run releases its holds.

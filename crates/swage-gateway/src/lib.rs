@@ -41,6 +41,7 @@
 //! in `Processing` state by a previous unclean exit as `Interrupted`.
 
 pub mod access_gate;
+pub mod answer_masking;
 pub mod approval_scope;
 pub mod assets;
 pub mod attachment;
@@ -49,13 +50,14 @@ pub mod automated_turn;
 pub mod background_loop;
 pub mod browser;
 pub mod capabilities;
-pub mod capability_bundle;
 pub mod channel_gateway;
 pub mod cli;
 pub mod codex;
+pub mod completion_record;
 pub mod config_change;
 pub mod context;
 pub mod device;
+pub mod egress;
 pub mod error;
 pub mod experimentation;
 #[cfg(feature = "test-fixtures")]
@@ -69,10 +71,12 @@ pub mod memory;
 pub mod memory_curation;
 pub mod onboarding;
 pub mod operator;
+pub mod plugin;
 pub mod presence;
 pub mod provider_credential_exposure;
 pub mod recent_sessions;
 pub mod record_durability;
+pub mod request_judge;
 pub mod schedule;
 pub mod secret;
 pub mod security_settings;
@@ -81,6 +85,7 @@ pub mod service;
 pub mod session_archive;
 pub mod settings;
 pub mod shipped_docs;
+mod shipped_plugins;
 mod shipped_skill_projection;
 mod shipped_skills;
 pub mod shutdown;
@@ -96,6 +101,7 @@ pub mod thread_selection;
 pub mod tool;
 pub mod tool_executor;
 pub mod turn;
+pub mod turn_graph;
 pub mod turn_queue;
 pub mod voice;
 pub mod websocket;
@@ -410,3 +416,6 @@ pub(crate) mod test_support {
         }
     }
 }
+
+pub mod git_credential;
+pub mod git_signer;

@@ -631,6 +631,7 @@ async fn run_turn_inner(
                     turn_id: Some(request.turn_id),
                     role: Role::Assistant,
                     origin: swage_storage::MessageOrigin::Assistant,
+                    delivered: false,
                     content: response_text.clone(),
                     agent_id: request.agent_id.clone(),
                 })
@@ -675,6 +676,7 @@ async fn run_turn_inner(
             turn_id: Some(request.turn_id),
             role: Role::Assistant,
             origin: swage_storage::MessageOrigin::Assistant,
+            delivered: false,
             content: response_text.clone(),
             agent_id: request.agent_id.clone(),
         })
@@ -858,7 +860,6 @@ async fn handle_tool_call(
             call_id: call_id.clone(),
             tool: tool.clone(),
             arguments: arguments.to_string(),
-            model_arguments: arguments.to_string(),
             result: Some(result_json.to_string()),
             model_result: Some(result_json.to_string()),
             status: Some(status.to_string()),
@@ -1950,6 +1951,8 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
+        // Boxed: the turn's future carries the dispatcher build, which has
+        // grown past the stack budget clippy holds async blocks to.
         let (result, _, _, _) = Box::pin(run_scripted_turn_with_audit_failure(
             scenario,
             dispatcher,

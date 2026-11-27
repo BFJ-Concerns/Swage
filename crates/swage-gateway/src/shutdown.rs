@@ -613,6 +613,7 @@ async fn resume_delegating_parent(
         .enqueue_delegation_continuation(
             parent.id,
             NewQueuedTurnInput {
+                requested_model: None,
                 delivery_targets,
                 client_id: None,
                 attended,
@@ -954,7 +955,6 @@ mod tests {
                     call_id: turn.id.to_string(),
                     tool: "echo".into(),
                     arguments: "{}".into(),
-                    model_arguments: "{}".into(),
                     result: None,
                     model_result: None,
                     status: None,
@@ -1329,6 +1329,7 @@ mod tests {
         for (origin, attended, delivery_targets) in inputs {
             storage
                 .enqueue_turn_input(NewQueuedTurnInput {
+                    requested_model: None,
                     delivery_targets: delivery_targets.clone(),
                     client_id: None,
                     attended: *attended,
@@ -1422,7 +1423,6 @@ mod tests {
                 call_id: format!("call-{agent}"),
                 tool: "delegate".to_string(),
                 arguments: "{}".to_string(),
-                model_arguments: "{}".to_string(),
                 execution: Some(swage_protocol::client::conversation::ToolExecution::succeeded()),
                 result: Some("the child's result".to_string()),
                 model_result: Some("the child's result".to_string()),
@@ -1501,6 +1501,7 @@ mod tests {
         ] {
             storage
                 .enqueue_turn_input(NewQueuedTurnInput {
+                    requested_model: None,
                     delivery_targets,
                     client_id: None,
                     attended: false,
@@ -1595,6 +1596,7 @@ mod tests {
             .unwrap();
         let rows = storage.list_pending_channel_messages().await.unwrap();
         let input = NewQueuedTurnInput {
+            requested_model: None,
             delivery_targets: Vec::new(),
             client_id: None,
             attended: false,
@@ -1802,6 +1804,7 @@ mod tests {
                             turn_id: Some(parent.id),
                             role: Role::User,
                             origin: MessageOrigin::Delegation,
+                            delivered: false,
                             content: "A detached child's result.".into(),
                             attachments: Vec::new(),
                             agent_id: "lead".into(),
@@ -1962,7 +1965,6 @@ mod tests {
                     call_id: "call-scout".to_string(),
                     tool: "delegate".to_string(),
                     arguments: "{}".to_string(),
-                    model_arguments: "{}".to_string(),
                     result: None,
                     model_result: None,
                     status: None,
@@ -2160,6 +2162,7 @@ mod tests {
                 turn_id: Some(parent.id),
                 role: Role::User,
                 origin: MessageOrigin::Delegation,
+                delivered: false,
                 content: "Delegated agent scout completed:\nearlier".to_string(),
                 attachments: Vec::new(),
                 agent_id: "lead".to_string(),
@@ -2233,6 +2236,7 @@ mod tests {
                 turn_id: Some(child.id),
                 role: Role::User,
                 origin: MessageOrigin::Platform,
+                delivered: false,
                 content: "Response incomplete: output token limit reached (max_tokens)."
                     .to_string(),
                 attachments: Vec::new(),
@@ -2304,6 +2308,7 @@ mod tests {
                 turn_id: Some(parent.id),
                 role: Role::User,
                 origin: MessageOrigin::User,
+                delivered: false,
                 content: "an API call's input".to_string(),
                 attachments: Vec::new(),
                 agent_id: "lead".to_string(),
@@ -2370,6 +2375,7 @@ mod tests {
                 turn_id: Some(parent.id),
                 role: Role::User,
                 origin: swage_storage::MessageOrigin::Schedule,
+                delivered: false,
                 content: "the schedule's brief".to_string(),
                 attachments: Vec::new(),
                 agent_id: "lead".to_string(),

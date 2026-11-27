@@ -6,6 +6,7 @@
 
 // Concrete providers
 pub mod anthropic;
+pub mod attribution;
 pub mod credential_transport;
 pub mod google;
 pub mod http;
@@ -36,3 +37,21 @@ pub use voice::{
     TranscriptionResponse, UnsupportedVoiceProvider, VoiceCapabilities, VoiceModelRoutes,
     VoiceProvider,
 };
+
+/// Effort control documented by the completion adapter for this model.
+/// Codex declares its capabilities through its own runtime.
+pub fn documented_effort_capability(
+    protocol: &swage_config::Protocol,
+    model: &str,
+) -> Option<swage_core::EffortCapability> {
+    use swage_config::Protocol;
+
+    match protocol {
+        Protocol::Anthropic => anthropic::model_effort_capability(model),
+        Protocol::OpenAi | Protocol::OpenAiResponses | Protocol::OpenRouter => {
+            openai::model_effort_capability(model)
+        }
+        Protocol::Google => google::google_effort_capability(model),
+        Protocol::Codex => None,
+    }
+}

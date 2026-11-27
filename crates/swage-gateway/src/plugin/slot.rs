@@ -1,0 +1,1820 @@
+//! A plugin filling a turn slot or attached at a hook point, as the gateway
+//! runs it.
+//!
+//! A slot filler is a plugin's `swage.provide.slot(name, handler)`, invoked
+//! with the step's input and answering with the step's output; a hook is
+//! its `swage.provide.hook(point, handler)`, invoked with the event and
+//! answering with an action. Both run in the plugin's isolate under a host
+//! of their own: a slot runs before the session's tools are built, so its
+//! host answers no tool calls, but it answers `complete` through the
+//! gateway's active provider — recorded as the plugin's completion — and
+//! writes to the log. A hook's action is read against the mode its
+//! attachment declares: a rewrite from an observer is a warning, not a
+//! rewrite, and a rewritten tool call still meets the dispatcher's gates.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use swage_context::element::ContextElement;
+use swage_context::report::AssemblyOutput;
+use swage_context::succession::SuccessionError;
+use swage_context::tokeniser::Tokeniser;
+use swage_core::{ChatMessage, CompletionRequest, Role};
+use swage_plugin::{HostCallFailure, InvocationContext, PluginError, PluginHost, PluginRuntime};
+use swage_protocol::client::context::{SuccessionCall, SuccessionStage};
+use swage_protocol::client::turn_graph::{HookAttachment, HookMode, HookPoint, TurnGraph};
+use swage_storage::model::NewAuditEvent;
+use swage_tool::context::ToolContext;
+use swage_tool::dispatch::{CallHookDecision, ToolCallHook};
+use uuid::Uuid;
+
+use crate::state::AppState;
+
+/// Ask the gateway's active provider for a completion on a plugin's
+/// behalf and record it as the plugin's: `request` is
+/// `{ messages: [{ role, content }], model?, max_tokens?, temperature? }`.
+pub async fn complete_via_provider(
+    state: &AppState,
+    plugin: &str,
+    session_id: Option<Uuid>,
+    request: Value,
+) -> Result<Value, HostCallFailure> {
+    let messages = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| HostCallFailure {
+            name: "TypeError".into(),
+            message: "complete takes { messages: [{ role, content }], model?, max_tokens?, temperature? }".into(),
+        })?
+        .iter()
+        .map(|message| {
+            let role = match message.get("role").and_then(Value::as_str) {
+                Some("system") => Role::System,
+                Some("user") => Role::User,
+                Some("assistant") => Role::Assistant,
+                other => {
+                    return Err(HostCallFailure {
+                        name: "TypeError".into(),
+                        message: format!(
+                            "a message's role must be system, user or assistant, not {other:?}"
+                        ),
+                    });
+                }
+            };
+            let content = message
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            Ok(ChatMessage::new(role, content))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let max_tokens = request
+        .get("max_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|limit| u32::try_from(limit).ok());
+    let temperature = request.get("temperature").and_then(Value::as_f64);
+    let completion = CompletionRequest {
+        messages,
+        model: model.clone(),
+        effort: None,
+        max_tokens,
+        temperature,
+        stop_sequences: None,
+        metadata: None,
+        tool_definitions: Vec::new(),
+    };
+    let provider = state.active_provider();
+    let answered_by = model
+        .clone()
+        .unwrap_or_else(|| provider.model_id().to_owned());
+    let response = provider
+        .complete(completion)
+        .await
+        .map_err(|error| HostCallFailure {
+            name: "ProviderError".into(),
+            message: error.to_string(),
+        })?;
+    if let Err(error) = state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id,
+            entity_kind: "plugin".to_owned(),
+            entity_id: plugin.to_owned(),
+            event_kind: "plugin_completion".to_owned(),
+            summary: format!("Plugin {plugin} asked the model for a completion"),
+            metadata: json!({
+                "model": model,
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+            }),
+        })
+        .await
+    {
+        tracing::warn!(plugin, %error, "plugin completion could not be recorded");
+    }
+    Ok(json!({
+        "content": response.content,
+        "model": answered_by,
+        "input_tokens": response.input_tokens,
+        "output_tokens": response.output_tokens,
+        "cost": response.cost,
+        "finish_reason": response.finish_reason,
+    }))
+}
+
+/// A slot's host that keeps each completion it answers, for the step to
+/// record as its own calls.
+struct CompletionRecorder {
+    inner: Arc<dyn PluginHost>,
+    completions: std::sync::Mutex<Vec<Value>>,
+}
+
+#[async_trait]
+impl PluginHost for CompletionRecorder {
+    async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, HostCallFailure> {
+        self.inner.call_tool(name, arguments).await
+    }
+
+    async fn complete(&self, request: Value) -> Result<Value, HostCallFailure> {
+        let reply = self.inner.complete(request).await;
+        if let Ok(reply) = &reply {
+            self.completions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(reply.clone());
+        }
+        reply
+    }
+
+    async fn context(&self, request: Value) -> Result<Value, HostCallFailure> {
+        self.inner.context(request).await
+    }
+
+    fn log(&self, message: &str) {
+        self.inner.log(message);
+    }
+}
+
+/// A completion a summariser made, as the succession record's call: one
+/// cut at its output limit is the pass's failure, as the kernel's is.
+fn summary_call(reply: &Value) -> SuccessionCall {
+    let tokens = |key: &str| {
+        reply
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|count| u32::try_from(count).ok())
+            .unwrap_or(0)
+    };
+    SuccessionCall {
+        stage: SuccessionStage::Summary,
+        model: reply
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        input_tokens: tokens("input_tokens"),
+        output_tokens: tokens("output_tokens"),
+        cost: reply.get("cost").and_then(Value::as_f64),
+        report: None,
+        failure_reason: (reply.get("finish_reason").and_then(Value::as_str) == Some("length"))
+            .then(|| SuccessionError::SummaryCut.to_string()),
+    }
+}
+
+/// The host a slot or hook runs under: the log, the model under the
+/// plugin's grant, and no session tools — a slot runs before they exist.
+pub struct SlotHost {
+    plugin: String,
+    state: AppState,
+    session_id: Option<Uuid>,
+}
+
+impl SlotHost {
+    pub fn new(plugin: String, state: AppState, session_id: Option<Uuid>) -> Self {
+        Self {
+            plugin,
+            state,
+            session_id,
+        }
+    }
+}
+
+#[async_trait]
+impl PluginHost for SlotHost {
+    async fn call_tool(&self, name: &str, _: Value) -> Result<Value, HostCallFailure> {
+        Err(HostCallFailure {
+            name: "HostCapabilityError".into(),
+            message: format!(
+                "'{name}': a slot or hook runs before the session's tools are built and calls none"
+            ),
+        })
+    }
+
+    async fn complete(&self, request: Value) -> Result<Value, HostCallFailure> {
+        complete_via_provider(&self.state, &self.plugin, self.session_id, request).await
+    }
+
+    fn log(&self, message: &str) {
+        tracing::info!(plugin = %self.plugin, "{message}");
+    }
+}
+
+/// A plugin's isolate as a slot filler or hook, for one turn.
+#[derive(Clone)]
+pub struct PluginSlot {
+    pub plugin: String,
+    pub(super) runtime: Arc<PluginRuntime>,
+    pub(super) host: Arc<dyn PluginHost>,
+    pub(super) context: InvocationContext,
+    /// Who records a termination of the isolate while it serves: given
+    /// what it was serving and the reason.
+    terminations: Option<TerminationRecorder>,
+}
+
+/// Records that a slot's isolate was terminated: what it was serving, and
+/// why.
+pub type TerminationRecorder = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// What a hook decided about an event.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HookAction {
+    Continue,
+    Rewrite(Value),
+    Veto(String),
+}
+
+impl PluginSlot {
+    pub fn new(
+        plugin: String,
+        runtime: Arc<PluginRuntime>,
+        host: Arc<dyn PluginHost>,
+        context: InvocationContext,
+    ) -> Self {
+        Self {
+            plugin,
+            runtime,
+            host,
+            context,
+            terminations: None,
+        }
+    }
+
+    /// This slot, with each termination of its isolate recorded by
+    /// `recorder`.
+    pub fn recording_terminations(mut self, recorder: TerminationRecorder) -> Self {
+        self.terminations = Some(recorder);
+        self
+    }
+
+    /// Note a failure of the isolate serving `serving`: a termination is
+    /// recorded; any other failure is the caller's to report.
+    pub(super) fn note_failure(&self, serving: &str, error: &PluginError) {
+        if let (PluginError::Terminated(termination), Some(record)) = (error, &self.terminations) {
+            record(serving, termination.reason());
+        }
+    }
+
+    /// The succession slot: the summariser's request — the completion the
+    /// provider would get, as `{ messages, model, max_tokens, temperature }`
+    /// — goes to the plugin, which answers `{ summary }`. Each completion
+    /// the plugin asks for is appended to `calls`, and a summary written
+    /// while one was cut at its output limit is refused as cut.
+    pub async fn summarise(
+        &self,
+        completion: CompletionRequest,
+        calls: &mut Vec<SuccessionCall>,
+    ) -> Result<String, SuccessionError> {
+        let input = json!({
+            "messages": completion
+                .messages
+                .iter()
+                .map(|message| json!({ "role": role_name(message.role()), "content": message.text_content() }))
+                .collect::<Vec<_>>(),
+            "model": completion.model,
+            "max_tokens": completion.max_tokens,
+            "temperature": completion.temperature,
+        });
+        let recorder = Arc::new(CompletionRecorder {
+            inner: Arc::clone(&self.host),
+            completions: std::sync::Mutex::new(Vec::new()),
+        });
+        let output = self
+            .runtime
+            .invoke_slot(
+                "succession",
+                &input,
+                &self.context,
+                Arc::clone(&recorder) as Arc<dyn PluginHost>,
+            )
+            .await;
+        let made: Vec<SuccessionCall> = recorder
+            .completions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(summary_call)
+            .collect();
+        let cut = made.iter().any(|call| call.failure_reason.is_some());
+        calls.extend(made);
+        let output = output.map_err(|error| {
+            self.note_failure("the succession slot", &error);
+            SuccessionError::Summariser(format!("{}: {error}", self.plugin))
+        })?;
+        // Notes cut at the output limit stop mid-account, and nothing in
+        // them says so: they are not handed on as though they were whole.
+        if cut {
+            return Err(SuccessionError::SummaryCut);
+        }
+        output
+            .get("summary")
+            .and_then(Value::as_str)
+            .filter(|summary| !summary.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                SuccessionError::Summariser(format!(
+                    "{}: the slot answered without a summary",
+                    self.plugin
+                ))
+            })
+    }
+
+    /// The context-program slot: the turn's elements go to the plugin as
+    /// `{ elements: [{ name, messages }], variables }`, each message in the
+    /// conversation's own shape (`role`, `content` parts, a tool result's
+    /// `tool_call_id`, an assistant turn's `tool_calls`), and it answers
+    /// `{ messages }` — each a message handed back as given, or a fresh
+    /// `{ role: system | user | assistant, content: text }`. A message in
+    /// neither shape, or a `tool` message without its call, is the slot's
+    /// failure, never a silent recast. Elements also carry priority, rendered
+    /// messages and safe report metadata. Under the context grant the plugin
+    /// can count tokens, compact history or run the configured named assembly;
+    /// those operations take messages in the same shapes as the answer.
+    ///
+    /// The report is the host's: a composition carrying the named assembly is
+    /// reported as that assembly; otherwise each element is reported as the
+    /// host supplied it, and a history compaction is recorded, and the
+    /// element it was asked of carries the compacted text, only when the
+    /// composition carries what the compaction answered in place of what it
+    /// was given. A plugin's own
+    /// report selects which supplied elements it carried and what it
+    /// declared left out (an element it was not supplied is dropped), and
+    /// adds its warnings and errors. Token totals, remaining budget and
+    /// elapsed duration are host-computed.
+    ///
+    /// The assembly runs on the turn's thread synchronously, so the isolate
+    /// is awaited from here through `block_in_place`, which the
+    /// multi-thread runtime the gateway runs on allows; on a
+    /// current-thread runtime the slot cannot run and says so, so the
+    /// kernel's assembly serves there rather than a panic.
+    pub fn context_program(
+        &self,
+        elements: &[Box<dyn ContextElement>],
+        variables: &std::collections::BTreeMap<String, String>,
+        tokeniser: &dyn Tokeniser,
+        assembly_name: &str,
+        config: &swage_config::model::ContextConfig,
+        named_assembly: impl FnOnce() -> AssemblyOutput,
+    ) -> Result<AssemblyOutput, String> {
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| format!("{}: no async runtime to run the slot on", self.plugin))?;
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            return Err(format!(
+                "{}: the context-program slot needs the multi-thread runtime",
+                self.plugin
+            ));
+        }
+        let started = std::time::Instant::now();
+        let descriptors = elements
+            .iter()
+            .map(|element| {
+                let messages = swage_context::js_assembly::rendered_content(&**element, variables);
+                let source = element.source();
+                let report = swage_context::report::ElementReport {
+                    name: element.name().to_owned(),
+                    source: source.clone(),
+                    priority: element.priority(),
+                    token_count: if element.renders_session_values() {
+                        tokeniser.count_messages(&messages)
+                    } else {
+                        element.token_count(tokeniser)
+                    },
+                    preview: element.report_preview().or_else(|| {
+                        swage_context::assembly::safe_metadata_preview(element.name(), &source)
+                    }),
+                    full_text: Some(message_text(&messages)),
+                    named_assembly: None,
+                };
+                swage_protocol::plugin::ContextProgramElement {
+                    name: element.name().to_owned(),
+                    priority: element.priority(),
+                    messages: element
+                        .content()
+                        .iter()
+                        .map(|message| serde_json::to_value(message).expect("message"))
+                        .collect(),
+                    rendered_messages: messages
+                        .iter()
+                        .map(|message| serde_json::to_value(message).expect("message"))
+                        .collect(),
+                    report,
+                }
+            })
+            .collect::<Vec<_>>();
+        let input = serde_json::to_value(swage_protocol::plugin::ContextProgramInput {
+            elements: descriptors.clone(),
+            variables: variables.clone(),
+            assembly_name: assembly_name.to_owned(),
+            budget: config.budget,
+        })
+        .expect("context input");
+        let (output, work) = tokio::task::block_in_place(|| {
+            handle.block_on(super::composition::compose(
+                self,
+                input,
+                tokeniser,
+                named_assembly,
+                !crate::turn::is_default_context_assembly(assembly_name),
+            ))
+        })?;
+        let output: swage_protocol::plugin::ContextProgramOutput = serde_json::from_value(output)
+            .map_err(|error| {
+            format!("{}: invalid context composition: {error}", self.plugin)
+        })?;
+        let messages = output
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                composed_message(message).map_err(|reason| {
+                    format!(
+                        "{}: message {index} of the composition {reason}",
+                        self.plugin
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if messages.is_empty() {
+            return Err(format!("{}: the slot composed no messages", self.plugin));
+        }
+        let composed = message_values(&messages);
+        // The report is built from what the host supplied and did: a
+        // plugin's account names which supplied elements it carried and what
+        // it declared left out, and nothing it claims about where an element
+        // came from, what it held or what was compacted stands.
+        let mut report = swage_context::report::AssemblyReport::new(assembly_name);
+        // A composition that carries the named assembly the host ran is
+        // that assembly's account — the assembly that actually served, its
+        // compactions included.
+        if let Some(named) = work.named
+            && contains_run(&composed, &message_values(&named.messages))
+        {
+            report = named.report;
+        } else {
+            let mut supplied: Vec<_> = descriptors
+                .into_iter()
+                .map(|element| (element.report, element.rendered_messages))
+                .collect();
+            // A history compaction is applied when the composition carries
+            // what it answered in place of what it was given; the element it
+            // was asked of then carries the compacted text.
+            for compaction in &work.compactions {
+                let input = message_values(&compaction.input);
+                let output = message_values(&compaction.output);
+                if !contains_run(&composed, &output)
+                    || (input != output && contains_run(&composed, &input))
+                {
+                    continue;
+                }
+                if let Some((element, _)) =
+                    supplied.iter_mut().find(|(_, rendered)| *rendered == input)
+                {
+                    element.token_count = tokeniser.count_messages(&compaction.output);
+                    element.full_text = Some(message_text(&compaction.output));
+                }
+                report.compaction_applied.push(compaction.record.clone());
+            }
+            let supplied: Vec<_> = supplied.into_iter().map(|(element, _)| element).collect();
+            match output.report {
+                Some(account) => {
+                    report.elements = account
+                        .elements
+                        .iter()
+                        .filter_map(|claimed| {
+                            supplied
+                                .iter()
+                                .find(|element| element.name == claimed.name)
+                                .cloned()
+                        })
+                        .collect();
+                    report.declared_omissions = account
+                        .declared_omissions
+                        .into_iter()
+                        .filter(|omission| {
+                            supplied
+                                .iter()
+                                .any(|element| element.name == omission.element)
+                        })
+                        .collect();
+                    report.warnings = account.warnings;
+                    report.errors = account.errors;
+                }
+                None => report.elements = supplied,
+            }
+        }
+        report.budget = config.budget;
+        report.total_tokens = tokeniser.count_messages(&messages);
+        report.budget_remaining = report
+            .budget
+            .map(|budget| budget as isize - report.total_tokens as isize);
+        report.duration = started.elapsed();
+        AssemblyOutput::new(messages, report)
+    }
+
+    /// A hook over `event` at `point`, read against the attachment's `mode`:
+    /// an action the mode does not allow is a warning and a `Continue`.
+    pub async fn hook(&self, point: &str, mode: HookMode, event: Value) -> HookAction {
+        let answer = match self
+            .runtime
+            .invoke_hook(point, &event, &self.context, Arc::clone(&self.host))
+            .await
+        {
+            Ok(answer) => answer,
+            Err(error) => {
+                self.note_failure(&format!("the {point} hook"), &error);
+                tracing::warn!(plugin = %self.plugin, point, %error, "plugin hook failed; the event continues");
+                return HookAction::Continue;
+            }
+        };
+        match answer.get("action").and_then(Value::as_str) {
+            Some("rewrite") if matches!(mode, HookMode::Rewrite | HookMode::Veto) => answer
+                .get("event")
+                .cloned()
+                .map(HookAction::Rewrite)
+                .unwrap_or_else(|| {
+                    tracing::warn!(plugin = %self.plugin, point, "plugin hook rewrote without an event; the event continues");
+                    HookAction::Continue
+                }),
+            Some("veto") if matches!(mode, HookMode::Veto) => HookAction::Veto(
+                answer
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("vetoed")
+                    .to_owned(),
+            ),
+            Some("continue") | None => HookAction::Continue,
+            Some(other) => {
+                tracing::warn!(plugin = %self.plugin, point, action = other, "plugin hook's action is beyond its mode; the event continues");
+                HookAction::Continue
+            }
+        }
+    }
+}
+
+/// Messages as the JSON the plugin saw and answered with, for comparing a
+/// composition with what the host supplied.
+fn message_values(messages: &[ChatMessage]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|message| serde_json::to_value(message).expect("message"))
+        .collect()
+}
+
+/// An element's messages as the inspector shows its text.
+fn message_text(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Whether `run` appears in `messages` as one unbroken stretch.
+fn contains_run(messages: &[Value], run: &[Value]) -> bool {
+    run.is_empty() || messages.windows(run.len()).any(|window| window == run)
+}
+
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+/// A message of a plugin's composition: one of the conversation's own
+/// handed back whole, or a fresh text message under a conversational role.
+pub(super) fn composed_message(message: &Value) -> Result<ChatMessage, String> {
+    if let Ok(whole) = serde_json::from_value::<ChatMessage>(message.clone()) {
+        return Ok(whole);
+    }
+    let role = match message.get("role").and_then(Value::as_str) {
+        Some("system") => Role::System,
+        Some("user") => Role::User,
+        Some("assistant") => Role::Assistant,
+        Some("tool") => {
+            return Err(
+                "is a tool result without its call: a tool message is handed back as given, never composed afresh"
+                    .into(),
+            );
+        }
+        other => return Err(format!("has no conversational role: {other:?}")),
+    };
+    let content = message
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "has no text content".to_owned())?;
+    Ok(ChatMessage::new(role, content))
+}
+
+/// Who records what a `tool_call` hook rewrote: the audit trail, keyed to
+/// the call the model raised, so the call record (the model's call, with
+/// the result of what ran) and this event together reconstruct the turn.
+pub type RewriteRecorder = Arc<dyn Fn(RewrittenCall) + Send + Sync>;
+
+/// A tool call as the model raised it and as a hook left it.
+#[derive(Debug, Clone)]
+pub struct RewrittenCall {
+    pub call_id: Option<String>,
+    pub plugin: String,
+    pub from_name: String,
+    pub from_arguments: Value,
+    pub to_name: String,
+    pub to_arguments: Value,
+}
+
+/// The plugin hooks attached at `tool_call`, in the revision's order, as
+/// the dispatcher's call hook: each sees the call as the one before left it,
+/// and each rewrite is recorded with the plugin that made it.
+pub struct PluginCallHook {
+    hooks: Vec<(HookMode, PluginSlot)>,
+    recorder: Option<RewriteRecorder>,
+}
+
+impl PluginCallHook {
+    pub fn new(hooks: Vec<(HookMode, PluginSlot)>, recorder: Option<RewriteRecorder>) -> Self {
+        Self { hooks, recorder }
+    }
+}
+
+#[async_trait]
+impl ToolCallHook for PluginCallHook {
+    async fn before_dispatch(
+        &self,
+        tool_name: &str,
+        params: Value,
+        ctx: &dyn ToolContext,
+    ) -> CallHookDecision {
+        let mut name = tool_name.to_owned();
+        let mut params = params;
+        for (mode, slot) in &self.hooks {
+            match slot
+                .hook(
+                    "tool_call",
+                    *mode,
+                    json!({ "name": name, "arguments": params }),
+                )
+                .await
+            {
+                HookAction::Continue => {}
+                HookAction::Rewrite(event) => {
+                    let to_name = event
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map_or_else(|| name.clone(), str::to_owned);
+                    let to_arguments = event.get("arguments").cloned().unwrap_or(json!({}));
+                    if let Some(record) = &self.recorder {
+                        record(RewrittenCall {
+                            call_id: ctx.call_id().map(str::to_owned),
+                            plugin: slot.plugin.clone(),
+                            from_name: name.clone(),
+                            from_arguments: params.clone(),
+                            to_name: to_name.clone(),
+                            to_arguments: to_arguments.clone(),
+                        });
+                    }
+                    name = to_name;
+                    params = to_arguments;
+                }
+                HookAction::Veto(reason) => {
+                    return CallHookDecision::Veto(format!("{}: {reason}", slot.plugin));
+                }
+            }
+        }
+        if name == tool_name {
+            CallHookDecision::Continue(params)
+        } else {
+            CallHookDecision::Rewrite { name, params }
+        }
+    }
+}
+
+/// A rewrite recorder writing `tool_call_rewritten` to the audit trail
+/// under `session_id`.
+pub fn audit_rewrite_recorder(state: AppState, session_id: Option<Uuid>) -> RewriteRecorder {
+    Arc::new(move |rewrite: RewrittenCall| {
+        let storage = state.storage.clone();
+        tokio::spawn(async move {
+            if let Err(error) = storage
+                .create_audit_event(NewAuditEvent {
+                    id: Uuid::new_v4().to_string(),
+                    session_id,
+                    entity_kind: "plugin".to_owned(),
+                    entity_id: rewrite.plugin.clone(),
+                    event_kind: "tool_call_rewritten".to_owned(),
+                    summary: format!(
+                        "Plugin {} rewrote the tool call {} to {}",
+                        rewrite.plugin, rewrite.from_name, rewrite.to_name
+                    ),
+                    metadata: json!({
+                        "call_id": rewrite.call_id,
+                        "from": { "name": rewrite.from_name, "arguments": rewrite.from_arguments },
+                        "to": { "name": rewrite.to_name, "arguments": rewrite.to_arguments },
+                    }),
+                })
+                .await
+            {
+                tracing::warn!(%error, "a hook's rewrite of a tool call could not be recorded");
+            }
+        });
+    })
+}
+
+/// What the `message_inbound` hooks left: the content, and the plugins
+/// whose rewrite changed it, in order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboundOutcome {
+    pub content: String,
+    pub rewritten_by: Vec<String>,
+}
+
+/// The plugin hooks attached at `message_inbound` over the raw content, in
+/// order; a rewrite is the content the next sees, a veto refuses it. An
+/// observer, and a handler that failed, leave no mark on the attribution.
+pub async fn inbound_hooks(
+    hooks: &[(HookMode, PluginSlot)],
+    content: String,
+) -> Result<InboundOutcome, String> {
+    let mut content = content;
+    let mut rewritten_by = Vec::new();
+    for (mode, slot) in hooks {
+        match slot
+            .hook("message_inbound", *mode, json!({ "content": content }))
+            .await
+        {
+            HookAction::Continue => {}
+            HookAction::Rewrite(event) => {
+                if let Some(rewritten) = event.get("content").and_then(Value::as_str)
+                    && rewritten != content
+                {
+                    content = rewritten.to_owned();
+                    rewritten_by.push(slot.plugin.clone());
+                }
+            }
+            HookAction::Veto(reason) => return Err(format!("{}: {reason}", slot.plugin)),
+        }
+    }
+    Ok(InboundOutcome {
+        content,
+        rewritten_by,
+    })
+}
+
+/// The plugin hooks at an observe-only point (`turn_start`, `turn_end`):
+/// each sees the event; nothing it answers changes the turn.
+pub async fn observe(hooks: &[(HookMode, PluginSlot)], point: &str, event: Value) {
+    for (_, slot) in hooks {
+        slot.hook(point, HookMode::Observe, event.clone()).await;
+    }
+}
+
+/// The hooks a revision attaches at one point, as they stand for one turn:
+/// the attachments whose plugin serves, as slots, and the attachments
+/// skipped because their plugin does not — the revision validated against
+/// what was installed when it activated, and a plugin gone or switched off
+/// since is not a veto. A turn reports both.
+#[derive(Default)]
+pub struct TurnHooks {
+    pub attached: Vec<(HookMode, PluginSlot)>,
+    /// The attachments behind `attached`, as declared.
+    pub serving: Vec<HookAttachment>,
+    pub skipped: Vec<HookAttachment>,
+}
+
+/// What a turn reports of its hooks: every attachment that served and every
+/// one skipped, across the points it resolved.
+#[derive(Default, Debug, Clone)]
+pub struct TurnHookAccount {
+    pub attached: Vec<HookAttachment>,
+    pub skipped: Vec<HookAttachment>,
+}
+
+impl TurnHookAccount {
+    pub fn note(&mut self, hooks: &TurnHooks) {
+        self.attached.extend(hooks.serving.iter().cloned());
+        self.skipped.extend(hooks.skipped.iter().cloned());
+    }
+}
+
+/// The hooks `graph` attaches at `point`, for a session in `topic_id`.
+pub fn hooks_for_turn(
+    state: &AppState,
+    graph: &TurnGraph,
+    point: HookPoint,
+    context: &InvocationContext,
+    topic_id: Option<Uuid>,
+) -> TurnHooks {
+    let mut hooks = TurnHooks::default();
+    for attachment in graph.hooks_at(point) {
+        match slot_for_plugin(state, &attachment.plugin, context, topic_id) {
+            Ok(slot) => {
+                hooks.attached.push((attachment.mode, slot));
+                hooks.serving.push(attachment);
+            }
+            Err(_) => hooks.skipped.push(attachment),
+        }
+    }
+    hooks
+}
+
+/// What a slot's draw settled on: the plugin to resolve, and why it is the
+/// named filler rather than the draw's own answer where the draw could not
+/// stand.
+pub struct SlotDraw {
+    pub name: String,
+    pub refusal: Option<String>,
+}
+
+/// The plugin that fills `slot` this turn: the revision's named filler, or
+/// an installed variant of the slot's function drawn in its place. A plugin
+/// declaring `variant_of = "slot.<slot>"` is a candidate wherever it is
+/// enabled; the draw runs through the experimentation seam at location
+/// `slot.<slot>` with the named filler as the default, so a topic's
+/// configuration pins a variant over the shipped part, experimentation off
+/// keeps the named filler, and every draw — a default-only one included —
+/// is recorded. A session's recorded choice serves while it is the named
+/// filler or still a candidate for the scope; a choice that is neither (the
+/// variant disabled or gone since, the revision's filler changed) gives way
+/// to the named filler, as does a draw the seam refuses, each with its
+/// reason for the turn's record.
+pub async fn slot_variant(
+    state: &AppState,
+    config: &swage_config::model::ExperimentationConfig,
+    slot: swage_protocol::client::turn_graph::TurnSlot,
+    named: &str,
+    session_id: Uuid,
+    turn_id: Option<Uuid>,
+    topic_id: Option<Uuid>,
+) -> SlotDraw {
+    let location = format!("slot.{}", slot.as_str());
+    let candidates = state.plugins.variants_of(&location, topic_id);
+    let registered: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    match crate::experimentation::select_session_variant(
+        state,
+        config,
+        &location,
+        &registered,
+        named,
+        session_id,
+        turn_id,
+    )
+    .await
+    {
+        Ok(decision) if decision.variant == named || candidates.contains(&decision.variant) => {
+            SlotDraw {
+                name: decision.variant,
+                refusal: None,
+            }
+        }
+        Ok(decision) => {
+            let refusal = format!(
+                "the session's recorded choice '{}' at {location} is neither the named filler nor a candidate for this scope now",
+                decision.variant
+            );
+            tracing::warn!(slot = slot.as_str(), %refusal, "the named filler serves");
+            SlotDraw {
+                name: named.to_owned(),
+                refusal: Some(refusal),
+            }
+        }
+        Err(error) => {
+            let refusal = format!("the slot's variant could not be drawn: {error}");
+            tracing::warn!(slot = slot.as_str(), %refusal, "the named filler serves");
+            SlotDraw {
+                name: named.to_owned(),
+                refusal: Some(refusal),
+            }
+        }
+    }
+}
+
+/// A plugin's isolate as a slot for one turn, when it is installed,
+/// enabled for the session's scope, and serving as an isolate; otherwise
+/// why it cannot serve, for the turn's record.
+pub fn slot_for_plugin(
+    state: &AppState,
+    plugin: &str,
+    context: &InvocationContext,
+    topic_id: Option<Uuid>,
+) -> Result<PluginSlot, String> {
+    match state.plugins.execution_of(plugin, topic_id) {
+        Some(crate::plugin::Execution::Isolate(runtime)) => {
+            let session_id = context.session_id.parse::<Uuid>().ok();
+            let storage = state.storage.clone();
+            let name = plugin.to_owned();
+            let recorder: TerminationRecorder = Arc::new(move |serving: &str, reason: &str| {
+                let (storage, name, serving, reason) = (
+                    storage.clone(),
+                    name.clone(),
+                    serving.to_owned(),
+                    reason.to_owned(),
+                );
+                // A slot can fail on the turn's own thread (the context
+                // program runs there), so the write goes to the runtime.
+                tokio::spawn(async move {
+                    super::record_termination(
+                        storage.as_ref(),
+                        session_id,
+                        &name,
+                        &serving,
+                        &reason,
+                        serde_json::json!({}),
+                    )
+                    .await;
+                });
+            });
+            Ok(PluginSlot::new(
+                plugin.to_owned(),
+                runtime,
+                Arc::new(SlotHost::new(plugin.to_owned(), state.clone(), session_id)),
+                context.clone(),
+            )
+            .recording_terminations(recorder))
+        }
+        Some(crate::plugin::Execution::Process(_)) => {
+            let reason =
+                format!("plugin '{plugin}' runs as a process, which cannot fill a slot or hook");
+            tracing::warn!(plugin, %reason, "skipped");
+            Err(reason)
+        }
+        None => {
+            let reason = format!("plugin '{plugin}' is not serving or not enabled for this scope");
+            tracing::warn!(plugin, %reason, "skipped");
+            Err(reason)
+        }
+    }
+}
+
+/// The context a slot or hook sees for one turn.
+pub fn slot_context(
+    session_id: Option<Uuid>,
+    agent_id: &str,
+    working_directory: &std::path::Path,
+) -> InvocationContext {
+    InvocationContext {
+        session_id: session_id.map(|id| id.to_string()).unwrap_or_default(),
+        agent_id: agent_id.to_owned(),
+        call_id: None,
+        working_directory: working_directory.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use swage_plugin::PluginManifest;
+    use swage_safety::LeakDetector;
+    use swage_tool::context::MockToolContext;
+    use swage_tool::dispatch::ToolDispatcher;
+    use swage_tool::permission::PermissionConfig;
+    use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
+    use swage_tool::registry::ToolRegistry;
+    use swage_tool::tool::Tool;
+
+    /// A host that answers every completion with one summary and logs.
+    #[derive(Default)]
+    struct SummarisingHost {
+        completions: Mutex<Vec<Value>>,
+        /// The completion's reply ends at its output limit.
+        cut: bool,
+    }
+
+    #[async_trait]
+    impl PluginHost for SummarisingHost {
+        async fn call_tool(&self, name: &str, _: Value) -> Result<Value, HostCallFailure> {
+            Err(HostCallFailure {
+                name: "HostCapabilityError".into(),
+                message: format!("no tools here: {name}"),
+            })
+        }
+        async fn complete(&self, request: Value) -> Result<Value, HostCallFailure> {
+            self.completions.lock().unwrap().push(request);
+            Ok(json!({
+                "content": "the gist",
+                "model": "m",
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "cost": 0.5,
+                "finish_reason": if self.cut { "length" } else { "stop" },
+            }))
+        }
+        fn log(&self, _: &str) {}
+    }
+
+    fn context() -> InvocationContext {
+        InvocationContext {
+            session_id: Uuid::nil().to_string(),
+            agent_id: "agent-a".into(),
+            call_id: None,
+            working_directory: "/work".into(),
+        }
+    }
+
+    async fn slot(
+        name: &str,
+        provides: &str,
+        script: &str,
+        host: Arc<dyn PluginHost>,
+    ) -> PluginSlot {
+        let manifest = PluginManifest::parse(&format!(
+            r#"
+            name = "{name}"
+            version = "1"
+            description = "A {name}."
+            script = "plugin.js"
+            grants = ["model"]
+            {provides}
+            "#
+        ))
+        .unwrap();
+        let runtime = PluginRuntime::start(manifest, script.to_owned())
+            .await
+            .expect("starts");
+        PluginSlot::new(name.to_owned(), runtime, host, context())
+    }
+
+    struct Element(&'static str, &'static str);
+
+    impl ContextElement for Element {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn priority(&self) -> i32 {
+            0
+        }
+        fn content(&self) -> Vec<ChatMessage> {
+            vec![ChatMessage::new(Role::User, self.1)]
+        }
+        fn token_count(&self, _: &dyn swage_context::tokeniser::Tokeniser) -> usize {
+            self.1.len()
+        }
+        fn source(&self) -> String {
+            "test".into()
+        }
+    }
+
+    struct History(Vec<ChatMessage>);
+
+    impl ContextElement for History {
+        fn name(&self) -> &str {
+            "history"
+        }
+        fn priority(&self) -> i32 {
+            0
+        }
+        fn content(&self) -> Vec<ChatMessage> {
+            self.0.clone()
+        }
+        fn token_count(&self, _: &dyn swage_context::tokeniser::Tokeniser) -> usize {
+            self.0.len()
+        }
+        fn source(&self) -> String {
+            "test".into()
+        }
+    }
+
+    struct Named(&'static str);
+
+    #[async_trait]
+    impl Tool for Named {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "a session tool"
+        }
+        fn parameters(&self) -> Value {
+            json!({ "type": "object" })
+        }
+        async fn execute(
+            &self,
+            params: Value,
+            _: &dyn ToolContext,
+        ) -> Result<Value, swage_core::ToolError> {
+            Ok(json!({ "ran": self.0, "with": params }))
+        }
+    }
+
+    /// A hook that runs past its time limit is terminated, the event
+    /// continues, and the termination is recorded with the point it served.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hook_terminated_at_its_limit_is_recorded() {
+        let hook = slot(
+            "spinner",
+            "[[provides.hooks]]\npoint = \"turn_start\"\nmode = \"observe\"\n[limits]\ncontinuous_execution_secs = 1",
+            r#"swage.provide.hook("turn_start", () => { while (true) {} });"#,
+            Arc::new(SummarisingHost::default()),
+        )
+        .await;
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&recorded);
+        let hook = hook.recording_terminations(Arc::new(move |serving: &str, reason: &str| {
+            sink.lock()
+                .unwrap()
+                .push((serving.to_owned(), reason.to_owned()));
+        }));
+        let action = hook.hook("turn_start", HookMode::Observe, json!({})).await;
+        assert_eq!(action, HookAction::Continue);
+        assert_eq!(
+            recorded.lock().unwrap().clone(),
+            vec![("the turn_start hook".to_owned(), "time_limit".to_owned())]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_summariser_answers_the_succession_request_through_its_model_grant() {
+        let host = Arc::new(SummarisingHost::default());
+        let slot = slot(
+            "summariser",
+            "[[provides.slots]]\nname = \"succession\"",
+            r#"swage.provide.slot("succession", async (input) => {
+                const reply = await swage.complete({ messages: input.messages, model: input.model });
+                return { summary: "Summary: " + reply.content + " (" + input.messages.length + " messages)" };
+            });"#,
+            host.clone(),
+        )
+        .await;
+        let completion = CompletionRequest {
+            messages: vec![
+                ChatMessage::new(Role::System, "Summarise."),
+                ChatMessage::new(Role::User, "one"),
+            ],
+            model: Some("m".into()),
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: Vec::new(),
+        };
+        let mut calls = Vec::new();
+        let summary = slot
+            .summarise(completion.clone(), &mut calls)
+            .await
+            .expect("summarises");
+        assert_eq!(summary, "Summary: the gist (2 messages)");
+        let asked = host.completions.lock().unwrap().clone();
+        assert_eq!(asked[0]["model"], "m");
+        assert_eq!(asked[0]["messages"][1]["content"], "one");
+        assert_eq!(
+            calls,
+            vec![SuccessionCall {
+                stage: SuccessionStage::Summary,
+                model: "m".into(),
+                input_tokens: 3,
+                output_tokens: 2,
+                cost: Some(0.5),
+                report: None,
+                failure_reason: None,
+            }],
+            "the plugin's completion is the pass's summary call"
+        );
+
+        // A reply cut at its output limit is recorded, and the summary
+        // written from it is refused as cut.
+        let host = Arc::new(SummarisingHost {
+            cut: true,
+            ..SummarisingHost::default()
+        });
+        let slot = super::PluginSlot::new(
+            "summariser".into(),
+            Arc::clone(&slot.runtime),
+            host,
+            context(),
+        );
+        let mut calls = Vec::new();
+        let error = slot
+            .summarise(completion, &mut calls)
+            .await
+            .expect_err("cut");
+        assert!(matches!(error, SuccessionError::SummaryCut), "{error}");
+        assert_eq!(
+            calls[0].failure_reason.as_deref(),
+            Some(SuccessionError::SummaryCut.to_string().as_str())
+        );
+    }
+
+    /// The shipped summariser forwards the step's request to the model
+    /// under its grant and answers the model's content — the kernel's own
+    /// behaviour, on the plugin contract.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_shipped_summariser_answers_the_request_through_its_model_grant() {
+        let host = Arc::new(SummarisingHost::default());
+        let manifest = PluginManifest::parse(include_str!(
+            "../../../../shipped/plugins/succession-summariser/plugin.toml"
+        ))
+        .unwrap();
+        let runtime = PluginRuntime::start(
+            manifest,
+            include_str!("../../../../shipped/plugins/succession-summariser/plugin.js").to_owned(),
+        )
+        .await
+        .expect("starts");
+        let slot = PluginSlot::new(
+            "succession-summariser".into(),
+            runtime,
+            host.clone(),
+            context(),
+        );
+        let completion = CompletionRequest {
+            messages: vec![
+                ChatMessage::new(Role::System, "Summarise."),
+                ChatMessage::new(Role::User, "one"),
+            ],
+            model: Some("m".into()),
+            effort: None,
+            max_tokens: Some(1024),
+            temperature: Some(0.3),
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: Vec::new(),
+        };
+        let summary = slot
+            .summarise(completion, &mut Vec::new())
+            .await
+            .expect("summarises");
+        assert_eq!(summary, "the gist");
+        let asked = host.completions.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["model"], "m");
+        assert_eq!(asked[0]["messages"][0]["content"], "Summarise.");
+        assert_eq!(
+            asked[0]["max_tokens"], 1024,
+            "the kernel's limits travel with the request"
+        );
+        assert_eq!(asked[0]["temperature"], 0.3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_shipped_context_program_matches_kernel_messages_and_reports() {
+        use swage_context::{briefing::BriefingElement, named_element::ResolvedNamedElement};
+        let manifest = PluginManifest::parse(include_str!(
+            "../../../../shipped/plugins/context-program/plugin.toml"
+        ))
+        .unwrap();
+        let runtime = PluginRuntime::start(
+            manifest,
+            include_str!("../../../../shipped/plugins/context-program/plugin.js").to_owned(),
+        )
+        .await
+        .unwrap();
+        let slot = PluginSlot::new(
+            "context-program".into(),
+            runtime,
+            Arc::new(SummarisingHost::default()),
+            context(),
+        );
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let variables = std::collections::BTreeMap::from([("owner".into(), "Ben".into())]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordered.js");
+        std::fs::write(
+            &path,
+            "for (const e of [...elements].reverse()) add(e.render ? e.render() : e);",
+        )
+        .unwrap();
+        for (name, budget, enriched) in [
+            ("default", None, false),
+            ("default", Some(50), false),
+            ("default", Some(100), true),
+            ("ordered", Some(50), true),
+            ("missing", None, true),
+            ("missing", Some(50), true),
+        ] {
+            let mut elements: Vec<Box<dyn ContextElement>> = vec![
+                Box::new(History(vec![
+                    ChatMessage::new(Role::User, "old conversation ".repeat(80)),
+                    ChatMessage::new(Role::Assistant, "old answer ".repeat(80)),
+                    ChatMessage::new(Role::User, "latest question"),
+                    if name == "default" {
+                        ChatMessage::tool_result("call-1", "tool answer")
+                    } else {
+                        ChatMessage::new(Role::Assistant, "an ordinary history entry")
+                    },
+                    ChatMessage::new(Role::Assistant, "latest answer"),
+                ])),
+                Box::new(swage_context::prompts::PromptsElement::new(vec![
+                    swage_config::prompt_rule::PromptRule {
+                        priority: 100,
+                        content: "instructions".into(),
+                        source_level: swage_config::HierarchyLevel::Global,
+                        file_path: "instructions.md".into(),
+                    },
+                ])),
+                Box::new(swage_context::skills::SkillsElement::new(vec![
+                    swage_context::skills::ActiveSkill {
+                        name: "review".into(),
+                        instructions: "Review for correctness.".into(),
+                        source_directory: "skills/review".into(),
+                        level: swage_config::HierarchyLevel::Global,
+                        is_agent_level: true,
+                        activation_order: 0,
+                    },
+                ])),
+            ];
+            if enriched {
+                elements.push(Box::new(swage_context::memory::MemoryIndexElement::new(
+                    Some("memory content".into()),
+                    vec![],
+                    swage_context::memory::MemoryReach::EntriesByReference,
+                )));
+                elements.push(Box::new(Element("surfaces", "surface content")));
+                elements.push(Box::new(BriefingElement::new(ResolvedNamedElement {
+                    name: "briefing".into(),
+                    level: swage_config::HierarchyLevel::Global,
+                    path: "briefing.md".into(),
+                    content: "Owner {{owner}}; {{unset}}".into(),
+                })));
+            }
+            let config = swage_config::model::ContextConfig {
+                budget,
+                ..Default::default()
+            };
+            let kernel = || {
+                if name == "default" {
+                    swage_context::assembly::default_assembly_with_variables(
+                        &elements, &config, &tokeniser, &variables,
+                    )
+                } else {
+                    swage_context::js_assembly::assemble_named(
+                        name,
+                        (name == "ordered").then_some(path.as_path()),
+                        &elements,
+                        &config,
+                        &tokeniser,
+                        &variables,
+                    )
+                }
+            };
+            let expected = kernel();
+            let actual = slot
+                .context_program(&elements, &variables, &tokeniser, name, &config, || {
+                    assert_ne!(
+                        name, "default",
+                        "the shipped default must compose without the kernel"
+                    );
+                    kernel()
+                })
+                .expect("the shipped handler serves");
+            // Constructors stamp assembly-local identities and timestamps.
+            // Compare every provider-facing field, including structured content,
+            // tool correlation and assistant tool calls, rather than those stamps.
+            let messages = |messages: &[ChatMessage]| {
+                messages
+                    .iter()
+                    .map(|message| {
+                        let mut value = serde_json::to_value(message).unwrap();
+                        let object = value.as_object_mut().unwrap();
+                        object.remove("id");
+                        object.remove("created_at");
+                        value
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                messages(&actual.messages),
+                messages(&expected.messages),
+                "{name}, budget={budget:?}"
+            );
+            let report = |mut report: swage_context::report::AssemblyReport| {
+                report.duration = std::time::Duration::ZERO;
+                serde_json::to_value(report).unwrap()
+            };
+            assert_eq!(
+                report(actual.report),
+                report(expected.report),
+                "{name}, budget={budget:?}"
+            );
+        }
+    }
+
+    async fn context_report_slot(script: &str) -> PluginSlot {
+        let manifest = PluginManifest::parse(
+            r#"
+            name = "report-composer"
+            version = "1"
+            description = "Composes context."
+            script = "plugin.js"
+            grants = ["context"]
+            [[provides.slots]]
+            name = "context_program"
+            "#,
+        )
+        .unwrap();
+        let runtime = PluginRuntime::start(manifest, script.to_owned())
+            .await
+            .unwrap();
+        PluginSlot::new(
+            "report-composer".into(),
+            runtime,
+            Arc::new(SummarisingHost::default()),
+            context(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn context_report_retains_host_compactions_without_a_plugin_report() {
+        let composer = context_report_slot(
+            r#"swage.provide.slot("context_program", async (input) => {
+                let messages = input.elements[0].messages;
+                for (const budget of [1, 1000]) {
+                    const result = await swage.context({ operation: "compact_history", messages, budget });
+                    messages = result.messages;
+                }
+                return { messages };
+            });"#,
+        )
+        .await;
+        let history = vec![
+            ChatMessage::new(Role::User, "old question"),
+            ChatMessage::new(Role::Assistant, "old answer"),
+            ChatMessage::new(Role::User, "recent question"),
+            ChatMessage::new(Role::Assistant, "recent answer"),
+        ];
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let compactor = swage_context::compaction::TruncationCompactor::new();
+        let (compacted, first) = compactor.compact(history.clone(), 1, &tokeniser);
+        let (_, second) = compactor.compact(compacted, 1000, &tokeniser);
+        assert!(first.messages_removed > 0);
+        let output = composer
+            .context_program(
+                &[Box::new(History(history))],
+                &Default::default(),
+                &tokeniser,
+                "default",
+                &Default::default(),
+                || panic!("no named assembly requested"),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&output.report.compaction_applied).unwrap(),
+            serde_json::to_value([first, second]).unwrap(),
+            "the report records every host compaction in call order, even without a plugin report"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_compaction_the_composition_discards_is_not_recorded() {
+        // The plugin compacts, then composes over the uncompacted history
+        // with a message of its own, which the host counts as it would
+        // count the answer.
+        let composer = context_report_slot(
+            r#"swage.provide.slot("context_program", async (input) => {
+                const history = input.elements[0].messages;
+                await swage.context({ operation: "compact_history", messages: history, budget: 1 });
+                const messages = [{ role: "system", content: "composed afresh" }, ...history];
+                await swage.context({ operation: "count_messages", messages });
+                return { messages };
+            });"#,
+        )
+        .await;
+        let history = vec![
+            ChatMessage::new(Role::User, "old question"),
+            ChatMessage::new(Role::Assistant, "old answer"),
+            ChatMessage::new(Role::User, "recent question"),
+            ChatMessage::new(Role::Assistant, "recent answer"),
+        ];
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let output = composer
+            .context_program(
+                &[Box::new(History(history))],
+                &Default::default(),
+                &tokeniser,
+                "default",
+                &Default::default(),
+                || panic!("no named assembly requested"),
+            )
+            .unwrap();
+        assert_eq!(output.messages.len(), 5);
+        assert!(output.report.compaction_applied.is_empty());
+        assert_eq!(
+            output.report.elements[0].full_text.as_deref(),
+            Some("old question\n\nold answer\n\nrecent question\n\nrecent answer")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn context_report_replaces_plugin_claims_with_host_facts() {
+        let mut claimed = swage_context::report::AssemblyReport::new("default");
+        claimed.budget = Some(999);
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let (_, invented) = swage_context::compaction::TruncationCompactor::new().compact(
+            vec![ChatMessage::new(Role::User, "never submitted to the host")],
+            1,
+            &tokeniser,
+        );
+        claimed.compaction_applied.push(invented);
+        let composer = context_report_slot(&format!(
+            r#"swage.provide.slot("context_program", () => ({{
+                messages: [{{ role: "user", content: "hello" }}], report: {}
+            }}));"#,
+            serde_json::to_string(&claimed).unwrap(),
+        ))
+        .await;
+        let config = swage_config::model::ContextConfig {
+            budget: Some(50),
+            ..Default::default()
+        };
+        let output = composer
+            .context_program(
+                &[],
+                &Default::default(),
+                &tokeniser,
+                "default",
+                &config,
+                || panic!("no named assembly requested"),
+            )
+            .unwrap();
+        assert_eq!(
+            json!({ "budget": output.report.budget, "compaction_applied": output.report.compaction_applied }),
+            json!({ "budget": 50, "compaction_applied": [] }),
+            "configured budget and served compactions override plugin claims"
+        );
+        assert_eq!(
+            output.report.total_tokens,
+            tokeniser.count_messages(&output.messages)
+        );
+        assert_eq!(
+            output.report.budget_remaining,
+            Some(50 - output.report.total_tokens as isize)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_context_program_composes_the_messages_over_the_elements() {
+        let composer = slot(
+            "composer",
+            "[[provides.slots]]\nname = \"context_program\"",
+            r#"swage.provide.slot("context_program", (input) => ({
+                messages: [
+                    { role: "system", content: "Elements: " + input.elements.map((e) => e.name).join(",") + "; who=" + input.variables.who },
+                    ...input.elements.flatMap((e) => e.messages),
+                ],
+            }));"#,
+            Arc::new(SummarisingHost::default()),
+        )
+        .await;
+        let elements: Vec<Box<dyn ContextElement>> = vec![
+            Box::new(Element("prompts", "be brief")),
+            Box::new(History(vec![
+                ChatMessage::new(Role::User, "hello"),
+                ChatMessage::tool_result("call-1", "the tool's answer"),
+            ])),
+        ];
+        let mut variables = std::collections::BTreeMap::new();
+        variables.insert("who".to_owned(), "ben".to_owned());
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let kernel = || {
+            swage_context::assembly::default_assembly_with_variables(
+                &elements,
+                &swage_config::ResolvedConfig::default().context,
+                &tokeniser,
+                &variables,
+            )
+        };
+        let output = composer
+            .context_program(
+                &elements,
+                &variables,
+                &tokeniser,
+                "default",
+                &swage_config::ResolvedConfig::default().context,
+                kernel,
+            )
+            .expect("composes");
+        assert_eq!(output.messages.len(), 4);
+        assert_eq!(output.messages[0].role(), Role::System);
+        assert_eq!(
+            output.messages[0].text_content(),
+            "Elements: prompts,history; who=ben"
+        );
+        assert_eq!(output.messages[2].text_content(), "hello");
+        // A message handed back as given keeps its shape: the tool result
+        // is still a tool result, answering its call.
+        assert_eq!(output.messages[3].role(), Role::Tool);
+        assert_eq!(output.messages[3].tool_call_id(), Some("call-1"));
+        assert_eq!(
+            output.report.total_tokens,
+            tokeniser.count_messages(&output.messages),
+            "the report counts the composed messages"
+        );
+
+        // A composition that invents a tool message, or a role the
+        // conversation has none of, is the slot's failure by position.
+        let lossy = slot(
+            "lossy",
+            "[[provides.slots]]\nname = \"context_program\"",
+            r#"swage.provide.slot("context_program", (input) => ({
+                messages: [{ role: "system", content: "fine" }, { role: "tool", content: "no call" }],
+            }));"#,
+            Arc::new(SummarisingHost::default()),
+        )
+        .await;
+        let error = lossy
+            .context_program(
+                &elements,
+                &variables,
+                &tokeniser,
+                "default",
+                &swage_config::ResolvedConfig::default().context,
+                kernel,
+            )
+            .expect_err("refused");
+        assert!(
+            error.contains("message 1 of the composition is a tool result without its call"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_a_current_thread_runtime_the_context_program_slot_declines_rather_than_panics() {
+        let slot = slot(
+            "composer",
+            "[[provides.slots]]\nname = \"context_program\"",
+            r#"swage.provide.slot("context_program", (input) => ({ messages: [{ role: "system", content: "x" }] }));"#,
+            Arc::new(SummarisingHost::default()),
+        )
+        .await;
+        let elements: Vec<Box<dyn ContextElement>> = vec![Box::new(Element("prompts", "be brief"))];
+        let variables = std::collections::BTreeMap::new();
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let error = slot
+            .context_program(
+                &elements,
+                &variables,
+                &tokeniser,
+                "default",
+                &swage_config::ResolvedConfig::default().context,
+                || unreachable!(),
+            )
+            .expect_err("declines");
+        assert!(error.contains("needs the multi-thread runtime"), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_hook_rewrites_or_vetoes_by_its_mode_and_the_gates_still_apply() {
+        let guard = slot(
+            "guard",
+            "[[provides.hooks]]\npoint = \"tool_call\"\nmode = \"veto\"",
+            r#"swage.provide.hook("tool_call", (event) => {
+                if (event.name === "probe_shell") return { action: "veto", reason: "no shells" };
+                if (event.name === "probe_read") return { action: "rewrite", event: { name: "probe_denied", arguments: event.arguments } };
+                if (event.name === "probe_mark") return { action: "rewrite", event: { name: "probe_mark", arguments: { marked: true } } };
+                return { action: "continue" };
+            });"#,
+            Arc::new(SummarisingHost::default()),
+        )
+        .await;
+        let rewrites = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&rewrites);
+        let recorder: RewriteRecorder = Arc::new(move |rewrite: RewrittenCall| {
+            recorded.lock().unwrap().push(rewrite);
+        });
+        let dispatcher_for = |hooks: Vec<(HookMode, PluginSlot)>| {
+            let mut registry = ToolRegistry::new();
+            for name in ["probe_shell", "probe_read", "probe_denied", "probe_mark"] {
+                registry.register(Arc::new(Named(name))).unwrap();
+            }
+            ToolDispatcher::new(
+                Arc::new(registry),
+                PermissionConfig {
+                    allow: vec!["*".into()],
+                    deny: vec!["probe_denied".into()],
+                    ..PermissionConfig::default()
+                },
+                Arc::new(RateLimiter::new()),
+                RateLimitConfig::default(),
+                Arc::new(LeakDetector::default()),
+                false,
+            )
+            .with_call_hook(Arc::new(PluginCallHook::new(
+                hooks,
+                Some(Arc::clone(&recorder)),
+            )))
+        };
+        let ctx = MockToolContext::new("agent-a", "session");
+
+        let attached = dispatcher_for(vec![(HookMode::Veto, guard.clone())]);
+        let vetoed = attached
+            .dispatch("probe_shell", json!({}), &ctx, "agent-a")
+            .await
+            .expect_err("vetoed");
+        assert!(vetoed.to_string().contains("no shells"), "{vetoed}");
+        let rewritten = attached
+            .dispatch("probe_read", json!({ "path": "/etc" }), &ctx, "agent-a")
+            .await
+            .expect_err("the rewrite names a denied tool and the gate refuses it");
+        assert!(
+            matches!(rewritten, swage_core::ToolError::PermissionDenied { ref name, .. } if name == "probe_denied"),
+            "{rewritten:?}"
+        );
+        let marked = attached
+            .dispatch("probe_mark", json!({}), &ctx, "agent-a")
+            .await
+            .expect("a rewrite to an allowed tool runs as rewritten");
+        assert_eq!(
+            marked.result,
+            json!({ "ran": "probe_mark", "with": { "marked": true } })
+        );
+        // Each rewrite is recorded with the plugin that made it, from the
+        // call as raised to the call as left.
+        let recorded = rewrites.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0].plugin, "guard");
+        assert_eq!(
+            (recorded[0].from_name.as_str(), recorded[0].to_name.as_str()),
+            ("probe_read", "probe_denied")
+        );
+        assert_eq!(recorded[0].from_arguments, json!({ "path": "/etc" }));
+        assert_eq!(recorded[1].to_arguments, json!({ "marked": true }));
+        drop(recorded);
+
+        // Attached as an observer, the same handler's rewrites and vetoes are
+        // beyond its mode: the calls continue as raised.
+        let observing = dispatcher_for(vec![(HookMode::Observe, guard)]);
+        let ran = observing
+            .dispatch("probe_shell", json!({}), &ctx, "agent-a")
+            .await
+            .expect("an observer cannot veto");
+        assert_eq!(ran.result, json!({ "ran": "probe_shell", "with": {} }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_inbound_rewrite_is_attributed_to_the_plugin_that_made_it_alone() {
+        let hook = |name: &'static str, script: &'static str| async move {
+            slot(
+                name,
+                "[[provides.hooks]]\npoint = \"message_inbound\"\nmode = \"veto\"",
+                script,
+                Arc::new(SummarisingHost::default()),
+            )
+            .await
+        };
+        let watcher = hook(
+            "watcher",
+            r#"swage.provide.hook("message_inbound", (event) => ({ action: "rewrite", event: { content: "watched" } }));"#,
+        )
+        .await;
+        let tidier = hook(
+            "tidier",
+            r#"swage.provide.hook("message_inbound", (event) => ({ action: "rewrite", event: { content: event.content.trim() } }));"#,
+        )
+        .await;
+        let broken = hook(
+            "broken",
+            r#"swage.provide.hook("message_inbound", (event) => { throw new Error("no"); });"#,
+        )
+        .await;
+        let outcome = inbound_hooks(
+            &[
+                (HookMode::Observe, watcher),
+                (HookMode::Rewrite, tidier.clone()),
+                (HookMode::Rewrite, broken),
+            ],
+            "  hello  ".into(),
+        )
+        .await
+        .expect("continues");
+        assert_eq!(outcome.content, "hello");
+        assert_eq!(
+            outcome.rewritten_by,
+            vec!["tidier".to_owned()],
+            "the observer could not rewrite and the failed handler did not"
+        );
+        let unchanged = inbound_hooks(&[(HookMode::Rewrite, tidier)], "hello".into())
+            .await
+            .expect("continues");
+        assert!(
+            unchanged.rewritten_by.is_empty(),
+            "a rewrite to the same content is no rewrite"
+        );
+    }
+}

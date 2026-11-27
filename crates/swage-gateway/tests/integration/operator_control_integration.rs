@@ -1021,7 +1021,7 @@ async fn operator_uses_the_run_accounts_failed_and_cut_short_partition() {
             .as_array_mut()
             .unwrap()
             .push(json!({"journal_entry_id": entry.id, "seq": seq,
-            "redispatched_after_interruption": false}));
+            "redispatch_causes": []}));
         expected.push((session_id, ending));
     }
     state.storage.set_workflow_run_terminal_account(run.id, json!({

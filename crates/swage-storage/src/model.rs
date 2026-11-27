@@ -1546,6 +1546,14 @@ pub struct Message {
     /// Who authored the message: a person, the model, or the platform path
     /// (delegation, schedule, workflow, a notice) that composed it.
     pub origin: MessageOrigin,
+    /// Whether the platform handed this row to the agent as material produced
+    /// elsewhere — a delegated agent's result, a notice about the conversation
+    /// — rather than someone addressing the agent: a typed message, a
+    /// scheduled brief, a worker's prompt. Independent of `origin`, since one
+    /// origin composes both briefs and deliveries, and recorded by the route
+    /// that writes the row, so the history rebuild frames every delivered row
+    /// for the model without guessing from role or origin.
+    pub delivered: bool,
     pub content: String,
     /// Content parts submitted beside the text, one generic JSON value per
     /// part exactly as the client wire carried it. Storage keeps them
@@ -1579,14 +1587,9 @@ pub struct ToolCallRecord {
     pub call_id: String,
     /// Name of the tool that was called.
     pub tool: String,
-    /// Tool arguments serialised as a JSON string.
+    /// Tool arguments serialised as a JSON string, as the call made them.
+    /// History replays them with each long string value bounded.
     pub arguments: String,
-    /// Compact provider-visible replay envelope for the tool arguments.
-    ///
-    /// Kept separate from `arguments`, which remains the raw debugger/storage
-    /// payload.
-    #[serde(default)]
-    pub model_arguments: String,
     /// Raw output returned by the tool, if it has completed.
     pub result: Option<String>,
     /// Compact provider-visible replay envelope for the tool result.
@@ -1634,7 +1637,6 @@ pub struct NewToolCall {
     pub call_id: String,
     pub tool: String,
     pub arguments: String,
-    pub model_arguments: String,
     pub result: Option<String>,
     pub model_result: Option<String>,
     pub status: Option<String>,
@@ -1759,6 +1761,76 @@ pub struct ActiveSkillRecord {
     pub session_id: Uuid,
     pub skill_name: String,
     pub activated_at: DateTime<Utc>,
+}
+
+/// One installed revision of a plugin: the package as it was copied into the
+/// install root, and whether it is the revision serving now. Revisions are
+/// immutable; a reinstall records the next one and makes it active.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginRevisionRecord {
+    pub id: Uuid,
+    pub plugin_name: String,
+    pub revision: u32,
+    pub version: String,
+    pub description: String,
+    /// The manifest as installed, so the settings surface lists what a
+    /// revision provides without reading the package again.
+    pub manifest: serde_json::Value,
+    /// Where the package was installed from.
+    pub installed_from: String,
+    /// `shipped` for a package compiled into the gateway and installed by
+    /// its startup; `installed` for one an operator installed.
+    pub provenance: String,
+    /// The revision's directory under the install root.
+    pub install_dir: String,
+    pub installed_at: DateTime<Utc>,
+    pub active: bool,
+}
+
+/// Input for recording an installed revision. The caller chooses the revision
+/// number (the next after the plugin's last); the store refuses a repeat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewPluginRevision {
+    pub plugin_name: String,
+    pub revision: u32,
+    pub version: String,
+    pub description: String,
+    pub manifest: serde_json::Value,
+    pub installed_from: String,
+    /// See `PluginRevisionRecord::provenance`.
+    pub provenance: String,
+    pub install_dir: String,
+}
+
+/// One recorded revision of the turn graph: the declaration as proposed,
+/// and whether it serves, failed validation, or was replaced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnGraphRevisionRecord {
+    pub revision: u32,
+    pub graph: serde_json::Value,
+    /// `active`, `failed` or `superseded`.
+    pub activation: String,
+    pub failure: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewTurnGraphRevision {
+    pub revision: u32,
+    pub graph: serde_json::Value,
+    pub activation: String,
+    pub failure: Option<String>,
+}
+
+/// Whether a plugin is enabled for one scope: the install (`topic_id` absent)
+/// or one topic. A scope with no row defers: a topic without one takes the
+/// install's answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginEnablementRecord {
+    pub plugin_name: String,
+    pub topic_id: Option<Uuid>,
+    pub enabled: bool,
+    pub changed_at: DateTime<Utc>,
 }
 
 // Wire-visible schedule types come from the protocol crate — one
@@ -2326,6 +2398,9 @@ pub struct NewMessage {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub origin: MessageOrigin,
+    /// Handed to the agent as material rather than addressed to it; see
+    /// [`Message::delivered`].
+    pub delivered: bool,
     pub content: String,
     /// Content parts beside the text; empty for a text-only message.
     pub attachments: Vec<serde_json::Value>,
@@ -2347,6 +2422,8 @@ pub struct QueuedTurnInput {
     pub id: Uuid,
     pub session_id: Uuid,
     pub thread_id: Uuid,
+    /// A model explicitly requested for this input.
+    pub requested_model: Option<String>,
     /// Arrival order within the session's queue.
     pub seq: i64,
     pub origin: MessageOrigin,
@@ -2368,6 +2445,8 @@ pub struct NewQueuedTurnInput {
     pub attended: bool,
     pub session_id: Uuid,
     pub thread_id: Uuid,
+    /// A model explicitly requested for this input.
+    pub requested_model: Option<String>,
     pub origin: MessageOrigin,
     pub content: String,
     pub attachments: Vec<serde_json::Value>,
@@ -2377,8 +2456,7 @@ pub struct NewQueuedTurnInput {
     pub channel_message_ids: Vec<Uuid>,
 }
 
-/// The queue's first consecutive thread group: its turn and one recorded message
-/// per queued input in arrival order.
+/// The queue's first consecutive group for one thread and model choice.
 #[derive(Debug, Clone)]
 pub struct DrainedTurnQueue {
     /// A batch is attended if any of its inputs was attended at its source.
@@ -2388,8 +2466,8 @@ pub struct DrainedTurnQueue {
     pub channel_origins: Vec<PendingChannelOrigin>,
     pub turn: Turn,
     pub messages: Vec<Message>,
-    /// The queue rows this drain took, by id — what a view clears.
-    pub queued_ids: Vec<Uuid>,
+    /// The inputs corresponding, in order, to the recorded messages.
+    pub inputs: Vec<QueuedTurnInput>,
 }
 
 /// Input for appending a new message at the end of a thread.
@@ -2402,6 +2480,9 @@ pub struct AppendMessage {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub origin: MessageOrigin,
+    /// Handed to the agent as material rather than addressed to it; see
+    /// [`Message::delivered`].
+    pub delivered: bool,
     pub content: String,
     /// Content parts beside the text; empty for a text-only message.
     pub attachments: Vec<serde_json::Value>,
@@ -2533,6 +2614,7 @@ pub struct WorkflowRunRecord {
     /// When a parked run is due to wake. Set only while `state` is
     /// `parked`; cleared on every other state transition.
     pub wake_at: Option<DateTime<Utc>>,
+    pub timer_wake_at: Option<DateTime<Utc>>,
     /// The session whose turn started this run — the conversation the run's
     /// workers are grouped beneath in the recent-sessions list. `None` for a
     /// run started by the operator API or a schedule.
@@ -2777,7 +2859,6 @@ mod tests {
             call_id: "toolu_01".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"command":"ls"}"#.to_string(),
-            model_arguments: "compact arguments".to_string(),
             result: Some("file1\nfile2".to_string()),
             model_result: Some("compact result".to_string()),
             status: Some("success".to_string()),
@@ -2801,7 +2882,6 @@ mod tests {
         assert_eq!(back.call_id, "toolu_01");
         assert_eq!(back.tool, "shell");
         assert_eq!(back.arguments, r#"{"command":"ls"}"#);
-        assert_eq!(back.model_arguments, "compact arguments");
         assert_eq!(back.result, Some("file1\nfile2".to_string()));
         assert_eq!(back.model_result, Some("compact result".to_string()));
         assert_eq!(back.status, Some("success".to_string()));
@@ -2822,7 +2902,6 @@ mod tests {
             call_id: "toolu_02".to_string(),
             tool: "file_read".to_string(),
             arguments: r#"{"path":"/tmp/x"}"#.to_string(),
-            model_arguments: "compact arguments".to_string(),
             result: None,
             model_result: None,
             status: None,
@@ -2858,7 +2937,6 @@ mod tests {
             call_id: "toolu_03".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"command":"pwd"}"#.to_string(),
-            model_arguments: "compact arguments".to_string(),
             result: Some("ok".to_string()),
             model_result: Some("compact result".to_string()),
             status: Some("success".to_string()),
@@ -2887,7 +2965,6 @@ mod tests {
             call_id: "toolu_sub".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{"cmd":"ls"}"#.to_string(),
-            model_arguments: "compact arguments".to_string(),
             result: None,
             model_result: None,
             status: None,
@@ -2917,7 +2994,6 @@ mod tests {
             call_id: "sub_01".to_string(),
             tool: "shell".to_string(),
             arguments: r#"{}"#.to_string(),
-            model_arguments: "compact arguments".to_string(),
             result: None,
             model_result: None,
             status: None,
@@ -3216,6 +3292,7 @@ mod tests {
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
             origin: MessageOrigin::User,
+            delivered: false,
             content: "hello".to_string(),
             position: 0,
             agent_id: "agent-1".to_string(),
@@ -3249,6 +3326,7 @@ mod tests {
             turn_id: None,
             role: Role::Assistant,
             origin: MessageOrigin::User,
+            delivered: false,
             content: "sure".to_string(),
             position: 1,
             agent_id: "agent-1".to_string(),
@@ -3273,6 +3351,7 @@ mod tests {
             turn_id: None,
             role: Role::User,
             origin: crate::model::MessageOrigin::User,
+            delivered: false,
             content: "test".to_string(),
             position: 0,
             agent_id: "agent-x".to_string(),
@@ -3289,6 +3368,7 @@ mod tests {
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
             origin: crate::model::MessageOrigin::User,
+            delivered: false,
             content: "hi".to_string(),
             position: 0,
             agent_id: "agent-y".to_string(),

@@ -14,6 +14,7 @@
 use super::{
     AgentEvent, AppState, GatewayError, Uuid, WorkflowProviderRoundOutcome, record_durability,
 };
+use swage_core::secret_masking::{mask_json_strings, mask_text};
 
 pub(crate) fn append_provider_visible_request(
     report_json: &mut serde_json::Value,
@@ -53,7 +54,7 @@ pub(crate) async fn redact_provider_visible_request(
 ) -> Result<serde_json::Value, swage_core::StorageError> {
     let secret_values = known_secret_values(state).await?;
     if !secret_values.is_empty() {
-        redact_secret_values(&mut request, &secret_values);
+        mask_json_strings(&mut request, &secret_values);
     }
     Ok(request)
 }
@@ -114,7 +115,7 @@ pub(crate) async fn apply_provider_snapshot_event(
             if let Some(error) = &mut record.error {
                 match known_secret_values(state).await {
                     Ok(secrets) => {
-                        redact_text(error, &secrets);
+                        mask_text(error, &secrets);
                     }
                     Err(_) => {
                         *error =
@@ -180,11 +181,11 @@ pub(super) async fn known_secret_values(
 }
 
 /// Every registered secret's value, longest first so that a value containing
-/// another is masked whole.
+/// another is masked whole (`SecretManager::known_values`).
 pub(crate) async fn registered_secret_values(
     secret_manager: &crate::secret::SecretManager,
 ) -> Result<Vec<String>, swage_core::StorageError> {
-    let mut values = secret_manager
+    let values = secret_manager
         .known_values()
         .await
         .map_err(|error| match error {
@@ -193,60 +194,7 @@ pub(crate) async fn registered_secret_values(
                 message: format!("secret redaction set could not be read: {other}"),
             },
         })?;
-    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
     Ok(values)
-}
-
-pub(super) const REDACTED_SECRET: &str = "[REDACTED_SECRET]";
-
-pub(super) fn redact_text(text: &mut String, secret_values: &[impl AsRef<str>]) -> bool {
-    let mut replaced = false;
-    for secret in secret_values {
-        let secret = secret.as_ref();
-        if text.contains(secret) {
-            *text = text.replace(secret, REDACTED_SECRET);
-            replaced = true;
-        }
-    }
-    replaced
-}
-
-/// Mask every registered value in text that may hold them inside serialised
-/// JSON, where a value with quotes, backslashes or control characters appears
-/// escaped: both the escaped and the plain form are replaced.
-pub(crate) fn redact_serialised_text(text: &mut String, secret_values: &[String]) -> bool {
-    let mut changed = false;
-    for secret in secret_values {
-        let encoded = serde_json::to_string(secret).expect("secret text serialises");
-        let escaped = &encoded[1..encoded.len() - 1];
-        if escaped != secret.as_str() {
-            changed |= redact_text(text, &[escaped]);
-        }
-        changed |= redact_text(text, &[secret.as_str()]);
-    }
-    changed
-}
-
-pub(super) fn redact_secret_values(
-    value: &mut serde_json::Value,
-    secret_values: &[String],
-) -> bool {
-    let mut replaced = false;
-    match value {
-        serde_json::Value::String(text) => return redact_text(text, secret_values),
-        serde_json::Value::Array(values) => {
-            for value in values {
-                replaced |= redact_secret_values(value, secret_values);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for value in values.values_mut() {
-                replaced |= redact_secret_values(value, secret_values);
-            }
-        }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
-    }
-    replaced
 }
 
 pub(crate) fn append_provider_visible_reasoning(
@@ -447,7 +395,7 @@ pub(crate) async fn redact_element_texts(
         for element in elements {
             if let Some(secrets) = secrets {
                 if let Some(text) = &mut element.full_text {
-                    redact_text(text, secrets);
+                    mask_text(text, secrets);
                 }
             } else {
                 element.full_text = None;

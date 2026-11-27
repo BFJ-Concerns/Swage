@@ -1,5 +1,7 @@
 //! Hosting and operator control-plane contract.
 
+pub mod sandbox;
+
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -395,6 +397,11 @@ pub struct KnowledgeMirrorRegenerateResponse {
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct HostingSurface {
+    pub sandbox: sandbox::SandboxPolicy,
+    pub git_credential_request: GitCredentialRequest,
+    pub git_credential_response: GitCredentialResponse,
+    pub git_sign_request: GitSignRequest,
+    pub git_sign_response: GitSignResponse,
     secrets: SecretListResponse,
     presence: PresenceSnapshotResponse,
     approvals: ApprovalListResponse,
@@ -410,6 +417,57 @@ pub struct HostingSurface {
     agent_definition_mutation: AgentDefinitionMutationResponse,
     devices: device::DeviceListResponse,
     knowledge_mirror: KnowledgeMirrorRegenerateResponse,
+}
+
+/// One HTTPS git credential lookup on the turn's private IPC socket.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct GitCredentialRequest {
+    pub protocol: String,
+    pub host: String,
+    pub path: Option<String>,
+    pub username: Option<String>,
+    /// The directory git ran the helper in: the repository asking, which
+    /// decides the operator's directory-conditional configuration.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub directory: Option<String>,
+}
+
+/// An absent credential makes git continue without this helper's answer.
+#[derive(Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct GitCredentialResponse {
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+/// One request to sign a git payload on the host, from the sandboxed git's
+/// signing program over the turn's private IPC socket, in the operator's
+/// signing format. The payload is base64-encoded.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "format", rename_all = "snake_case")]
+pub enum GitSignRequest {
+    /// `ssh-keygen -Y sign`: the signing namespace git names (`git`) and the
+    /// public key git was configured with.
+    Ssh {
+        namespace: String,
+        public_key: String,
+        payload: String,
+    },
+    /// `gpg -bsau <key>`: the key git names.
+    Openpgp { key: String, payload: String },
+}
+
+/// The armoured signature for the payload, or the refusal that explains why
+/// the host did not sign. An OpenPGP signature comes with the signer's
+/// status lines, which git reads to confirm the signature was made.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct GitSignResponse {
+    pub signature: Option<String>,
+    pub status: Option<String>,
+    pub refusal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

@@ -108,6 +108,9 @@ async function handle(request, response) {
       "",
       '<span id="test-anchor">Anchor text</span>',
     ].join("\n")]);
+  } else if (serialised.includes("Keep this workflow worker pending")) {
+    // Keep the response in flight while the run opens its decision.
+    response.flushHeaders();
   } else if (serialised.includes("cancel this turn")) {
     await textResponse(response, ["Partial response before cancellation. ", "This tail must never render."], 8_000);
   } else if (serialised.includes("reconnect this turn")) {

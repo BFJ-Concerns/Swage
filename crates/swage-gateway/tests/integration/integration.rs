@@ -461,6 +461,7 @@ async fn an_interrupted_turn_keeps_its_tool_calls_after_restart() {
             turn_id: Some(turn.id),
             role: Role::User,
             origin: swage_storage::MessageOrigin::User,
+            delivered: false,
             content: "write the file".into(),
             attachments: Vec::new(),
             agent_id: "gateway".into(),
@@ -476,7 +477,6 @@ async fn an_interrupted_turn_keeps_its_tool_calls_after_restart() {
                 call_id: call_id.into(),
                 tool: tool.into(),
                 arguments: "{}".into(),
-                model_arguments: "{}".into(),
                 result: None,
                 model_result: None,
                 status: None,
@@ -917,7 +917,7 @@ async fn queued_messages_reach_real_sockets_in_turn_order_and_stay_in_their_sess
         }
         if [
             "turn_complete",
-            "message_appended",
+            "queued_message_sent",
             "queue_drained",
             "token",
         ]
@@ -933,7 +933,7 @@ async fn queued_messages_reach_real_sockets_in_turn_order_and_stay_in_their_sess
             .collect::<Vec<_>>(),
         vec![
             "turn_complete",
-            "message_appended",
+            "queued_message_sent",
             "queue_drained",
             "token",
             "turn_complete"

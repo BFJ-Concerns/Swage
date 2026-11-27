@@ -101,7 +101,6 @@ function clickDiscoveredModel(name: string): void {
   (button as HTMLButtonElement).click();
 }
 
-
 function createdSchedule(topicId: string): Schedule {
   return makeSchedule({
     session: { policy: "fresh", topic_id: topicId, agent_id: "gateway" },
@@ -134,6 +133,7 @@ describe("SettingsPage", () => {
       communication: payload.communication ?? emptySettings().communication,
       sessions: payload.sessions ?? emptySettings().sessions,
       memory: payload.memory ?? emptySettings().memory,
+      judge: payload.judge ?? emptySettings().judge,
       attachments: payload.attachments ?? emptySettings().attachments,
       voice: payload.voice ?? emptySettings().voice,
       restart_required: true,
@@ -519,7 +519,7 @@ describe("SettingsPage", () => {
     component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
     await flushUi();
     const newer = { available_tools: [], scope: { kind: "install" as const },
-      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: ["shell"] },
+      effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "token" as const, require_approval: ["shell"] },
       overrides: { sandbox_enabled: true, require_approval: ["shell"] }, relaxed: [] };
     vi.mocked(settingsApi.saveInstallSecuritySettings).mockResolvedValue(newer);
     await settingsApi.saveInstallSecuritySettings(newer.overrides);
@@ -538,7 +538,7 @@ describe("SettingsPage", () => {
   it("leaves an unsaved edit elsewhere on the page as it was when Security saves", async () => {
     const reading: SecuritySettingsResponse = {
       available_tools: ["shell"], scope: { kind: "install" as const },
-      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: [] },
+      effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "token" as const, require_approval: [] },
       overrides: {}, relaxed: [],
     };
     vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);
@@ -579,7 +579,7 @@ describe("SettingsPage", () => {
     expect(parseRoute("/settings/security").settingsTab).toBe("security");
     const reading: SecuritySettingsResponse = {
       available_tools: ["shell", "file_write"], scope: { kind: "install" as const },
-      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: [] },
+      effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "token" as const, require_approval: [] },
       overrides: {}, relaxed: [],
     };
     vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);
@@ -627,7 +627,7 @@ describe("SettingsPage", () => {
   it("refuses an approval timeout too large to save instead of saving without it", async () => {
     const reading: SecuritySettingsResponse = {
       available_tools: ["shell"], scope: { kind: "install" as const },
-      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: [] },
+      effective: { sandbox_enabled: true, sandbox_network: "open" as const, access_gate: "token" as const, require_approval: [] },
       overrides: {}, relaxed: [],
     };
     vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);
@@ -1459,6 +1459,17 @@ describe("SettingsPage", () => {
     field!.dispatchEvent(new Event("input", { bubbles: true }));
     await waitForSaveCall();
     expect(settingsApi.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ attachments: { accepted_schemes: ["https", "http", "custom+image"] } }));
+  });
+
+  it("autosaves the judge model edited on its own from Automation", async () => {
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
+    await flushUi();
+    const field = document.querySelector<HTMLInputElement>('input[aria-label="Judge model"]');
+    if (!field) throw new Error("Judge model input was not rendered");
+    field.value = "haiku";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    expect(settingsApi.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ judge: { model: "haiku" } }));
   });
 
   it("saves the session archive delay from the automation tab", async () => {

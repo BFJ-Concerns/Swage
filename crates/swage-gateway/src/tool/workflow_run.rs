@@ -44,6 +44,10 @@ impl Tool for WorkflowRunTool {
          run that has parked on a wait of its own comes back `parked`, with no output yet. \
          A run still running after ten minutes fails the wait and not the run. A run that \
          has failed by the time the call returns is reported as a failed call. \
+         A script's calls name models by the ids `model_list` returns. Each id comes with \
+         its family and the effort levels it serves, which is what a script needs to put a \
+         check on a different family from the work it checks, and to set the least effort a \
+         call accepts (`minEffort`). \
          The script interface is set out by the `workflow-authoring` skill and by the \
          `workflow-engine` document that `docs_read` returns."
     }
@@ -51,10 +55,23 @@ impl Tool for WorkflowRunTool {
         &self,
         result: &Value,
     ) -> swage_protocol::client::conversation::ToolExecution {
-        if result["state"] == "failed" {
-            swage_protocol::client::conversation::ToolExecution::failed()
-        } else {
-            swage_protocol::client::conversation::ToolExecution::succeeded()
+        use swage_protocol::client::conversation::{
+            ToolCompletion, ToolExecution, ToolExecutionStage, ToolOutcome,
+        };
+
+        match result["state"].as_str() {
+            Some("failed") => ToolExecution::failed(),
+            Some("cancelled") => ToolExecution {
+                outcome: ToolOutcome::Cancelled,
+                stage: ToolExecutionStage::Finished,
+                completion: ToolCompletion::Confirmed,
+            },
+            Some("interrupted") => ToolExecution {
+                outcome: ToolOutcome::Failed,
+                stage: ToolExecutionStage::Started,
+                completion: ToolCompletion::Unknown,
+            },
+            _ => ToolExecution::succeeded(),
         }
     }
 
@@ -217,6 +234,19 @@ mod tests {
         NewSession, SessionStore, SqliteStorage, Storage, TopicStore, WorkflowStore,
     };
     use swage_tool::context::MockToolContext;
+
+    #[test]
+    fn cancelled_and_interrupted_runs_are_not_successful_calls() {
+        use swage_protocol::client::conversation::{ToolCompletion, ToolOutcome};
+
+        let cancelled = WorkflowRunTool.execution_outcome(&json!({"state": "cancelled"}));
+        assert_eq!(cancelled.outcome, ToolOutcome::Cancelled);
+        assert_eq!(cancelled.completion, ToolCompletion::Confirmed);
+
+        let interrupted = WorkflowRunTool.execution_outcome(&json!({"state": "interrupted"}));
+        assert_eq!(interrupted.outcome, ToolOutcome::Failed);
+        assert_eq!(interrupted.completion, ToolCompletion::Unknown);
+    }
 
     #[tokio::test]
     async fn dispatcher_returns_actionable_error_for_ambiguous_workflow_input() {

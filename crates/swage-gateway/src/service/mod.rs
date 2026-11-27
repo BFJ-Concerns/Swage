@@ -20,8 +20,6 @@ pub use workspace_attachment::*;
 pub(crate) use swage_core::is_lowercase_identifier;
 
 #[cfg(test)]
-use serde_json::Value as JsonValue;
-#[cfg(test)]
 use swage_core::{GatewayError, Role, StorageError};
 #[cfg(test)]
 use swage_storage::model::{NewAgentDefinition, NewSession, NewTopic, TopicSlug};
@@ -33,7 +31,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use swage_core::{compact_tool_arguments_for_model, compact_tool_result_for_model};
+    use swage_core::compact_tool_result_for_model;
     use swage_storage::sqlite::SqliteStorage;
     use swage_storage::{
         AuditStore,
@@ -49,11 +47,6 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
         )
-    }
-
-    fn model_arguments(raw: &str) -> String {
-        let value = serde_json::from_str(raw).unwrap_or_else(|_| JsonValue::String(raw.into()));
-        compact_tool_arguments_for_model(&value)
     }
 
     fn model_result(raw: &str) -> String {
@@ -836,6 +829,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::User,
                 origin: swage_storage::MessageOrigin::User,
+                delivered: false,
                 content: "Hello!".to_string(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -924,6 +918,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::User,
                 origin: swage_storage::MessageOrigin::User,
+                delivered: false,
                 content: "Hi".to_string(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -937,6 +932,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "Hello!".to_string(),
                 position: 1,
                 agent_id: "gateway".to_string(),
@@ -1035,6 +1031,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::User,
                 origin: swage_storage::MessageOrigin::User,
+                delivered: false,
                 content: "list files".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -1049,6 +1046,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "I'll run ls for you.".into(),
                 position: 1,
                 agent_id: "gateway".to_string(),
@@ -1064,7 +1062,6 @@ default_effort = "high"
                 call_id: "toolu_01".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"ls"}"#.into(),
-                model_arguments: model_arguments(r#"{"cmd":"ls"}"#),
                 result: Some("file1\nfile2".into()),
                 model_result: Some(model_result("file1\nfile2")),
                 status: Some("success".into()),
@@ -1134,6 +1131,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "Ran python".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -1150,7 +1148,6 @@ default_effort = "high"
                 call_id: "py_01".into(),
                 tool: "python_execute".into(),
                 arguments: r#"{"code":"1+1"}"#.into(),
-                model_arguments: model_arguments(r#"{"code":"1+1"}"#),
                 result: None,
                 model_result: None,
                 status: None,
@@ -1174,7 +1171,6 @@ default_effort = "high"
                 call_id: "sub_01".into(),
                 tool: "shell".into(),
                 arguments: r#"{"cmd":"echo hi"}"#.into(),
-                model_arguments: model_arguments(r#"{"cmd":"echo hi"}"#),
                 result: Some("hi".into()),
                 model_result: Some(model_result("hi")),
                 status: Some("success".into()),
@@ -1237,6 +1233,7 @@ default_effort = "high"
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "Hello".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),

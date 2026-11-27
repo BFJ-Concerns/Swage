@@ -30,6 +30,7 @@
 //! asks for a summary, so the audit trail names the text behind every
 //! summary and a session that never summarises holds no selection.
 
+use crate::state::AppState;
 use std::collections::{BTreeMap, HashMap};
 
 use swage_core::{CompletionRequest, Role};
@@ -82,9 +83,128 @@ pub(super) struct SuccessionSite<'a> {
     /// The models the diagnosis's readers and synthesis are sent to, or why
     /// they could not be resolved.
     pub diagnosis_models: Result<DiagnosisModels, String>,
+    /// What fills the succession slot under the active turn-graph revision.
+    pub summariser: Summariser,
+    /// The branches shadowing the succession step this turn: each runs the
+    /// same request beside the live one and is recorded, never served.
+    pub shadows: Vec<Shadow>,
     /// Where the conversation summary's instruction comes from, asked only
     /// when a pass is about to request a summary.
     pub summary_instructions: &'a dyn SummaryInstructionSource,
+}
+
+/// What summarises: the kernel's provider call, a plugin's slot, or a
+/// saved workflow run with the summariser's request.
+#[derive(Clone)]
+pub(crate) enum Summariser {
+    Builtin,
+    Plugin(crate::plugin::slot::PluginSlot),
+    /// The gateway, boxed: the site is held across the turn's awaits, and
+    /// the gateway's own size would otherwise sit in every turn's future.
+    Workflow {
+        name: String,
+        state: Box<AppState>,
+        /// The session the run is dispatched for, so the run's record names
+        /// the turn it served.
+        session_id: Option<Uuid>,
+    },
+}
+
+impl Summariser {
+    /// What serves the slot, as the turn's record names it.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Summariser::Builtin => "builtin".to_owned(),
+            Summariser::Plugin(slot) => format!("plugin {}", slot.plugin),
+            Summariser::Workflow { name, .. } => format!("workflow {name}"),
+        }
+    }
+}
+
+/// A shadow of the succession step: a branch's filler and the recorder that
+/// writes what it answered beside the live answer.
+#[derive(Clone)]
+pub(crate) struct Shadow {
+    pub branch: String,
+    pub summariser: Summariser,
+    pub record: std::sync::Arc<dyn Fn(ShadowOutcome) + Send + Sync>,
+}
+
+/// What a shadow produced, beside what served.
+#[derive(Debug, Clone)]
+pub(crate) struct ShadowOutcome {
+    pub branch: String,
+    pub live_summary: String,
+    pub shadow_summary: Result<String, String>,
+}
+
+impl Summariser {
+    /// Run the succession pass with this summariser.
+    async fn succeed(
+        &self,
+        request: SuccessionRequest<'_>,
+        instructions: &str,
+        provider: &dyn LlmProvider,
+        tokeniser: &TiktokenTokeniser,
+        calls: &mut Vec<SuccessionCall>,
+    ) -> Result<succession::Succession, succession::SuccessionError> {
+        match self {
+            Summariser::Builtin => {
+                succession::succeed(request, instructions, provider, tokeniser, calls).await
+            }
+            Summariser::Plugin(slot) => {
+                succession::succeed_with(
+                    request,
+                    instructions,
+                    |completion| async move { slot.summarise(completion, calls).await },
+                    tokeniser,
+                )
+                .await
+            }
+            Summariser::Workflow {
+                name,
+                state,
+                session_id,
+            } => {
+                succession::succeed_with(
+                    request,
+                    instructions,
+                    |completion| async move {
+                        let input = serde_json::json!({
+                            "messages": completion
+                                .messages
+                                .iter()
+                                .map(|message| serde_json::json!({ "role": format!("{:?}", message.role()).to_lowercase(), "content": message.text_content() }))
+                                .collect::<Vec<_>>(),
+                            "model": completion.model,
+                        });
+                        // A saved run is a large future; boxed so the turn's
+                        // own stays small whatever fills the slot.
+                        let output = Box::pin(crate::workflow::run_saved_workflow_for_slot(
+                            (**state).clone(),
+                            name,
+                            input,
+                            std::time::Duration::from_secs(120),
+                            *session_id,
+                        ))
+                        .await
+                        .map_err(succession::SuccessionError::Summariser)?;
+                        output
+                            .get("summary")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .ok_or_else(|| {
+                                succession::SuccessionError::Summariser(format!(
+                                    "workflow '{name}' returned no summary"
+                                ))
+                            })
+                    },
+                    tokeniser,
+                )
+                .await
+            }
+        }
+    }
 }
 
 /// The source of the instruction a conversation summary is written under.
@@ -312,7 +432,7 @@ pub(super) async fn succeed_over_threshold(
         }
         CompactionThreshold::TokenCount(_) => None,
     };
-    let request = SuccessionRequest {
+    let request = || SuccessionRequest {
         carried: &carried,
         history: &history,
         focus: site.focus,
@@ -322,15 +442,43 @@ pub(super) async fn succeed_over_threshold(
     // A history too short to split asks for no summary, so it selects no
     // instruction either.
     let outcome = async {
-        succession::split_point(&request)?;
-        succession::succeed(
-            request,
-            selected_summary_instructions(&site).await?,
-            site.provider,
-            site.tokeniser,
-            &mut calls,
-        )
-        .await
+        succession::split_point(&request())?;
+        let instructions = selected_summary_instructions(&site).await?;
+        let live = site
+            .summariser
+            .succeed(
+                request(),
+                instructions,
+                site.provider,
+                site.tokeniser,
+                &mut calls,
+            )
+            .await;
+        // A shadow runs the same request beside the live answer and is only
+        // recorded: the turn serves what the live summariser answered, and
+        // the record's calls are the live pass's.
+        if let Ok(live) = &live {
+            for shadow in &site.shadows {
+                let shadow_summary = shadow
+                    .summariser
+                    .succeed(
+                        request(),
+                        instructions,
+                        site.provider,
+                        site.tokeniser,
+                        &mut Vec::new(),
+                    )
+                    .await
+                    .map(|succession| succession.element.summary().to_owned())
+                    .map_err(|error| error.to_string());
+                (shadow.record)(ShadowOutcome {
+                    branch: shadow.branch.clone(),
+                    live_summary: live.element.summary().to_owned(),
+                    shadow_summary,
+                });
+            }
+        }
+        live
     }
     .await;
     match outcome {
@@ -1413,6 +1561,8 @@ mod tests {
                 }),
                 diagnosis_models: Ok(DiagnosisModels::default()),
                 summary_instructions: instructions,
+                summariser: Summariser::Builtin,
+                shadows: Vec::new(),
             },
             elements,
             output,
@@ -1621,6 +1771,8 @@ mod tests {
                 reader: Some("reader-model".to_string()),
                 synthesis: Some("synthesis-model".to_string()),
             }),
+            summariser: Summariser::Builtin,
+            shadows: Vec::new(),
             summary_instructions: &AUTHORED_INSTRUCTIONS,
         };
         // A failed call as the gateway replays it: an assistant message
@@ -1762,6 +1914,8 @@ mod tests {
                 tokeniser: &tokeniser,
                 degradation: None,
                 diagnosis_models: Ok(DiagnosisModels::default()),
+                summariser: Summariser::Builtin,
+                shadows: Vec::new(),
                 summary_instructions: &AUTHORED_INSTRUCTIONS,
             };
             let history: Vec<_> = (0..8)
@@ -1853,6 +2007,8 @@ mod tests {
                 previous: None,
             }),
             diagnosis_models: Ok(DiagnosisModels::default()),
+            summariser: Summariser::Builtin,
+            shadows: Vec::new(),
             summary_instructions: &AUTHORED_INSTRUCTIONS,
         };
         let result = succeed_over_threshold(
@@ -1922,6 +2078,8 @@ mod tests {
                         previous: None,
                     }),
                     diagnosis_models: Ok(DiagnosisModels::default()),
+                    summariser: Summariser::Builtin,
+                    shadows: Vec::new(),
                     summary_instructions: &AUTHORED_INSTRUCTIONS,
                 },
                 vec![Box::new(HistoryElement::new(history))],
@@ -2011,6 +2169,8 @@ mod tests {
                     }),
                     diagnosis_models: Ok(DiagnosisModels::default()),
                     summary_instructions: &AUTHORED_INSTRUCTIONS,
+                    summariser: Summariser::Builtin,
+                    shadows: Vec::new(),
                 },
                 elements,
                 output,
@@ -2163,6 +2323,136 @@ mod tests {
             wall_set(&[calling_turn, failed_turn]),
             expected,
             "the set, not the order it was read in"
+        );
+    }
+
+    /// A host for a slot under test: no tools, one summary per completion.
+    struct SlotTestHost;
+
+    #[async_trait::async_trait]
+    impl swage_plugin::PluginHost for SlotTestHost {
+        async fn call_tool(
+            &self,
+            name: &str,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, swage_plugin::HostCallFailure> {
+            Err(swage_plugin::HostCallFailure {
+                name: "HostCapabilityError".into(),
+                message: format!("no tools: {name}"),
+            })
+        }
+        async fn complete(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, swage_plugin::HostCallFailure> {
+            Ok(
+                serde_json::json!({ "content": "the plugin's gist", "input_tokens": 1, "output_tokens": 1 }),
+            )
+        }
+        fn log(&self, _: &str) {}
+    }
+
+    #[tokio::test]
+    async fn a_plugin_filling_the_succession_slot_runs_in_the_step_s_place_and_a_shadow_is_recorded()
+     {
+        let manifest = swage_plugin::PluginManifest::parse(
+            r#"
+            name = "summariser"
+            version = "1"
+            description = "Summarises."
+            script = "plugin.js"
+            grants = ["model"]
+            [[provides.slots]]
+            name = "succession"
+            "#,
+        )
+        .unwrap();
+        let runtime = swage_plugin::PluginRuntime::start(
+            manifest,
+            r#"swage.provide.slot("succession", async (input) => {
+                const reply = await swage.complete({ messages: input.messages });
+                return { summary: "PLUGIN: " + reply.content };
+            });"#
+                .to_owned(),
+        )
+        .await
+        .expect("starts");
+        let slot = crate::plugin::slot::PluginSlot::new(
+            "summariser".into(),
+            runtime,
+            std::sync::Arc::new(SlotTestHost),
+            swage_plugin::InvocationContext {
+                session_id: Uuid::nil().to_string(),
+                agent_id: "agent-a".into(),
+                call_id: None,
+                working_directory: "/work".into(),
+            },
+        );
+        let provider = RecordingProvider::default();
+        let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
+        let variables = BTreeMap::new();
+        let threshold = CompactionThreshold::MessageCount(3);
+        let history: Vec<_> = (0..8)
+            .map(|index| ChatMessage::new(Role::User, format!("message {index}")))
+            .collect();
+        let assemble = |elements: &[Box<dyn ContextElement>]| {
+            AssemblyOutput::new_unchecked(
+                elements
+                    .iter()
+                    .flat_map(|element| element.content())
+                    .collect(),
+                swage_context::report::AssemblyReport::default(),
+            )
+        };
+        let output = assemble(&[Box::new(HistoryElement::new(history.clone()))]);
+        let outcomes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&outcomes);
+        let site = SuccessionSite {
+            provider: &provider,
+            threshold: &threshold,
+            model: None,
+            focus: None,
+            variables: &variables,
+            tokeniser: &tokeniser,
+            degradation: None,
+            diagnosis_models: Ok(DiagnosisModels::default()),
+            summariser: Summariser::Plugin(slot),
+            shadows: vec![Shadow {
+                branch: "trial".into(),
+                summariser: Summariser::Builtin,
+                record: std::sync::Arc::new(move |outcome: ShadowOutcome| {
+                    recorded.lock().unwrap().push(outcome);
+                }),
+            }],
+            summary_instructions: &AUTHORED_INSTRUCTIONS,
+        };
+        let result = succeed_over_threshold(
+            site,
+            vec![Box::new(HistoryElement::new(history))],
+            output,
+            assemble,
+        )
+        .await;
+        let summary = result
+            .messages
+            .iter()
+            .map(|message| message.text_content())
+            .find(|text| text.contains("PLUGIN: the plugin's gist"))
+            .expect("the plugin's summary stands in for the summarised history");
+        assert!(summary.contains("PLUGIN: the plugin's gist"));
+        let outcomes = outcomes.lock().unwrap();
+        assert_eq!(outcomes.len(), 1, "the shadow ran once");
+        assert_eq!(outcomes[0].branch, "trial");
+        assert!(outcomes[0].live_summary.starts_with("PLUGIN:"));
+        assert!(
+            outcomes[0].shadow_summary.is_ok(),
+            "the builtin shadow answered through the provider: {:?}",
+            outcomes[0].shadow_summary
+        );
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            1,
+            "the provider served the shadow only; the live step was the plugin's"
         );
     }
 }

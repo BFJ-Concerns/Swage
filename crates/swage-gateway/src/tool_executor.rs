@@ -17,7 +17,7 @@ use swage_core::{SandboxError, ToolError};
 use swage_sandbox::Sandbox;
 use swage_storage::store::Storage;
 use swage_tool::context::{SerializableToolContext, ToolContext, serialise_tool_context};
-use swage_tool::dispatch::ToolExecutionStrategy;
+use swage_tool::dispatch::{ToolDispatcher, ToolExecutionStrategy};
 use swage_tool::tool::Tool;
 
 use crate::device::RegisteredDevice;
@@ -25,8 +25,20 @@ use crate::secret::SecretManager;
 use crate::state::AppState;
 use crate::websocket::ServerEvent;
 
+#[derive(Clone)]
+pub struct PythonExecution {
+    pub sandbox: Option<swage_sandbox::SandboxConfig>,
+    pub egress: Option<swage_sandbox::EgressSetup>,
+    pub dispatcher: Arc<swage_tool::dispatch::ToolDispatcher>,
+    // Keep the private IPC services alive through nested calls and workers.
+    pub credentials: Arc<crate::git_credential::CredentialServer>,
+    /// The host signer, when the operator signs commits with SSH.
+    pub signer: Option<Arc<crate::git_signer::SignerServer>>,
+}
+
 pub struct GatewayToolContext {
     base: SerializableToolContext,
+    pub(crate) python_execution: Option<PythonExecution>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     storage: Arc<dyn Storage>,
     /// The full gateway state, present when the tool runs inside a live host
@@ -35,6 +47,14 @@ pub struct GatewayToolContext {
     /// the schedule tools, which drive the gateway's schedule service — read
     /// it and fail cleanly when it is missing.
     app_state: Option<AppState>,
+    /// The session's dispatcher for calls a host-side tool makes on the
+    /// session's behalf: the turn's registry, permissions and execution
+    /// strategy, so a nested call meets the gates the model's own would.
+    session_dispatcher: Option<Arc<ToolDispatcher>>,
+    /// Where the turn places a process started on the session's behalf (a
+    /// plugin's brokered process): the sandbox its commands run in, or
+    /// none where the turn runs without one.
+    process_placement: Option<Arc<crate::plugin::process::ProcessPlacement>>,
 }
 
 impl GatewayToolContext {
@@ -45,10 +65,29 @@ impl GatewayToolContext {
     ) -> Self {
         Self {
             base: serialise_tool_context(ctx),
+            python_execution: None,
             ws_tx,
             storage,
             app_state: None,
+            session_dispatcher: None,
+            process_placement: None,
         }
+    }
+
+    /// Attach where the turn places processes started on the session's
+    /// behalf.
+    pub fn with_process_placement(
+        mut self,
+        placement: Option<Arc<crate::plugin::process::ProcessPlacement>>,
+    ) -> Self {
+        self.process_placement = placement;
+        self
+    }
+
+    /// Where the turn places processes started on the session's behalf,
+    /// when this context was built inside a turn.
+    pub fn process_placement(&self) -> Option<&Arc<crate::plugin::process::ProcessPlacement>> {
+        self.process_placement.as_ref()
     }
 
     /// Attach the live gateway state to a context. Used on the host turn path
@@ -56,6 +95,18 @@ impl GatewayToolContext {
     pub fn with_app_state(mut self, app_state: Option<AppState>) -> Self {
         self.app_state = app_state;
         self
+    }
+
+    /// Attach the session's dispatcher for nested calls.
+    pub fn with_session_dispatcher(mut self, dispatcher: Option<Arc<ToolDispatcher>>) -> Self {
+        self.session_dispatcher = dispatcher;
+        self
+    }
+
+    /// The session's dispatcher, when this context was built inside a turn
+    /// whose build supplied one.
+    pub fn session_dispatcher(&self) -> Option<&Arc<ToolDispatcher>> {
+        self.session_dispatcher.as_ref()
     }
 
     pub fn ws_tx(&self) -> &mpsc::UnboundedSender<ServerEvent> {
@@ -170,6 +221,7 @@ impl ToolExecutionStrategy for SandboxedExecutor {
 pub struct GatewayExecutionStrategy {
     /// Optional inner strategy — e.g. `SandboxedExecutor` when sandbox is enabled.
     inner: Option<Arc<dyn ToolExecutionStrategy>>,
+    python_execution: Option<PythonExecution>,
     /// WebSocket sender for sub-tool lifecycle events inside Python.
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     /// Resolved device for the current turn.
@@ -182,6 +234,13 @@ pub struct GatewayExecutionStrategy {
     /// storage. Present on the real turn path; `None` where a strategy is
     /// built without a full state (tests exercising the strategy directly).
     app_state: Option<AppState>,
+    /// The dispatcher a host-side tool uses for calls it makes on the
+    /// session's behalf: the same registry and permissions as the turn's
+    /// own dispatcher, over a strategy of this shape. Set by the turn's
+    /// build; `None` where no nested call can be gated, which refuses it.
+    session_dispatcher: Option<Arc<ToolDispatcher>>,
+    /// Where this turn places processes started on the session's behalf.
+    process_placement: Option<Arc<crate::plugin::process::ProcessPlacement>>,
 }
 
 impl GatewayExecutionStrategy {
@@ -195,12 +254,35 @@ impl GatewayExecutionStrategy {
     ) -> Self {
         Self {
             inner,
+            python_execution: None,
             ws_tx,
             device,
             secret_manager,
             storage,
             app_state,
+            session_dispatcher: None,
+            process_placement: None,
         }
+    }
+
+    /// Hand host-side tools a dispatcher for the session's own calls.
+    pub fn with_session_dispatcher(mut self, dispatcher: Arc<ToolDispatcher>) -> Self {
+        self.session_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Where this turn places processes started on the session's behalf.
+    pub fn with_process_placement(
+        mut self,
+        placement: Arc<crate::plugin::process::ProcessPlacement>,
+    ) -> Self {
+        self.process_placement = Some(placement);
+        self
+    }
+
+    pub fn with_python_execution(mut self, execution: PythonExecution) -> Self {
+        self.python_execution = Some(execution);
+        self
     }
 }
 
@@ -216,11 +298,20 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         let resolved_params = if tool.device_secret_keys().is_empty() {
             params.clone()
         } else {
-            resolve_secret_params(params, tool.device_secret_keys(), &self.secret_manager).await?
+            resolve_secret_params(
+                params,
+                tool.device_secret_keys(),
+                &self.secret_manager,
+                ctx.session_id().parse().ok(),
+            )
+            .await?
         };
-        let gateway_ctx =
+        let mut gateway_ctx =
             GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage))
-                .with_app_state(self.app_state.clone());
+                .with_app_state(self.app_state.clone())
+                .with_session_dispatcher(self.session_dispatcher.clone())
+                .with_process_placement(self.process_placement.clone());
+        gateway_ctx.python_execution = self.python_execution.clone();
 
         if let Some(device) = self
             .device
@@ -291,6 +382,7 @@ async fn resolve_secret_params(
     params: &Value,
     keys: &[&str],
     secret_manager: &SecretManager,
+    session_id: Option<uuid::Uuid>,
 ) -> Result<Value, ToolError> {
     let mut resolved = params.clone();
     let Some(object) = resolved.as_object_mut() else {
@@ -306,12 +398,13 @@ async fn resolve_secret_params(
         if !reference.starts_with("secret://") {
             continue;
         }
-        let secret = secret_manager.resolve(reference).await.map_err(|error| {
-            ToolError::ExecutionFailed {
+        let secret = secret_manager
+            .resolve_for_session(reference, session_id)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
                 name: "secret_resolution".into(),
                 message: error.to_string(),
-            }
-        })?;
+            })?;
         *value = Value::String(secret.value);
     }
     Ok(resolved)
@@ -711,15 +804,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn gateway_strategy_resolves_secret_refs_on_host_and_bypasses_inner_strategy() {
         // The managed-secret backend reads its encryption key from the
-        // environment. Provide one so the test is self-contained (mirroring
-        // the swage-storage secret tests) rather than passing only in shells
-        // that happen to export a dev key.
-        unsafe {
-            std::env::set_var(
-                "SWAGE_MANAGED_SECRET_KEY",
-                "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
-            );
-        }
+        // environment; the guard sets it and holds it against the other
+        // tests that set it, for as long as this test runs.
+        let _key = crate::secret::tests::with_secret_env();
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(RecordingStrategy::new(json!({"via": "strategy"})));
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());

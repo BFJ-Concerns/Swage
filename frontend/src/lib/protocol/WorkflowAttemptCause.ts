@@ -3,4 +3,4 @@
 /**
  * Why an attempt of an agent call was dispatched.
  */
-export type WorkflowAttemptCause = { "cause": "first" } | { "cause": "after_interruption" } | { "cause": "provider_fallback", primary_failure: string, };
+export type WorkflowAttemptCause = { "cause": "first" } | { "cause": "after_interruption" } | { "cause": "provider_fallback", primary_failure: string, } | { "cause": "after_provider_failure", failure: string, };

@@ -84,6 +84,23 @@ The whole prior and new objects are kept collapsed beneath each entry.
 The pane also shows variant selections (location, variant, reason, session,
 turn) and assembly decisions.
 
+Two event families record what the gateway paid for and ran. A `tool_call`
+event is written by storage triggers (migration `067_tool_call_audit`) when a
+`tool_calls` row's status is set, carrying the tool, status, arguments, result
+and duration, attributed to the turn's session. A `completion` event is
+written by `RecordingProvider` (`crates/swage-gateway/src/completion_record.rs`),
+which `startup::create_provider` wraps around each model's adapter beneath
+retry and failover, so each attempt is recorded under the model that served it:
+one event per `complete`, `complete_with_tools` or `stream` call, carrying the
+model, `max_tokens`, `finish_reason`, an `outcome` (`cut off at its length
+limit`, `interrupted` for a stream dropped before it ended, `failed`, …),
+tokens, cost and the returned content, reasoning and tool calls, masked of
+registered secret values. Its session and turn come from
+`swage_provider::attribution::COMPLETION_ATTRIBUTION`, which
+`Agent::process_turn_streaming` sets around each turn; a completion made off
+a turn's task has none. The pane shows a `result`, `content`, `tool_calls` or
+`error` field under "What it returned".
+
 ## Turn context inspector
 
 Each assistant message with a `turn_id` shows a "context" button
@@ -237,6 +254,27 @@ column of the `messages` table (`TEXT NOT NULL DEFAULT '[]'`). The
 `MessageView` returned by the API includes the `attachments` array.
 Text-only messages keep the plain string form on the wire; messages with
 image parts use the provider-specific typed content array.
+
+## Reference material
+
+The composer's **Attach files** and **Attach folder** controls give a session
+material to work from. A PNG or JPEG image (chosen, or pasted into the message
+field) goes with the next message as an [image attachment](#image-attachments).
+A text file, and each text file of a chosen folder, is registered at once as
+the session's reference material through `POST /api/materials`, titled by its
+name or, for a folder, by its path within the folder. A folder brings in at
+most 500 files; files in hidden directories, empty files, files over 1 MB and
+files that are not text are skipped, and the composer says how many. The list
+under the message field shows the session's active material, and **Remove**
+archives one.
+
+Each turn's context carries the active material of its session and, inside a
+topic, of that topic: one entry per material with its title, type, size and
+id. A short material (up to 4 KiB, and 16 KiB across all of them) is quoted
+whole beneath its entry. The agent reads any material with `material_read`
+by that id, a part at a time when it is longer than the tool output limit
+(`[tools] max_output_bytes`). Archived material, and material of another
+session or topic, is neither listed nor readable.
 
 ## Provider setup
 
@@ -1124,6 +1162,7 @@ two sandbox-eligible tools.
 | `agent_memory` | `agent_memory.rs` |
 | `memory` | `memory.rs` — sandbox-eligible; reads and writes the shared memory files of the session's scope — the topic's memory when a topic is selected, the general memory otherwise |
 | `tool_result_read` | `tool_result_read.rs` |
+| `material_read` | `material.rs` — reads an active reference material of the session or its topic by id, in parts past the output limit; see [Reference material](#reference-material) |
 
 ### Delegation
 
@@ -1175,8 +1214,18 @@ does not create files or directories in an attached workspace.
 Paired-device execution still stores artefacts in its working directory at
 `.swage/tool-output/` and reports relative paths.
 
-Plugin tools (`plugin.rs`) are dynamically registered from operator
-configuration; their names come from the plugin manifest. Each enters
-through `ToolRegistry::register`, so one named after a built-in
-(`PROTECTED_NAMES`) or after a tool already registered is left out with a
-startup warning.
+Plugin tools come from installed plugins (`crates/swage-plugin`, the kernel;
+`crates/swage-gateway/src/plugin/`, the install records, enablement and the
+`PluginTool` wrapper). A plugin is a package directory with a `plugin.toml`
+manifest and a script; the manifest declares the tools it provides, the host
+grants it needs, the secrets it holds and the function it is a variant of.
+Installing (`POST /api/plugins`, Settings → Plugins) copies the package under
+`<data root>/plugins/<name>/<revision>/`, records the revision, loads the
+script in a V8 isolate of its own and rebuilds the tool dispatcher. A
+plugin's tools register beside the built-ins; a scope that does not enable
+the plugin (`PUT /api/plugins/{name}/enablement`, per install or topic) has
+them withheld at the turn. The script's `swage.callTool` runs through the
+turn's own dispatcher as a nested call, so a plugin's effects meet the same
+permission, approval and audit gates as the model's. A package whose tool
+takes a built-in tool's name (`PROTECTED_NAMES`, or any tool the dispatcher
+registers as built in) is refused at install, the refusal naming the tool.

@@ -255,7 +255,7 @@ describe("provider failure notice", () => {
     streaming.startTurn("Queued", "Queued-Model");
     const clientId = sendMessage.mock.calls[1][5] as string;
     streaming.handleServerEvent({ type: "message_queued", session_id: "conv-1", queued: {
-      client_id: clientId, id: "q-1", origin: "user", content: "Queued", queued_at: "2026-10-15T12:00:00Z",
+      client_id: clientId, id: "q-1", origin: "user", content: "Queued", thread_id: "root-1", queued_at: "2026-10-15T12:00:00Z",
     } });
     streaming.handleServerEvent({ type: "turn_complete", turn_id: "first-turn" });
     streaming.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-1", turn_id: "queued-turn", queued_ids: ["q-1"] });
@@ -1258,6 +1258,7 @@ describe("branching from a message", () => {
         id: "q-1",
         origin: "user",
         content: "and one more thing",
+        thread_id: "root-1",
         queued_at: "2026-03-20T11:05:00Z",
       },
     ];

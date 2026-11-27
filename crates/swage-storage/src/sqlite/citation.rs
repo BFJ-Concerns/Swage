@@ -55,8 +55,12 @@ fn sql_integer_to_u32(column: usize, value: i64) -> rusqlite::Result<u32> {
 impl CitationStore for SqliteStorage {
     async fn add_citation(
         &self,
-        citation: NewKnowledgeCitation,
+        mut citation: NewKnowledgeCitation,
     ) -> Result<KnowledgeCitation, StorageError> {
+        // Masked before the insert: the table is append-only, so the masking
+        // triggers' rewrite after the insert would be refused. The quote then matches the
+        // extraction it is taken from, which is masked the same way.
+        self.mask(&mut citation.quoted_text);
         if citation.quoted_text.is_empty() {
             return Err(StorageError::ConstraintViolation(
                 "a citation quote must not be empty".into(),

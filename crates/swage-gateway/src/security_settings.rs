@@ -210,6 +210,7 @@ fn effective_checks(
     Ok((
         EffectiveSecurityChecks {
             sandbox_enabled: config.sandbox.enabled,
+            sandbox_network: config.sandbox.network,
             require_approval: wire_entries(&config.tools.permissions.require_approval)?,
             access_gate: config.server.access,
         },
@@ -223,6 +224,7 @@ fn shipped_defaults() -> EffectiveSecurityChecks {
     let permissions = swage_config::ToolPermissionConfig::default();
     EffectiveSecurityChecks {
         sandbox_enabled: sandbox.enabled,
+        sandbox_network: sandbox.network,
         require_approval: wire_entries(&permissions.require_approval)
             .expect("the shipped approval list is a valid wire list"),
         access_gate: swage_config::ServerConfig::default().access,
@@ -329,6 +331,7 @@ fn overrides_from_partial(
 ) -> Result<SecurityOverrides, ApiError> {
     Ok(SecurityOverrides {
         sandbox_enabled: partial.sandbox.as_ref().and_then(|sandbox| sandbox.enabled),
+        sandbox_network: partial.sandbox.as_ref().and_then(|sandbox| sandbox.network),
         require_approval: partial
             .tools
             .as_ref()
@@ -348,8 +351,14 @@ fn apply_overrides(
     if let Some(enabled) = overrides.sandbox_enabled {
         partial.sandbox.get_or_insert_with(Default::default).enabled = enabled;
     }
+    if let Some(network) = overrides.sandbox_network {
+        partial.sandbox.get_or_insert_with(Default::default).network = network;
+    }
     if partial.sandbox.as_ref().is_some_and(|sandbox| {
-        sandbox.enabled.is_none() && sandbox.allow_degraded_execution.is_none()
+        sandbox.enabled.is_none()
+            && sandbox.allow_degraded_execution.is_none()
+            && sandbox.network.is_none()
+            && sandbox.egress_hosts.is_none()
     }) {
         partial.sandbox = None;
     }
@@ -384,6 +393,7 @@ fn apply_to_active_config(state: &AppState, partial: &swage_config::PartialConfi
     let defaults = swage_config::SandboxConfig::default();
     let sandbox = partial.sandbox.clone().unwrap_or_default();
     config.sandbox.enabled = sandbox.enabled.unwrap_or(defaults.enabled);
+    config.sandbox.network = sandbox.network.unwrap_or(defaults.network);
     config.tools.permissions.require_approval = partial
         .tools
         .as_ref()
@@ -501,6 +511,7 @@ mod tests {
             SettingsScope::Install,
             save(SecurityOverrides {
                 sandbox_enabled: Some(false),
+                sandbox_network: None,
                 access_gate: Some(AccessGateMode::Warn),
                 require_approval: Some(vec![
                     RequireApprovalEntry::Simple("shell".into()),
@@ -545,6 +556,7 @@ mod tests {
             SettingsScope::Install,
             save(SecurityOverrides {
                 sandbox_enabled: Some(false),
+                sandbox_network: None,
                 require_approval: Some(vec![]),
                 access_gate: Some(AccessGateMode::Warn),
             }),
@@ -823,6 +835,7 @@ mod tests {
 
     fn no_overrides(overrides: &SecurityOverrides) -> bool {
         overrides.sandbox_enabled.is_none()
+            && overrides.sandbox_network.is_none()
             && overrides.require_approval.is_none()
             && overrides.access_gate.is_none()
     }
@@ -943,6 +956,57 @@ mod tests {
                 "security settings saved for the install: sandbox restored",
             ]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn confining_the_sandbox_network_applies_at_once_and_survives_other_saves() {
+        use swage_protocol::client::settings::SandboxNetwork;
+        let (state, _storage, root) = fixture().await;
+        let before = read_security_settings(&state, SettingsScope::Install)
+            .await
+            .expect("read");
+        assert_eq!(before.effective.sandbox_network, SandboxNetwork::Open);
+
+        let confined = save_security_settings(
+            &state,
+            SettingsScope::Install,
+            serde_json::from_value(serde_json::json!({"sandbox_network": "none"})).unwrap(),
+        )
+        .await
+        .expect("save");
+        assert_eq!(confined.effective.sandbox_network, SandboxNetwork::None);
+        assert_eq!(
+            confined.overrides.sandbox_network,
+            Some(SandboxNetwork::None)
+        );
+        assert!(confined.relaxed.is_empty(), "confining relaxes nothing");
+        assert_eq!(state.active_config().sandbox.network, SandboxNetwork::None);
+
+        // A save of another sandbox setting keeps the network as it was.
+        save_security_settings(
+            &state,
+            SettingsScope::Install,
+            serde_json::from_value(serde_json::json!({"sandbox_enabled": null})).unwrap(),
+        )
+        .await
+        .expect("save");
+        let reloaded = swage_config::load_resolved_config_from(
+            root.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .expect("the saved file reloads");
+        assert_eq!(reloaded.sandbox.network, SandboxNetwork::None);
+
+        let opened = save_security_settings(
+            &state,
+            SettingsScope::Install,
+            serde_json::from_value(serde_json::json!({"sandbox_network": null})).unwrap(),
+        )
+        .await
+        .expect("clear");
+        assert_eq!(opened.effective.sandbox_network, SandboxNetwork::Open);
+        assert_eq!(state.active_config().sandbox.network, SandboxNetwork::Open);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -2,7 +2,9 @@ use crate::error::{ConfigProblem, ConfigProblemKind};
 use crate::merge::PartialConfig;
 use crate::model::ResolvedConfig;
 use std::path::Path;
-use swage_protocol::client::settings::{AttachmentsConfig, MemoryConfig, SessionsConfig};
+use swage_protocol::client::settings::{
+    AttachmentsConfig, JudgeConfig, MemoryConfig, SessionsConfig,
+};
 use swage_protocol::client::settings_section::{
     SettingsProblem, SettingsSection, SettingsSectionSchema,
 };
@@ -55,6 +57,7 @@ where
 const DECLARED_SECTIONS: &[&dyn DeclaredSection] = &[
     &Declared::<SessionsConfig>(std::marker::PhantomData),
     &Declared::<MemoryConfig>(std::marker::PhantomData),
+    &Declared::<JudgeConfig>(std::marker::PhantomData),
     &Declared::<AttachmentsConfig>(std::marker::PhantomData),
 ];
 
@@ -191,7 +194,12 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "server" => &["host", "port", "access"],
         "providers" => &["default", "entries"],
         "models" => &["default", "default_model_id", "entries"],
-        "sandbox" => &["enabled", "allow_degraded_execution"],
+        "sandbox" => &[
+            "enabled",
+            "allow_degraded_execution",
+            "network",
+            "egress_hosts",
+        ],
         "logging" => &["level"],
         // Scalar tool settings plus flattened permission fields (allow, deny,
         // bundles, require_approval) which live at the [tools] level in TOML.
@@ -200,7 +208,6 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
             "shell_timeout_secs",
             "python_execute",
             "max_output_bytes",
-            "plugin_directory",
             "search",
             "browser",
             "allow",
@@ -305,12 +312,13 @@ fn check_field_type(
         ("sandbox", "enabled" | "allow_degraded_execution") => {
             ("boolean", matches!(value, Value::Boolean(_)))
         }
+        ("sandbox", "network") => ("string", matches!(value, Value::String(_))),
+        ("sandbox", "egress_hosts") => ("array", matches!(value, Value::Array(_))),
         ("logging", "level") => ("string", matches!(value, Value::String(_))),
         ("tools", "max_identical_failures") => ("integer", matches!(value, Value::Integer(_))),
         ("tools", "shell_timeout_secs") => ("integer", matches!(value, Value::Integer(_))),
         ("tools", "python_execute") => ("table", matches!(value, Value::Table(_))),
         ("tools", "max_output_bytes") => ("integer", matches!(value, Value::Integer(_))),
-        ("tools", "plugin_directory") => ("string", matches!(value, Value::String(_))),
         ("tools", "search") => ("table", matches!(value, Value::Table(_))),
         ("tools", "browser") => ("table", matches!(value, Value::Table(_))),
         ("context", "assembly") => ("string", matches!(value, Value::String(_))),
@@ -412,6 +420,21 @@ fn check_field_semantics(
                     Some(field_path.to_string()),
                     ConfigProblemKind::SemanticError {
                         message: format!("port must be between 1 and 65535, got {port}"),
+                    },
+                ));
+            }
+        }
+        ("sandbox", "network") => {
+            if let Value::String(network) = value
+                && !["open", "none", "proxy"].contains(&network.as_str())
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "unknown sandbox network '{network}'; expected one of: open, none, proxy"
+                        ),
                     },
                 ));
             }

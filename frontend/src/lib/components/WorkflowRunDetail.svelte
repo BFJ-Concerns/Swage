@@ -10,6 +10,7 @@
   never reported reads "not recorded" with its reason, never as zero spend.
 -->
 <script lang="ts">
+  import { describeRedispatchCause } from "../run-attempts";
   import { formatRunTime, formatRunDuration } from "../run-times";
   import { conversationPath } from "../router";
   import type { WorkflowJournalEntry } from "../protocol/WorkflowJournalEntry";
@@ -104,7 +105,9 @@
       case "first":
         return `${ordinal} — the first dispatch`;
       case "after_interruption":
-        return `${ordinal} — dispatched again after a gateway interruption: attempt ${index}'s outcome is unknown and the tool calls it issued may have been applied twice`;
+        return `${ordinal} — dispatched again ${describeRedispatchCause(attempt.cause)}: attempt ${index}'s outcome is unknown and the tool calls it issued may have been applied twice`;
+      case "after_provider_failure":
+        return `${ordinal} — dispatched again ${describeRedispatchCause(attempt.cause)}. Earlier tool calls may have been applied twice`;
       case "provider_fallback":
         return `${ordinal} — dispatched to the declared fallback because the primary failed (${attempt.cause.primary_failure})`;
     }
@@ -198,9 +201,9 @@
             </details>
             <dl>
               {#if call.dispatch.attempts.length > 0}
-                <dt>Attempts</dt>
+                <dt class="attempts-label">Attempts</dt>
                 <dd class="attempts">
-                  <ol class="plain">
+                  <ol role="list">
                     {#each call.dispatch.attempts as attempt, index (index)}
                       <li>
                         <p>{attemptLine(attempt, index)} — {resolvedLabel(attempt)}</p>
@@ -215,7 +218,7 @@
               <dt>Granted</dt>
               <dd>
                 {call.dispatch.grants == null
-                  ? "narrowed nothing"
+                  ? "Uses the worker’s tool permissions"
                   : call.dispatch.grants.join(", ") || "no tools"}
               </dd>
             </dl>
@@ -355,6 +358,18 @@
 
   dd {
     margin: 0;
+  }
+
+  .attempts-label,
+  .attempts {
+    grid-column: 1 / -1;
+  }
+
+  .attempts ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
   }
 
   table.rounds {

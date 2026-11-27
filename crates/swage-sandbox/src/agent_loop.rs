@@ -33,6 +33,11 @@ pub fn child_sandbox_config_from_env() -> Result<Option<crate::config::SandboxCo
         })
 }
 
+/// Apply the Landlock filesystem rules the sandbox config in
+/// `SWAGE_SANDBOX_CONFIG_JSON` describes to this process; nothing when the
+/// variable is unset. The rules persist across `exec`, so a process that
+/// applies them and then execs another program hands that program the
+/// same filesystem the sandboxed agent gets.
 #[cfg(target_os = "linux")]
 fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
     let Some(config) = child_sandbox_config_from_env()? else {
@@ -115,8 +120,7 @@ pub(crate) async fn run_loop(
     let config = child_sandbox_config_from_env()?;
     let tool_output_directory = config
         .as_ref()
-        .and_then(|config| config.tool_output_location.as_ref())
-        .map(|location| location.directory.clone());
+        .and_then(|config| config.tool_output_directory.clone());
     let working_directory = config
         .map(|config| config.working_directory)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
@@ -275,6 +279,19 @@ async fn execute_until_cancelled(
 pub async fn run_agent_loop(tools: Vec<Box<dyn Tool>>) -> Result<(), SandboxError> {
     apply_child_landlock_from_env()?;
 
+    // The one route to the network: a bridge on this namespace's loopback to
+    // the host's proxy socket, named in the environment every command this
+    // process starts inherits. Set before any other task runs, so nothing
+    // reads the environment while it changes.
+    if let Some(bridge) = crate::egress::start_egress_bridge() {
+        for (name, value) in bridge.environment() {
+            // Safety: the loop's own tasks are not yet spawned, and the
+            // runtime's workers read no environment variable concurrently.
+            unsafe { std::env::set_var(name, value) };
+        }
+        tracing::debug!(address = %bridge.address, "egress bridge listening");
+    }
+
     let socket_path = std::env::var("SWAGE_IPC_SOCKET").map_err(|_| SandboxError::IpcError {
         message: "SWAGE_IPC_SOCKET environment variable not set".into(),
     })?;
@@ -293,6 +310,43 @@ pub async fn run_agent_loop(tools: Vec<Box<dyn Tool>>) -> Result<(), SandboxErro
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Run a child command under the same Landlock and network bridge as tools.
+/// With no bridge to keep running, the governor becomes the program (its
+/// pid, its signals, its exit), so whoever started the governor holds the
+/// program itself; with one, it waits on the program and answers its exit
+/// code.
+pub async fn run_sandboxed_command(args: Vec<std::ffi::OsString>) -> Result<i32, SandboxError> {
+    apply_child_landlock_from_env()?;
+    let bridge = crate::egress::start_egress_bridge();
+    let (program, arguments) = args
+        .split_first()
+        .ok_or_else(|| SandboxError::SpawnFailed {
+            message: "sandbox command is missing".into(),
+        })?;
+    if bridge.is_none() {
+        use std::os::unix::process::CommandExt;
+        let error = std::process::Command::new(program).args(arguments).exec();
+        return Err(SandboxError::SpawnFailed {
+            message: format!("failed to exec {}: {error}", program.to_string_lossy()),
+        });
+    }
+    let mut command = tokio::process::Command::new(program);
+    command.args(arguments);
+    if let Some(bridge) = &bridge {
+        command.envs(bridge.environment());
+    }
+    let status = command
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .await
+        .map_err(|error| SandboxError::SpawnFailed {
+            message: error.to_string(),
+        })?;
+    Ok(status.code().unwrap_or(1))
+}
 
 #[cfg(test)]
 mod tests {

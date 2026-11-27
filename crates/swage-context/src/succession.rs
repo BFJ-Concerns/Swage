@@ -22,7 +22,7 @@
 //! context, the runtime's compactor handles it as before, and the report
 //! records the attempt.
 
-use swage_core::{ChatMessage, CompletionRequest, ProviderError, Role, ToolReplayPart};
+use swage_core::{ChatMessage, CompletionRequest, ProviderError, Role};
 use swage_protocol::client::context::{SuccessionCall, SuccessionStage};
 use swage_provider::LlmProvider;
 
@@ -76,6 +76,9 @@ pub enum SuccessionError {
     TooShort(usize),
     #[error("the summarising provider failed: {0}")]
     Provider(#[from] ProviderError),
+    /// The summariser that filled the slot failed; the message is its own.
+    #[error("the summariser failed: {0}")]
+    Summariser(String),
     #[error("the summarising provider returned an empty summary")]
     EmptySummary,
     #[error("the summary reached its output limit and was cut short")]
@@ -107,6 +110,11 @@ pub struct SuccessionElement {
 }
 
 impl SuccessionElement {
+    /// The summary that stands in for the summarised history.
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
     pub fn new(summary: impl Into<String>, summarised: usize, retained: usize) -> Self {
         Self {
             summary: summary.into(),
@@ -174,15 +182,38 @@ pub async fn succeed(
     tokeniser: &dyn Tokeniser,
     calls: &mut Vec<SuccessionCall>,
 ) -> Result<Succession, SuccessionError> {
+    succeed_with(
+        request,
+        instructions,
+        |completion| complete_summary(provider, completion, calls),
+        tokeniser,
+    )
+    .await
+}
+
+/// The succession pass with the summariser as a seam: `summarise` is given
+/// the completion request the provider would get — `instructions` as its
+/// system message, the carried context, the history to summarise, the
+/// focus — and answers with the summary. The split, the element, the
+/// retained history and the record are the same whoever summarises; that is
+/// what makes a summariser a slot.
+pub async fn succeed_with<F, Fut>(
+    request: SuccessionRequest<'_>,
+    instructions: &str,
+    summarise: F,
+    tokeniser: &dyn Tokeniser,
+) -> Result<Succession, SuccessionError>
+where
+    F: FnOnce(CompletionRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<String, SuccessionError>>,
+{
     let summarised = split_point(&request)?;
-    let summary = summarise(
+    let summary = summarise(summary_request(
         instructions,
         request.carried,
         &request.history[..summarised],
         request.focus,
-        provider,
-        calls,
-    )
+    ))
     .await?;
     successor(&request, summary, THRESHOLD_STRATEGY, tokeniser)
 }
@@ -199,9 +230,22 @@ pub async fn summarise(
     provider: &dyn LlmProvider,
     calls: &mut Vec<SuccessionCall>,
 ) -> Result<String, SuccessionError> {
-    let response = provider
-        .complete(summary_request(instructions, carried, history, focus))
-        .await;
+    complete_summary(
+        provider,
+        summary_request(instructions, carried, history, focus),
+        calls,
+    )
+    .await
+}
+
+/// Send a summary request to `provider`, append the completion to `calls`
+/// and answer with notes that are whole.
+async fn complete_summary(
+    provider: &dyn LlmProvider,
+    request: CompletionRequest,
+    calls: &mut Vec<SuccessionCall>,
+) -> Result<String, SuccessionError> {
+    let response = provider.complete(request).await;
     let mut call = recorded_call(provider, SuccessionStage::Summary, None, &response);
     if let Ok(response) = &response {
         if response.finish_reason == swage_core::FinishReason::Length {
@@ -276,7 +320,7 @@ pub fn split_boundary(history: &[ChatMessage], split: usize) -> Result<usize, Su
     // a result whose call was summarised away. Retain the whole call and its
     // results where anything older is left to summarise, otherwise summarise
     // them all.
-    let answers_a_call = |at: usize| answers_a_call(&history[at]);
+    let answers_a_call = |at: usize| history[at].carries_tool_result();
     let mut earlier = split;
     while earlier > 0 && answers_a_call(earlier) {
         earlier -= 1;
@@ -292,19 +336,6 @@ pub fn split_boundary(history: &[ChatMessage], split: usize) -> Result<usize, Su
         return Err(SuccessionError::TooShort(history_len));
     }
     Ok(later)
-}
-
-/// Whether `message` carries a tool result. The gateway replays results
-/// inside a user message's tool replay; the runtime's own tool messages carry
-/// a call id.
-fn answers_a_call(message: &ChatMessage) -> bool {
-    message.role() == Role::Tool
-        || message.tool_call_id().is_some()
-        || message.tool_replay().is_some_and(|parts| {
-            parts
-                .iter()
-                .any(|part| matches!(part, ToolReplayPart::ToolResult { .. }))
-        })
 }
 
 /// The successor's parts from a summary of `request`'s older history,
@@ -333,7 +364,7 @@ pub fn successor_after(
 ) -> Result<Succession, SuccessionError> {
     if summarised == 0
         || summarised >= request.history.len()
-        || answers_a_call(&request.history[summarised])
+        || request.history[summarised].carries_tool_result()
     {
         return Err(SuccessionError::SplitUnavailable(summarised));
     }

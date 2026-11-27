@@ -68,35 +68,17 @@ function emptyAccount(ending: WorkflowRunEnding): WorkflowRunTerminalAccount {
 describe("WorkflowRunView", () => {
   let component: MountedComponent | undefined;
 
-  it.each(["running", "parked"] as const)("cancels a %s run through its route and keeps the terminal account visible", async (state) => {
-    const fetch = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(detail(run(emptyAccount({ ending: "cancelled" })))), { status: 200 }));
+  it.each(["running", "parked"] as const)("keeps a %s run’s cancellation pending until its live update", async (state) => {
+    const fetch = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", fetch);
     try {
-      component = render({ ...run(null), state });
-      const button = document.querySelector<HTMLButtonElement>("header button");
-      expect(button?.textContent).toBe("Cancel");
-      flushSync(() => button!.click());
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-1/cancel", { method: "POST" }));
-      await vi.waitFor(() => expect(document.querySelector(".ending-line")?.textContent).toContain("Cancelled"));
-      expect(document.querySelector("header button")).toBeNull();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("keeps cancellation pending until the received detail is terminal", async () => {
-    const fetch = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(detail(run(null))), { status: 200 }));
-    vi.stubGlobal("fetch", fetch);
-    try {
-      const updates = writable(detail(run(null)));
+      const updates = writable(detail({ ...run(null), state }));
       const current = fromStore(updates);
       component = mount(WorkflowRunView, { target: document.body, props: {
         get detail() { return current.current; }, loadState: "loaded", errorMessage: "",
       } });
       flushSync(() => document.querySelector<HTMLButtonElement>("header button")!.click());
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-1/cancel", { method: "POST" }));
       await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>("header button")?.disabled).toBe(true));
       expect(document.querySelector("header button")?.textContent).toBe("Cancelling…");
       flushSync(() => { updates.set(detail(run(emptyAccount({ ending: "cancelled" })))); });
@@ -139,7 +121,7 @@ describe("WorkflowRunView", () => {
     const account = emptyAccount({ ending: "cancelled" });
     account.cancellation = { source: "API request", actor: "operator", session_id: "session-1", requested_at: "2026-10-15T10:00:00Z" };
     account.workers.cut_short.push({ journal_entry_id: "cut-short", seq: 1, label: "worker", agent_definition_id: null, placement: null, worktree: null,
-      redispatched_after_interruption: false,
+      redispatch_causes: [],
       termination: { termination: "cut_short", cause: "run_cancelled", detail: "WorkflowCancelledError: run cancelled" } });
     component = render(run(account));
     expect(getComputedStyle(document.querySelector(".detail")!).textTransform).toBe("none");
@@ -170,7 +152,7 @@ describe("WorkflowRunView", () => {
             placement: "/worktrees/run-1/finishing",
             worktree: null,
             termination: null,
-            redispatched_after_interruption: false,
+            redispatch_causes: [],
           },
         ],
         failed: [
@@ -185,7 +167,7 @@ describe("WorkflowRunView", () => {
               termination: "failed",
               message: "the worker exhausted its attempts",
             },
-            redispatched_after_interruption: false,
+            redispatch_causes: [],
           },
         ],
         cut_short: [
@@ -201,7 +183,7 @@ describe("WorkflowRunView", () => {
               cause: "run_cancelled",
               detail: "the run was cancelled",
             },
-            redispatched_after_interruption: false,
+            redispatch_causes: [],
           },
         ],
         unsettled: [
@@ -213,7 +195,7 @@ describe("WorkflowRunView", () => {
             placement: null,
             worktree: null,
             termination: { termination: "unsettled" },
-            redispatched_after_interruption: false,
+            redispatch_causes: [],
           },
         ],
       },
@@ -267,7 +249,13 @@ describe("WorkflowRunView", () => {
             placement: null,
             worktree: null,
             termination: null,
-            redispatched_after_interruption: true,
+            redispatch_causes: [{ cause: "after_interruption" }],
+          },
+          {
+            journal_entry_id: "provider-replay",
+            seq: 2,
+            label: "retried worker",
+            redispatch_causes: [{ cause: "after_provider_failure", failure: "provider unavailable" }],
           },
           {
             journal_entry_id: "entry-2",
@@ -277,7 +265,7 @@ describe("WorkflowRunView", () => {
             placement: null,
             worktree: null,
             termination: null,
-            redispatched_after_interruption: false,
+            redispatch_causes: [],
           },
         ],
         failed: [],
@@ -297,14 +285,16 @@ describe("WorkflowRunView", () => {
     expect(text).toContain("Interruptions");
     expect(text).toContain("the gateway stopped while this run was parked");
     expect(text).toContain("the gateway stopped while this run was executing; the calls it had in flight were cut off");
-    expect(text).not.toContain("dispatched again");
-    expect(text).toContain("Workers redispatched after an interruption may have repeated their effects.");
+    expect(text).toContain("Workers dispatched again during replay may have repeated their effects.");
     const done = Array.from(document.querySelectorAll(".standing li"));
     const appender = done.find((item) => item.textContent?.includes("appender"))!;
-    expect(appender.textContent).toContain("redispatched after an interruption");
-    expect(appender.textContent).toContain("unknown outcomes and may have been applied twice");
+    expect(appender.textContent).toContain("Dispatched again after a gateway interruption");
+    expect(appender.textContent).toContain("Earlier tool calls may have been applied twice");
+    const retried = done.find((item) => item.textContent?.includes("retried worker"))!;
+    expect(retried.textContent).toContain("Dispatched again after a recorded provider failure (provider unavailable)");
+    expect(retried.textContent).toContain("Earlier tool calls may have been applied twice");
     const clean = done.find((item) => item.textContent?.includes("clean"))!;
-    expect(clean.textContent).not.toContain("redispatched");
+    expect(clean.textContent).not.toContain("Dispatched again");
   });
 
   it("says a run that has not ended has no account yet", async () => {
@@ -364,7 +354,7 @@ describe("run page completeness", () => {
     const account = emptyAccount({ ending: "returned" });
     account.workers.done = [0, 1].map((seq) => ({ journal_entry_id: `worker-${seq}`, seq,
       label: `worker ${seq}`, placement: "/Worktrees/MyRun", worktree: null, termination: null,
-      redispatched_after_interruption: false }));
+      redispatch_causes: [] }));
     const shared = detail(run(account));
     shared.journal = account.workers.done.map((worker, index) => ({ id: worker.journal_entry_id, result: { kind: "agent_call", output: `Worker output ${index}` } } as unknown as WorkflowRunDetailResponse["journal"][number]));
     page = mount(WorkflowRunView, { target: document.body, props: { detail: shared, loadState: "loaded", errorMessage: "" } });
@@ -383,6 +373,7 @@ describe("run page completeness", () => {
     const sentinel = "2126-08-09T10:00:00.393288230Z";
     const wake = kind === "timer" ? "2026-09-03T10:00:00.393288230Z" : sentinel;
     const parked = detail({ ...run(null), state: "parked", wake_at: wake });
+    parked.timer_wake_at = kind === "timer" ? wake : null;
     parked.journal = [{
       id: "wait", seq: 0n, kind: kind === "event" ? "await_event" : kind === "hold" ? "hold" : "timer",
       status: "started", started_at: started,
@@ -390,6 +381,13 @@ describe("run page completeness", () => {
         ? { action: "await", kinds: ["review.finished"] }
         : { action: "raise", content: "Ship the findings?", verdicts: ["approve", "postpone"] },
     }];
+    if (kind === "event") {
+      // A worker won an earlier race, leaving its abandoned timer started.
+      parked.journal.unshift({
+        id: "abandoned-timer", seq: 0n, kind: "timer", status: "started",
+        started_at: started, request: { ms: 30000 },
+      });
+    }
     if (kind === "hold") parked.holds = [{ id: "decision", run_id: "run-1", seq: 1, content: "Ship the findings?", verdicts: ["approve", "postpone"], state: "open", raised_at: started, rejections: [] }];
     page = mount(WorkflowRunView, { target: document.body, props: { detail: parked, loadState: "loaded", errorMessage: "" } });
     const awaited = document.querySelector(".awaited")!;
@@ -437,7 +435,7 @@ describe("run page completeness", () => {
   });
   it("links a terminal worker to its recorded session", () => {
     const account = emptyAccount({ ending: "returned" });
-    account.workers.done = [{ journal_entry_id: "entry-session", seq: 0, label: "Completed worker", redispatched_after_interruption: false }];
+    account.workers.done = [{ journal_entry_id: "entry-session", seq: 0, label: "Completed worker", redispatch_causes: [] }];
     const recorded = detail(run(account));
     recorded.journal = [{ id: "entry-session", agent_call: { session_id: "recorded-session" } } as unknown as WorkflowRunDetailResponse["journal"][number]];
     page = mount(WorkflowRunView, { target: document.body, props: { detail: recorded, loadState: "loaded", errorMessage: "" } });

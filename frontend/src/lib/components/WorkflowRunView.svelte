@@ -7,7 +7,8 @@
   because it is the record of an ending rather than a progress reading.
 -->
 <script lang="ts">
-  import { cancelWorkflowRun, fetchWorkflowRun } from "../api/workflow-runs";
+  import { cancelWorkflowRun } from "../api/workflow-runs";
+  import { describeRedispatchCause } from "../run-attempts";
   import { formatRunTime } from "../run-times";
   import { conversationPath } from "../router";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
@@ -29,22 +30,20 @@
     if (!run || cancelling) return;
     const runId = run.id;
     cancellingRunId = runId;
-    let requested = false;
     cancelError = "";
     try {
       await cancelWorkflowRun(runId);
-      requested = true;
-      const refreshed = await fetchWorkflowRun(runId);
-      if (run?.id === runId && refreshed) detail = refreshed;
     } catch (error) {
       cancelError = error instanceof Error ? error.message : String(error);
-      if (!requested) cancellingRunId = null;
+      cancellingRunId = null;
     }
   }
 
   const run = $derived(detail?.run ?? null);
   const cancelling = $derived(cancellingRunId === run?.id && (run?.state === "running" || run?.state === "parked"));
   const account = $derived(run?.terminal_account ?? null);
+  const parked = $derived(run?.state === "parked");
+  const openHolds = $derived((detail?.holds ?? []).filter((hold) => hold.state === "open"));
 
   // The four standings, in the order a reader wants them: what came back,
   // what broke, what the ending stopped, and what nothing ever settled.
@@ -96,19 +95,11 @@
     return worker.label ?? `worker ${worker.seq}`;
   }
 
-  // A worker dispatched again after an interruption is marked where it
-  // stands: its interrupted attempt's tool calls have unknown outcomes.
-  function describeRedispatch(worker: WorkflowWorkerAccount): string | null {
-    return worker.redispatched_after_interruption
-      ? "redispatched after an interruption — the interrupted attempt's tool calls have unknown outcomes and may have been applied twice"
-      : null;
-  }
-
   const placements = $derived(
     [...new Set(partitions.flatMap(([, workers]) => workers.map((worker) => worker.placement ?? null)))],
   );
   const waits = $derived((detail?.journal ?? []).filter((entry) =>
-    entry.status === "started" && ["timer", "await_event"].includes(entry.kind),
+    entry.status === "started" && entry.kind === "await_event",
   ));
 
   function awaitedKinds(request: unknown): string {
@@ -128,7 +119,7 @@
   const redispatchedAny = $derived(
     account
       ? Object.values(account.workers).some((workers) =>
-          workers.some((worker) => worker.redispatched_after_interruption),
+          workers.some((worker) => worker.redispatch_causes.length > 0),
         )
       : false,
   );
@@ -190,7 +181,7 @@
         {/if}
         {#if redispatchedAny}
           <p class="detail disclosure">
-            Workers redispatched after an interruption may have repeated their effects.
+            Workers dispatched again during replay may have repeated their effects.
           </p>
         {/if}
       </section>
@@ -220,9 +211,12 @@
                         </span>
                         <span class="detail">{describeTermination(worker)}</span>
                         {#if result?.kind === "agent_call"}<span class="output">{renderOutput(result.output)}</span>{/if}
-                        {#if describeRedispatch(worker)}
-                          <span class="detail redispatch">{describeRedispatch(worker)}</span>
-                        {/if}
+                        {#each worker.redispatch_causes as cause}
+                          {@const reason = describeRedispatchCause(cause)}
+                          {#if reason}
+                            <span class="detail redispatch">Dispatched again {reason}. Earlier tool calls may have been applied twice.</span>
+                          {/if}
+                        {/each}
                       </li>
                     {/each}
                   </ul>
@@ -254,20 +248,20 @@
         </section>
       {/if}
     {:else}
-      {#if run.state === "parked"}
+      {#if parked || openHolds.length > 0}
         <section class="awaited" aria-label="Awaited work">
           <h3>Waiting for</h3>
-          {#if run.wake_at && waits.some((entry) => entry.kind === "timer")}<p>Timer wakes at {@render recordedTime(run.wake_at)}</p>{/if}
-          {#each detail?.holds ?? [] as hold (hold.id)}
-            {#if hold.state === "open"}
-              <p>Decision hold: {hold.content}</p>
-              <p>Permitted verdicts: {hold.verdicts.join(", ")}</p>
-              <p>An agent answers this decision through its granted tool.</p>
-            {/if}
+          {#if parked && detail?.timer_wake_at}<p>Timer wakes at {@render recordedTime(detail.timer_wake_at)}</p>{/if}
+          {#each openHolds as hold (hold.id)}
+            <p>Decision hold: {hold.content}</p>
+            <p>Permitted verdicts: {hold.verdicts.join(", ")}</p>
+            <p>An agent answers this decision through its granted tool.</p>
           {/each}
-          {#each waits.filter((entry) => entry.kind === "await_event") as wait (wait.id)}
-            <p>Awaiting {awaitedKinds(wait.request)}</p>
-          {/each}
+          {#if parked}
+            {#each waits as wait (wait.id)}
+              <p>Awaiting {awaitedKinds(wait.request)}</p>
+            {/each}
+          {/if}
         </section>
       {/if}
       <p class="notice">This run has not ended yet, so it has no account of its ending.</p>

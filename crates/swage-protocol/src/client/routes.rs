@@ -30,6 +30,7 @@ use super::{
         MemoryInstructionRequest, MemoryInstructionResponse, MemoryPageListResponse,
         MemoryPageResponse,
     },
+    plugin::{InstallPluginRequest, PluginEnablementRequest, PluginListResponse, PluginSummary},
     provider_signin::{
         ProviderSignInState, StartProviderSignInRequest, StartProviderSignInResponse,
     },
@@ -49,7 +50,17 @@ use super::{
         CreateTopicRequest, RelinkWorkspaceAttachmentRequest, TopicListResponse, TopicResponse,
         UpdateTopicRequest, WorkspaceAttachmentResponse,
     },
+    turn_graph::{ProposeTurnGraphRequest, TurnGraphDiff, TurnGraphResponse, TurnGraphRevision},
+    workflow::{
+        PostWorkflowRunEventRequest, PostWorkflowRunEventResponse, WorkflowRun,
+        WorkflowRunDetailResponse,
+    },
 };
+
+pub const WORKFLOW_RUN_PATH: &str = "/api/workflow-runs/{id}";
+pub const WORKFLOW_RUN_EVENTS_PATH: &str = "/api/workflow-runs/{id}/events";
+pub const WORKFLOW_RUN_CANCEL_PATH: &str = "/api/workflow-runs/{id}/cancel";
+pub const WORKFLOW_RUN_RESUME_PATH: &str = "/api/workflow-runs/{id}/resume";
 
 /// HTTP method, as the OpenAPI document spells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -556,6 +567,74 @@ pub fn routes() -> Vec<Route> {
             },
         },
         Route {
+            operation_id: "get_workflow_run",
+            method: Method::Get,
+            path: WORKFLOW_RUN_PATH,
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Read a workflow run with its journal.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<WorkflowRunDetailResponse>(),
+            },
+        },
+        Route {
+            operation_id: "post_workflow_run_event",
+            method: Method::Post,
+            path: WORKFLOW_RUN_EVENTS_PATH,
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Post an event to a workflow run.",
+            request_optional: false,
+            request: schema::<PostWorkflowRunEventRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<PostWorkflowRunEventResponse>(),
+            },
+        },
+        Route {
+            operation_id: "cancel_workflow_run",
+            method: Method::Post,
+            path: WORKFLOW_RUN_CANCEL_PATH,
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Request cancellation of a workflow run.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<WorkflowRun>(),
+            },
+        },
+        Route {
+            operation_id: "resume_workflow_run",
+            method: Method::Post,
+            path: WORKFLOW_RUN_RESUME_PATH,
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Resume an interrupted workflow run.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<WorkflowRun>(),
+            },
+        },
+        Route {
             operation_id: "get_turn_context",
             method: Method::Get,
             path: "/api/turns/{id}/context",
@@ -631,6 +710,144 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<MemoryInstructionResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_plugins",
+            method: Method::Get,
+            path: "/api/plugins",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List the installed plugins: what each provides, its grants, secrets, revisions and where it is enabled.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<PluginListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "install_plugin",
+            method: Method::Post,
+            path: "/api/plugins",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Install a plugin package from a directory on the gateway's host; an installed name takes a new revision.",
+            request_optional: false,
+
+            request: schema::<InstallPluginRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<PluginSummary>(),
+            },
+        },
+        Route {
+            operation_id: "get_turn_graph",
+            method: Method::Get,
+            path: "/api/turn-graph",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "The turn graph: the active revision and every revision recorded.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<TurnGraphResponse>(),
+            },
+        },
+        Route {
+            operation_id: "propose_turn_graph",
+            method: Method::Post,
+            path: "/api/turn-graph/revisions",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Propose a revision of the turn graph: validated, recorded, and activated if valid; a failed revision is recorded and the last good one keeps serving.",
+            request_optional: false,
+
+            request: schema::<ProposeTurnGraphRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<TurnGraphRevision>(),
+            },
+        },
+        Route {
+            operation_id: "get_turn_graph_revision",
+            method: Method::Get,
+            path: "/api/turn-graph/revisions/{revision}",
+            path_parameters: vec![Parameter {
+                name: "revision",
+                kind: ParameterType::String,
+            }],
+            query_parameters: vec![],
+            summary: "One recorded revision of the turn graph.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<TurnGraphRevision>(),
+            },
+        },
+        Route {
+            operation_id: "activate_turn_graph_revision",
+            method: Method::Post,
+            path: "/api/turn-graph/revisions/{revision}/activate",
+            path_parameters: vec![Parameter {
+                name: "revision",
+                kind: ParameterType::String,
+            }],
+            query_parameters: vec![],
+            summary: "Make a recorded revision the one that serves, re-validated against what is installed now.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<TurnGraphRevision>(),
+            },
+        },
+        Route {
+            operation_id: "diff_turn_graph",
+            method: Method::Get,
+            path: "/api/turn-graph/diff/{from}/{to}",
+            path_parameters: vec![
+                Parameter {
+                    name: "from",
+                    kind: ParameterType::String,
+                },
+                Parameter {
+                    name: "to",
+                    kind: ParameterType::String,
+                },
+            ],
+            query_parameters: vec![],
+            summary: "What changed from one revision of the turn graph to another.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<TurnGraphDiff>(),
+            },
+        },
+        Route {
+            operation_id: "set_plugin_enablement",
+            method: Method::Put,
+            path: "/api/plugins/{name}/enablement",
+            path_parameters: vec![Parameter {
+                name: "name",
+                kind: ParameterType::String,
+            }],
+            query_parameters: vec![],
+            summary: "Enable or disable a plugin for the install, or for one topic.",
+            request_optional: false,
+
+            request: schema::<PluginEnablementRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<PluginSummary>(),
             },
         },
         Route {

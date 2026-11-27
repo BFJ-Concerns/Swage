@@ -336,6 +336,17 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
                         .is_offered(crate::tool::memory::MEMORY_WRITE_TOOL),
                 )),
         );
+        let reference_materials = crate::material::load_reference_materials(
+            &self.state.storage,
+            session.id,
+            &self.topic,
+            swage_context::materials::MaterialReach::for_tools(
+                self.offered_tools
+                    .is_offered(crate::tool::material::MATERIAL_READ_TOOL),
+            ),
+            context_choices.material_quoting,
+        )
+        .await;
         let mut session_variables: std::collections::BTreeMap<String, String> = self
             .state
             .storage
@@ -375,6 +386,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             active_skills,
             delegated_history,
             memory_index,
+            reference_materials,
             environment,
             available_skills,
             self.offered_tools.clone(),
@@ -1381,6 +1393,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 ws_tx: silent_ws_tx.clone(),
                 session_id: None,
                 turn_id: Some(sender_turn_id),
+                call_hook: None,
             },
             "delegated turn",
         )
@@ -1399,10 +1412,13 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .offered_tools()
                     .contains(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
             );
+            // A delegated child serves the authored frame, as its agent
+            // config does: its session draws no variant of its own.
             let history = match super::history::rebuild_thread_history_messages_with_retrieval(
                 &self.state,
                 existing.thread_id,
                 retrieval,
+                &target_agent_config.delivered_material_frame,
             )
             .await
             {
@@ -1434,6 +1450,9 @@ impl DelegationHandler for GatewayDelegationHandler {
             hook_registry: self.state.hook_registry.clone(),
             leak_detector: None,
             approval_registrar: Some(signalling_approval_registrar(self.state.clone())),
+            request_judge: Some(Arc::new(crate::request_judge::GatewayRequestJudge::new(
+                self.state.clone(),
+            ))),
             delegation_handler: Some(Arc::new(child_handler)),
             router: router.clone(),
             active_delegations: self.active_delegations.clone(),
@@ -2056,6 +2075,7 @@ mod settlement_tests {
                 turn_id: Some(turn.id),
                 role: swage_core::Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: if ending == TurnState::Cancelled {
                     "Partial child reply"
                 } else {
