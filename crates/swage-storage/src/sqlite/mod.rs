@@ -393,6 +393,7 @@ mod tests {
             .unwrap();
         storage
             .enqueue_turn_input(NewQueuedTurnInput {
+                requested_model: None,
                 delivery_targets: Vec::new(),
                 client_id: None,
                 attended: true,
