@@ -2073,19 +2073,20 @@ async fn run_gate_check(
     gate: &GateConfig,
 ) -> Result<GateDecision, GatewayError> {
     let config = state.active_config();
-    let model_id = crate::turn::resolve_model_catalogue_entry(&config.models, &gate.model)
-        .map(|(_, model)| model.model_id.clone())
-        .ok_or_else(|| {
-            GatewayError::ValidationError(format!(
-                "gate model '{}' is not in the configured model catalogue",
-                gate.model
-            ))
-        })?;
+    let (entry_key, model_id) =
+        crate::turn::resolve_model_catalogue_entry(&config.models, &gate.model)
+            .map(|(entry_key, model)| (entry_key.to_owned(), model.model_id.clone()))
+            .ok_or_else(|| {
+                GatewayError::ValidationError(format!(
+                    "gate model '{}' is not in the configured model catalogue",
+                    gate.model
+                ))
+            })?;
 
     let digest = read_gate_state_digest(&state.storage, schedule).await?;
     let prompt = build_gate_prompt(schedule, gate, &digest);
-    let response = state
-        .active_provider()
+    let response = crate::startup::catalogue_entry_provider(state, &config, &entry_key)
+        .await
         .complete(CompletionRequest {
             effort: None,
             messages: vec![ChatMessage::new(Role::User, prompt)],

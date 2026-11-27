@@ -4473,7 +4473,7 @@ async fn refuse_below_effort_floor(
             "no effort is set for the call and model '{model}' has no default effort"
         )),
         Some(requested) => {
-            let resolved = crate::turn::served_effort(state, config, requested).await;
+            let resolved = crate::turn::served_effort(config, requested);
             match resolved.control {
                 swage_core::EffortControl::Omitted => {
                     Some(format!("model '{model}' takes no effort control"))
@@ -7823,18 +7823,21 @@ async fn evaluate_run_gate(
         }));
     }
     let config = state.active_config();
-    let model_id = match &request.model {
+    let (entry_key, model_id) = match &request.model {
         Some(model) => crate::turn::resolve_model_catalogue_entry(&config.models, model)
-            .map(|(_, model)| model.model_id.clone())
+            .map(|(entry_key, model)| (entry_key.to_owned(), model.model_id.clone()))
             .ok_or_else(|| {
                 format!(
                     "RunEventError: gate model '{model}' is not in the configured model catalogue"
                 )
             })?,
-        None => config.default_model_id().to_string(),
+        None => (
+            config.models.default.clone(),
+            config.default_model_id().to_string(),
+        ),
     };
     let prompt = build_run_gate_prompt(&request.criteria, &events);
-    let provider = state.active_provider();
+    let provider = crate::startup::catalogue_entry_provider(state, &config, &entry_key).await;
     let completion = provider.complete(CompletionRequest {
         effort: None,
         messages: vec![ChatMessage::new(Role::User, prompt)],
