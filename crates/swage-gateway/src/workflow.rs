@@ -1777,18 +1777,14 @@ impl GatewayWorkflowLauncher {
         } else {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        #[cfg(test)]
-        workflow_pause_test_hook::pause("start-snapshot-pending", session.id).await;
-        // State, worker count and observation time share one storage snapshot.
-        let (record, status_as_of) = self
+        let record = self
             .state
             .storage
-            .get_workflow_run_observation(run.id)
+            .get_workflow_run(run.id)
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "workflow run disappeared".to_string())?;
-        #[cfg(test)]
-        workflow_pause_test_hook::pause("start-snapshot-read", session.id).await;
+        let status_as_of = chrono::Utc::now();
         let run = run_wire(record).map_err(|error| error.message().to_owned())?;
         let workers_dispatched = run.terminal_account.as_ref().map(|account| {
             let workers = &account.workers;

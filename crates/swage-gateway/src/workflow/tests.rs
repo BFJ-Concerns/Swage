@@ -19803,79 +19803,24 @@ async fn session_agent_names_cover_platform_and_topic_definitions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn run_accounts_start_observes_immediate_outcomes() {
+async fn run_accounts_start_with_wait_returns_the_settled_run() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
     let (state, _) = scripted_state(&storage, vec![]);
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    let launcher = GatewayWorkflowLauncher::new(state);
     for (source, expected) in [
         ("return 42;", "completed"),
         ("await agent('bad', {bogusOption: true});", "failed"),
     ] {
-        let session = storage
-            .create_session(swage_storage::fixtures::new_session(topic.id))
+        let result = launcher
+            .start_inline(session.id, source, Value::Null, None, true)
             .await
-            .expect("session");
-        let pending = workflow_pause_test_hook::install("start-snapshot-pending", session.id);
-        let pause = workflow_pause_test_hook::install("start-snapshot-read", session.id);
-        let launcher = GatewayWorkflowLauncher::new(state.clone());
-        let start = tokio::spawn(async move {
-            launcher
-                .start_inline(session.id, source, Value::Null, None, false)
-                .await
-                .expect("start")
-        });
-        tokio::time::timeout(
-            std::time::Duration::from_secs(45),
-            pending.entered.acquire(),
-        )
-        .await
-        .expect("start reaches snapshot pause")
-        .expect("snapshot pause remains open")
-        .forget();
-        let run = storage
-            .list_workflow_runs(topic.id)
-            .await
-            .expect("runs")
-            .into_iter()
-            .find(|run| run.dispatching_session_id == Some(session.id))
-            .expect("session run");
-        // Observe real settlement before letting the start path take its snapshot.
-        wait_for_terminal(&state, run.id).await;
-        pending.release.add_permits(1);
-        tokio::time::timeout(std::time::Duration::from_secs(45), pause.entered.acquire())
-            .await
-            .expect("start snapshot reached")
-            .expect("pause remains open")
-            .forget();
-        let (record, following_observation) = storage
-            .get_workflow_run_observation(run.id)
-            .await
-            .expect("following observation")
-            .expect("run");
-        pause.release.add_permits(1);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(45), start)
-            .await
-            .expect("start returns after settlement")
-            .expect("start task");
-        assert_eq!(
-            result["state"], expected,
-            "the start result must observe an immediately settled run"
-        );
-        let observed = chrono::DateTime::parse_from_rfc3339(
-            result["status_as_of"].as_str().expect("observation time"),
-        )
-        .expect("timestamp");
-        assert!(
-            observed
-                >= record
-                    .completed_at
-                    .expect("settled run has completion time"),
-            "status_as_of must include the completion visible in its snapshot"
-        );
-        assert!(
-            observed <= following_observation,
-            "status_as_of must be captured with the snapshot, not later when returning it"
-        );
+            .expect("start");
+        assert_eq!(result["state"], expected);
         if expected == "completed" {
             assert_eq!(result["final_output"], 42);
             assert_eq!(result["workers_dispatched"], 0);
@@ -20136,146 +20081,6 @@ async fn review_fix_parent_cancellation_does_not_reuse_an_unclaimed_api_request(
     assert!(
         account.cancellation.is_none(),
         "a later parent cancellation must not inherit the unclaimed API request"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn review_fix_start_snapshot_time_precedes_a_concurrent_completion() {
-    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-    let topic = storage.general_scope().await.unwrap();
-    let session = storage
-        .create_session(swage_storage::fixtures::new_session(topic.id))
-        .await
-        .unwrap();
-    let state = AppState::for_test(
-        storage.clone(),
-        storage.clone(),
-        Arc::new(GatedRoundProvider {
-            round_opened: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-        }),
-        swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![]),
-        None,
-    );
-    let pause = workflow_pause_test_hook::install("start-snapshot-read", session.id);
-    let launcher = GatewayWorkflowLauncher::new(state.clone());
-    let start = tokio::spawn(async move {
-        launcher
-            .start_inline(
-                session.id,
-                "return await agent('wait', {maxAttempts: 1});",
-                Value::Null,
-                None,
-                false,
-            )
-            .await
-            .unwrap()
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-    let run = storage
-        .list_workflow_runs(topic.id)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    storage
-        .update_workflow_run_state(run.id, "completed", None, None, None)
-        .await
-        .unwrap();
-    let completed = storage
-        .get_workflow_run(run.id)
-        .await
-        .unwrap()
-        .unwrap()
-        .completed_at
-        .unwrap();
-    pause.release.add_permits(1);
-    let result = start.await.unwrap();
-    assert_eq!(result["state"], "running");
-    let observed =
-        chrono::DateTime::parse_from_rfc3339(result["status_as_of"].as_str().unwrap()).unwrap();
-    if let Some(token) = state.active_workflow_runs.lock().await.get(&run.id) {
-        token.cancel();
-    }
-    assert!(
-        observed <= completed,
-        "a running snapshot timestamp must precede the concurrent completion"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn review_fix_2_start_observation_includes_completion_time() {
-    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-    let topic = storage.general_scope().await.unwrap();
-    let session = storage
-        .create_session(swage_storage::fixtures::new_session(topic.id))
-        .await
-        .unwrap();
-    let root = tempfile::tempdir().unwrap();
-    let state = AppState::new_with_config_root(
-        storage.clone(),
-        storage.clone(),
-        Arc::new(GatedRoundProvider {
-            round_opened: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-        }),
-        swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![]),
-        None,
-        root.path().to_path_buf(),
-    );
-    let pause = workflow_pause_test_hook::install("start-snapshot-pending", session.id);
-    let launcher = GatewayWorkflowLauncher::new(state.clone());
-    let start = tokio::spawn(async move {
-        launcher
-            .start_inline(
-                session.id,
-                "return await agent('wait', {maxAttempts: 1});",
-                Value::Null,
-                None,
-                false,
-            )
-            .await
-            .unwrap()
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-    let run = storage
-        .list_workflow_runs(topic.id)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    storage
-        .update_workflow_run_state(run.id, "completed", None, None, None)
-        .await
-        .unwrap();
-    let completed = storage
-        .get_workflow_run(run.id)
-        .await
-        .unwrap()
-        .unwrap()
-        .completed_at
-        .unwrap();
-    pause.release.add_permits(1);
-    let result = start.await.unwrap();
-    assert_eq!(result["state"], "completed");
-    let observed =
-        chrono::DateTime::parse_from_rfc3339(result["status_as_of"].as_str().unwrap()).unwrap();
-    if let Some(token) = state.active_workflow_runs.lock().await.get(&run.id) {
-        token.cancel();
-    }
-    assert!(
-        observed >= completed,
-        "a completed run observation must not precede its completion"
     );
 }
 

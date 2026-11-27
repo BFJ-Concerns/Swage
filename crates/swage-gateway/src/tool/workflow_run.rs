@@ -55,10 +55,23 @@ impl Tool for WorkflowRunTool {
         &self,
         result: &Value,
     ) -> swage_protocol::client::conversation::ToolExecution {
-        if result["state"] == "failed" {
-            swage_protocol::client::conversation::ToolExecution::failed()
-        } else {
-            swage_protocol::client::conversation::ToolExecution::succeeded()
+        use swage_protocol::client::conversation::{
+            ToolCompletion, ToolExecution, ToolExecutionStage, ToolOutcome,
+        };
+
+        match result["state"].as_str() {
+            Some("failed") => ToolExecution::failed(),
+            Some("cancelled") => ToolExecution {
+                outcome: ToolOutcome::Cancelled,
+                stage: ToolExecutionStage::Finished,
+                completion: ToolCompletion::Confirmed,
+            },
+            Some("interrupted") => ToolExecution {
+                outcome: ToolOutcome::Failed,
+                stage: ToolExecutionStage::Started,
+                completion: ToolCompletion::Unknown,
+            },
+            _ => ToolExecution::succeeded(),
         }
     }
 
@@ -221,6 +234,19 @@ mod tests {
         NewSession, SessionStore, SqliteStorage, Storage, TopicStore, WorkflowStore,
     };
     use swage_tool::context::MockToolContext;
+
+    #[test]
+    fn cancelled_and_interrupted_runs_are_not_successful_calls() {
+        use swage_protocol::client::conversation::{ToolCompletion, ToolOutcome};
+
+        let cancelled = WorkflowRunTool.execution_outcome(&json!({"state": "cancelled"}));
+        assert_eq!(cancelled.outcome, ToolOutcome::Cancelled);
+        assert_eq!(cancelled.completion, ToolCompletion::Confirmed);
+
+        let interrupted = WorkflowRunTool.execution_outcome(&json!({"state": "interrupted"}));
+        assert_eq!(interrupted.outcome, ToolOutcome::Failed);
+        assert_eq!(interrupted.completion, ToolCompletion::Unknown);
+    }
 
     #[tokio::test]
     async fn dispatcher_returns_actionable_error_for_ambiguous_workflow_input() {
