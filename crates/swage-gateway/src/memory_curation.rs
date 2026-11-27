@@ -652,6 +652,7 @@ mod tests {
                     } else {
                         MessageOrigin::Assistant
                     },
+                    delivered: false,
                     content: (*content).into(),
                     attachments: Vec::new(),
                     agent_id: "gateway".into(),
@@ -1061,6 +1062,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: MessageOrigin::Schedule,
+                delivered: false,
                 content: "Summarise the inbox.".into(),
                 attachments: Vec::new(),
                 position: 4,
@@ -1075,6 +1077,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: MessageOrigin::User,
+                delivered: false,
                 content: "I take Fridays off.".into(),
                 attachments: Vec::new(),
                 position: 5,

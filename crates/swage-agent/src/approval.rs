@@ -93,6 +93,10 @@ pub(crate) struct ToolDispatchResult {
     pub is_error: bool,
     pub status: String,
     pub approval_note: Option<String>,
+    /// The payload is material produced elsewhere — a delegated agent's
+    /// result — rather than the tool's own account, so the model-facing copy
+    /// carries the delivered-material frame. The stored payload stays bare.
+    pub delivered: bool,
     pub execution: swage_protocol::client::conversation::ToolExecution,
 }
 
@@ -103,6 +107,7 @@ impl From<(String, bool, String)> for ToolDispatchResult {
             is_error,
             status: status.clone(),
             approval_note: None,
+            delivered: false,
             execution: if status == "success" {
                 swage_protocol::client::conversation::ToolExecution::succeeded()
             } else if matches!(

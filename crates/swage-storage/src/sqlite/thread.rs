@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use swage_core::{
-    StorageError, compact_tool_result_for_model_with_reference, tool_result_reference,
+    CompactToolReplay, StorageError, compact_tool_result_for_model_with_reference,
+    tool_result_reference,
 };
 
 use crate::model::{NewThread, Thread, ThreadBranch, ThreadState};
@@ -79,7 +80,7 @@ fn copy_tool_calls_for_branch(
     let mut stmt = conn.prepare(
         "SELECT agent_id, call_id, tool, arguments, model_arguments, result, status,
                 duration_ms, truncated, total_bytes, provider_round, position, created_at,
-                parent_call_id, display_summary
+                parent_call_id, display_summary, model_result
          FROM tool_calls
          WHERE turn_id = ?1
          ORDER BY provider_round ASC, position ASC",
@@ -101,6 +102,7 @@ fn copy_tool_calls_for_branch(
             row.get::<_, String>(12)?,
             row.get::<_, Option<String>>(13)?,
             row.get::<_, Option<String>>(14)?,
+            row.get::<_, Option<String>>(15)?,
         ))
     })?;
     let calls = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -122,14 +124,35 @@ fn copy_tool_calls_for_branch(
         created_at,
         parent_call_id,
         display_summary,
+        source_model_result,
     ) in calls
     {
-        let model_result = result.as_deref().map(|result| {
-            compact_tool_result_for_model_with_reference(
-                result,
-                status.as_deref() != Some("success"),
-                tool_result_reference(child_turn_id, &call_id),
-            )
+        // The source's stored replay carries what the raw result does not —
+        // an approval account before the envelope, the flag that a delivered
+        // result is framed for the model — so the branch keeps it whole and
+        // points its envelope at the branch's own copy. A replay with no
+        // compact envelope is rebuilt from the result.
+        let kept_replay = source_model_result.as_deref().and_then(|stored| {
+            let (account, envelope) = match stored.rsplit_once('\n') {
+                Some((account, envelope)) => (Some(account), envelope),
+                None => (None, stored),
+            };
+            let mut replay = serde_json::from_str::<CompactToolReplay>(envelope).ok()?;
+            replay.full_result_ref = Some(tool_result_reference(child_turn_id, &call_id));
+            let envelope = replay.to_stable_json();
+            Some(match account {
+                Some(account) => format!("{account}\n{envelope}"),
+                None => envelope,
+            })
+        });
+        let model_result = kept_replay.or_else(|| {
+            result.as_deref().map(|result| {
+                compact_tool_result_for_model_with_reference(
+                    result,
+                    status.as_deref() != Some("success"),
+                    tool_result_reference(child_turn_id, &call_id),
+                )
+            })
         });
 
         conn.execute(
@@ -424,7 +447,7 @@ impl ThreadStore for SqliteStorage {
             )?;
 
             let mut stmt = conn.prepare(
-                "SELECT turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin
+                "SELECT turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin, delivered
                  FROM messages
                  WHERE thread_id = ?1 AND position <= ?2
                  ORDER BY position ASC",
@@ -443,6 +466,7 @@ impl ThreadStore for SqliteStorage {
                         row.get::<_, String>(7)?,
                         row.get::<_, String>(8)?,
                         row.get::<_, String>(9)?,
+                        row.get::<_, bool>(10)?,
                     ))
                 },
             )?;
@@ -549,14 +573,15 @@ impl ThreadStore for SqliteStorage {
                     created_at,
                     attachments,
                     origin,
+                    delivered,
                 ) = row;
                 let child_turn_id = turn_id
                     .as_ref()
                     .and_then(|turn_id| turn_id_map.get(turn_id))
                     .cloned();
                 conn.execute(
-                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin, delivered)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         Uuid::new_v4().to_string(),
                         child_thread_id.to_string(),
@@ -570,6 +595,7 @@ impl ThreadStore for SqliteStorage {
                         created_at,
                         attachments,
                         origin,
+                        delivered,
                     ],
                 )?;
             }
@@ -1022,6 +1048,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "hello".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1035,6 +1062,7 @@ mod tests {
                 turn_id: None,
                 role: Role::Assistant,
                 origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
                 content: "world".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1082,6 +1110,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "use a tool".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1095,6 +1124,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
                 origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
                 content: "done".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1228,6 +1258,7 @@ mod tests {
                     turn_id: Some(turn.id),
                     role,
                     origin,
+                    delivered: false,
                     content: "text".into(),
                     position: position as i32,
                     agent_id: "agent-1".into(),
@@ -1276,6 +1307,96 @@ mod tests {
         assert_eq!(tool_call_events().await, 1, "and records it no second time");
     }
 
+    /// A branch keeps a replay the raw result cannot rebuild: the approval
+    /// account before the envelope and the flag that frames a delivered
+    /// result for the model.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_branch_keeps_an_approved_delivered_replay() {
+        let (storage, _, session_id) = make_session().await;
+        let parent = ThreadStore::create(&storage, new_thread(session_id))
+            .await
+            .unwrap();
+        let parent_turn = storage
+            .create_turn(NewTurn {
+                thread_id: parent.id,
+                agent_id: "agent-1".into(),
+                state: TurnState::Completed,
+                user_input: Some("delegate".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let assistant_message = storage
+            .create_message(NewMessage {
+                thread_id: parent.id,
+                attachments: Vec::new(),
+                turn_id: Some(parent_turn.id),
+                role: Role::Assistant,
+                origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
+                content: "done".into(),
+                position: 0,
+                agent_id: "agent-1".into(),
+            })
+            .await
+            .unwrap();
+        let account = "The user approved this call once.";
+        storage
+            .create_tool_call(NewToolCall {
+                execution: None,
+                turn_id: parent_turn.id,
+                agent_id: "agent-1".into(),
+                call_id: "call_1".into(),
+                tool: "delegate".into(),
+                arguments: "{}".into(),
+                model_arguments: "{}".into(),
+                result: Some("the child's answer".into()),
+                model_result: Some(format!(
+                    "{account}\n{}",
+                    swage_core::compact_delivered_tool_result_for_model(
+                        "the child's answer",
+                        false,
+                        Some(tool_result_reference(&parent_turn.id.to_string(), "call_1")),
+                    )
+                )),
+                status: Some("success".into()),
+                duration_ms: Some(1),
+                truncated: false,
+                total_bytes: None,
+                provider_round: 0,
+                position: 0,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+
+        let branch = storage
+            .create_branch(parent.id, assistant_message.id)
+            .await
+            .unwrap();
+        let child_turn = storage
+            .list_turns_by_thread(branch.child_thread_id)
+            .await
+            .unwrap()
+            .remove(0);
+        let copied = storage
+            .list_tool_calls_by_turn(child_turn.id)
+            .await
+            .unwrap()
+            .remove(0)
+            .model_result
+            .expect("copied replay");
+        let (copied_account, envelope) = copied.rsplit_once('\n').expect("account kept");
+        assert_eq!(copied_account, account);
+        let replay: CompactToolReplay = serde_json::from_str(envelope).unwrap();
+        assert!(replay.delivered, "the delivered flag survives the branch");
+        assert_eq!(
+            replay.full_result_ref,
+            Some(tool_result_reference(&child_turn.id.to_string(), "call_1"))
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn create_branch_from_user_message_does_not_copy_future_tool_replay() {
         let (storage, _, session_id) = make_session().await;
@@ -1299,6 +1420,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "use a tool".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1312,6 +1434,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
                 origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
                 content: "done".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1387,6 +1510,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "a".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1400,6 +1524,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "b".into(),
                 position: 0,
                 agent_id: "agent-1".into(),

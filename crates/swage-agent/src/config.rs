@@ -62,6 +62,11 @@ pub struct AgentConfig {
     /// a gateway serving another variant of the request sets it here.
     #[serde(default = "default_closing_account_request")]
     pub closing_account_request: String,
+    /// The frame around a tool result that is delivered material — a
+    /// delegated agent's result. The authored frame is the default; a
+    /// gateway serving another variant sets it here.
+    #[serde(default)]
+    pub delivered_material_frame: swage_core::DeliveredMaterialFrame,
 }
 
 const fn default_identical_failure_bound() -> u32 {
@@ -102,6 +107,7 @@ impl AgentConfig {
             skip_permissions: false,
             approval_prompts_enabled: true,
             closing_account_request: default_closing_account_request(),
+            delivered_material_frame: swage_core::DeliveredMaterialFrame::authored(),
         }
     }
 
