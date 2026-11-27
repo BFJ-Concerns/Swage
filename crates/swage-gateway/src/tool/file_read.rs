@@ -166,7 +166,7 @@ fn read_window(
         Some(sample) => sample,
         None => {
             return Err(failure(format!(
-                "File appears to be binary ({}). Cannot display binary content.",
+                "File appears to be binary ({}). Cannot display binary content",
                 binary_size_description((total_bytes > 0).then_some(total_bytes))
             )));
         }
@@ -324,6 +324,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("binary"), "got: {err}");
+        let rendered = swage_agent::agent::format_tool_error_for_model(&err);
+        assert!(
+            rendered.contains("Cannot display binary content.")
+                && !rendered.contains("Cannot display binary content.."),
+            "got: {rendered}"
+        );
     }
 
     #[tokio::test]
