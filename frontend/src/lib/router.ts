@@ -243,9 +243,9 @@ export function createRouter(options?: RouterOptions): Router {
     }
   }
 
-  // A navigation that loads a conversation can fail after the URL changes.
-  // Restore the active conversation on a transient failure; applyLocation
-  // handles a missing conversation with its own not-found route.
+  // An in-page selection of a missing conversation keeps the open
+  // conversation and reports the failure. A stale link can show the
+  // not-found notice. Restore the active address if an error escapes.
   function followLocation(generation: number, keepPreviousOnMissing = false): Promise<void> {
     return applyLocation(generation, keepPreviousOnMissing).catch(() => {
       if (generation !== navigationGeneration) return;
@@ -285,9 +285,11 @@ export function createRouter(options?: RouterOptions): Router {
     async init(): Promise<void> {
       // Listen for browser back/forward navigation.
       window.addEventListener("popstate", () => {
-        // popstate is synchronous in terms of the URL update; async selection
-        // runs in the background and updates currentRoute when it settles.
         const generation = ++navigationGeneration;
+        const store = options?.conversationStore;
+        if (currentLocation() === "/" && store?.activeConversationId) {
+          store.clearActiveConversation();
+        }
         void followLocation(generation);
       });
 

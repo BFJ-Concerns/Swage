@@ -275,6 +275,25 @@ test("opens the remaining session and then the front door when deleting active c
   await expect(page.getByRole("textbox", { name: "Message" })).toBeHidden();
 });
 
+test("restores the front door on Back from the first message of a new conversation", async ({ page }) => {
+  await send(page, "Session before starting a draft");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "+ New conversation", exact: true }).click();
+  await expect(page).toHaveURL("/");
+  const first = "First message sent from the draft";
+  await sendNewConversation(page, first);
+  const sessionPath = new URL(page.url()).pathname;
+
+  await page.goBack();
+  await expect(page).toHaveURL("/");
+  await expect(page.getByRole("region", { name: "Start a session" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeHidden();
+
+  await page.goForward();
+  await expect(page).toHaveURL(sessionPath);
+  await expect(page.getByLabel("Your message").getByText(first, { exact: true })).toBeVisible();
+});
+
 test("keeps the first question as the label and follows a send from earlier in the transcript", async ({ page }) => {
   const opening = "Where should we start?";
   await page.setViewportSize({ width: 900, height: 660 });

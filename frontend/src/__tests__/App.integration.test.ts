@@ -792,6 +792,14 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
     expect(window.location.pathname).toBe("/conversations/conv-linked");
 
+    const activePreview = document.querySelector(
+      ".conversation-item.active .preview",
+    );
+    expect(activePreview?.textContent).toContain("Deep-linked conversation");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Restored from URL",
+    );
+
     const popped = new Promise<void>((resolve) => {
       window.addEventListener("popstate", () => resolve(), { once: true });
     });
@@ -803,13 +811,8 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/");
     expect(window.history.length).toBe(historyLength);
 
-    const activePreview = document.querySelector(
-      ".conversation-item.active .preview",
-    );
-    expect(activePreview?.textContent).toContain("Deep-linked conversation");
-    expect(document.querySelector(".message-display")?.textContent).toContain(
-      "Restored from URL",
-    );
+    expect(document.querySelector('[aria-label="Start a session"]')).not.toBeNull();
+    expect(document.querySelector(".message-display")).toBeNull();
   });
 
   it.each([false, true])("keeps session agent names across topics and reload when definitions fail: %s", async (failDefinitions) => {
@@ -1120,7 +1123,7 @@ describe("App", () => {
     addEventListenerSpy.mockRestore();
 
     expect(popstateHandler).not.toBeNull();
-    setPath("/");
+    setPath("/settings/providers");
     popstateHandler!(new PopStateEvent("popstate"));
     await settleUi();
     setPath(`/conversations/${activeConversation.id}`);

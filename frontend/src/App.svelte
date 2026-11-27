@@ -374,8 +374,10 @@
         await getConversation(id);
       },
       clearActiveConversation: () => {
+        scopeGeneration += 1;
         connectionStore.deselect?.();
         conversationStore.clearActiveConversation();
+        pendingStart = null;
       },
       selectConversation: openConversation,
     },
