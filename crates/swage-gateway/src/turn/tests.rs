@@ -18329,9 +18329,6 @@ fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
     assert!(!policy.working_directory_is_writable());
 }
 
-/// A `.git` pointer names git metadata or nothing: a directory with no
-/// `HEAD` — the home, say — is not granted, and neither is a directory
-/// above a masked path, however it is dressed.
 /// A `.git` pointer the sandbox wrote at another repository's metadata
 /// grants nothing, and neither does a worktree's `commondir` rewritten to
 /// name another repository: the metadata must point back at the workspace.
@@ -18401,6 +18398,9 @@ fn a_pointer_at_another_repositorys_metadata_grants_nothing() {
     assert_eq!(outside, vec![our_gitdir], "their repository is not granted");
 }
 
+/// A `.git` pointer names git metadata or nothing: a directory with no
+/// `HEAD` — the home, say — is not granted, and neither is a directory
+/// above a masked path, however it is dressed.
 #[test]
 fn a_git_pointer_at_a_directory_that_is_not_git_metadata_grants_nothing() {
     let temp_dir = tempfile::tempdir().unwrap();
