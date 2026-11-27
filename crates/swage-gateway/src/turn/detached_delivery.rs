@@ -1,5 +1,6 @@
 //! Delivery of completed detached delegations into the parent's thread.
-//!
+
+use swage_agent::AgentError;
 use swage_storage::MessageOrigin;
 
 use super::{AppState, GatewayError, Uuid};
@@ -16,6 +17,9 @@ use crate::service::{PlatformMessage, append_platform_message};
 /// recorded tool call (providers reject orphaned tool results), so a
 /// platform-delivered notification rides the same role a channel or
 /// scheduled message would, with the recorded origin naming its real sender.
+/// Record the result before claiming it so a failed write leaves it available
+/// for the next turn. If a delivery hook blocks a result, the thread records
+/// the refusal without exposing the child's output.
 pub(super) async fn deliver_detached_results(
     state: &AppState,
     session_id: Uuid,
@@ -43,10 +47,14 @@ pub(super) async fn deliver_detached_results(
         .iter()
         .filter(|result| addressed_here(result))
     {
-        router
-            .deliver_message(result)
-            .await
-            .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
+        let content = match router.check_delivery(result).await {
+            Ok(()) => render_delegation_result(result),
+            Err(AgentError::HookBlocked { reason, .. }) => format!(
+                "Delegated agent {}'s result was blocked before delivery ({reason}).",
+                result.sender_agent_id
+            ),
+            Err(error) => return Err(GatewayError::WebSocketError(error.to_string())),
+        };
         append_platform_message(
             state,
             PlatformMessage {
@@ -55,10 +63,16 @@ pub(super) async fn deliver_detached_results(
                 turn_id: Some(prepared_turn_id),
                 agent_id: agent_id.to_owned(),
                 origin: MessageOrigin::Delegation,
-                content: render_delegation_result(result),
+                content,
             },
         )
         .await?;
+        // A blocked Result is already failed by the router and no longer
+        // pending; the claim is a no-op for it and marks a passed one
+        // delivered.
+        swage_agent::mailbox::claim_result(&state.storage, result.id)
+            .await
+            .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
     }
     Ok(())
 }

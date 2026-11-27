@@ -85,6 +85,24 @@ impl MessageRouter {
     /// Dispatches MessageDeliver and MessageReceive hooks. If either blocks,
     /// the message transitions to Failed. Otherwise, transitions to Delivered.
     pub async fn deliver_message(&self, msg: &AgentMessage) -> Result<(), AgentError> {
+        self.check_delivery(msg).await?;
+
+        // Transition to Delivered.
+        self.storage
+            .update_agent_message_status(msg.id, MessageStatus::Delivered, None)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Put a message to the delivery hooks without delivering it: the
+    /// MessageDeliver and MessageReceive hooks run as `deliver_message`
+    /// runs them, and a block fails the message the same way, but a
+    /// message they pass keeps its status — for a path that records the
+    /// message where it is going before it claims it (a Result carried
+    /// into a thread append-before-claim), so a crash between the check
+    /// and the claim re-delivers rather than loses it.
+    pub async fn check_delivery(&self, msg: &AgentMessage) -> Result<(), AgentError> {
         self.dispatch_blocking_hook(
             msg,
             HookEvent::MessageDeliver {
@@ -109,12 +127,7 @@ impl MessageRouter {
             },
             "MessageReceive",
         )
-        .await?;
-
-        self.storage
-            .update_agent_message_status(msg.id, MessageStatus::Delivered, None)
-            .await?;
-        Ok(())
+        .await
     }
 
     /// Dispatch a hook that may block message delivery.

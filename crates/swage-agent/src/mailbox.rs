@@ -17,7 +17,7 @@ use crate::error::AgentError;
 /// Categorised pending messages retrieved from the mailbox on instantiation.
 ///
 /// Result messages are deliberately absent: completed-delegation Results are
-/// owned by the turn path (`pending_results` below), which
+/// owned by the turn path (`pending_results`/`claim_result` below), which
 /// records each durably before claiming it. Instantiation never touches
 /// them — claiming one here would either lose it on a crash (claimed but
 /// never surfaced) or double-deliver against the turn path.
@@ -125,7 +125,11 @@ pub async fn check_mailbox(
 /// instantiation-shaped — it decides shutdown, collects cancellations, and
 /// claims every kind at once — and a turn loop must not run it, because
 /// claiming a Delegate or Shutdown there would swallow lifecycle messages
-/// the instantiation path owns.
+/// the instantiation path owns. The turn path reads Results alone, records
+/// each durably, and only then claims it with [`claim_result`]: append
+/// before claim means a failure between the two re-delivers rather than
+/// loses, which is the right side of at-least-once for completed work.
+///
 /// When a Shutdown is pending, nothing is returned: that mailbox belongs to
 /// the instantiation path, which also decides what happens to siblings, and
 /// delivering results past it would race that decision.
@@ -141,6 +145,18 @@ pub async fn pending_results(
         .into_iter()
         .filter(|m| m.kind == MessageKind::Result)
         .collect())
+}
+
+/// Claim one Result after it has been durably recorded. First claimer wins;
+/// `false` means another consumer claimed it between read and claim, and
+/// the caller's already-recorded copy stands as at-least-once delivery.
+pub async fn claim_result(
+    storage: &Arc<dyn Storage>,
+    message_id: Uuid,
+) -> Result<bool, AgentError> {
+    Ok(storage
+        .update_agent_message_status(message_id, MessageStatus::Delivered, None)
+        .await?)
 }
 
 #[cfg(test)]
