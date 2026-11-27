@@ -211,16 +211,15 @@ mod tests {
     }
 
     #[test]
-    fn a_level_below_the_lowest_supported_takes_the_lowest() {
-        let resolved = resolve_effort(
-            Effort::Minimal,
-            &levels(&[Effort::Low, Effort::High], false),
-        );
+    fn a_level_below_the_lowest_supported_clamps_to_that_level_even_with_off() {
+        let resolved = resolve_effort(Effort::Low, &levels(&[Effort::Medium, Effort::High], true));
         assert_eq!(
             resolved.control,
-            EffortControl::Level { level: Effort::Low }
+            EffortControl::Level {
+                level: Effort::Medium
+            }
         );
-        assert_eq!(resolved.clamped_to, Some(Effort::Low));
+        assert_eq!(resolved.clamped_to, Some(Effort::Medium));
     }
 
     #[test]

@@ -44,6 +44,10 @@ impl Tool for WorkflowRunTool {
          run that has parked on a wait of its own comes back `parked`, with no output yet. \
          A run still running after ten minutes fails the wait and not the run. A run that \
          has failed by the time the call returns is reported as a failed call. \
+         A script's calls name models by the ids `model_list` returns. Each id comes with \
+         its family and the effort levels it serves, which is what a script needs to put a \
+         check on a different family from the work it checks, and to set the least effort a \
+         call accepts (`minEffort`). \
          The script interface is set out by the `workflow-authoring` skill and by the \
          `workflow-engine` document that `docs_read` returns."
     }

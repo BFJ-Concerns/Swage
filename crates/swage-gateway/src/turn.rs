@@ -92,7 +92,7 @@ pub(crate) use provider_record::*;
 use runtime_launch::{RuntimeLaunch, launch_turn_runtime};
 #[cfg(test)]
 use runtime_launch::{effort_capability_for_model, output_limit_for_model};
-pub(crate) use runtime_launch::{requested_effort, served_effort, served_effort_capability};
+pub(crate) use runtime_launch::{requested_effort, served_effort};
 use sandbox_approval::{
     SandboxDegradationApproval, SandboxDegradationApprovalRequest,
     request_sandbox_degradation_approval,

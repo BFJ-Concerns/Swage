@@ -22,7 +22,7 @@
 //! context, the runtime's compactor handles it as before, and the report
 //! records the attempt.
 
-use swage_core::{ChatMessage, CompletionRequest, ProviderError, Role, ToolReplayPart};
+use swage_core::{ChatMessage, CompletionRequest, ProviderError, Role};
 use swage_protocol::client::context::{SuccessionCall, SuccessionStage};
 use swage_provider::LlmProvider;
 
@@ -276,7 +276,7 @@ pub fn split_boundary(history: &[ChatMessage], split: usize) -> Result<usize, Su
     // a result whose call was summarised away. Retain the whole call and its
     // results where anything older is left to summarise, otherwise summarise
     // them all.
-    let answers_a_call = |at: usize| answers_a_call(&history[at]);
+    let answers_a_call = |at: usize| history[at].carries_tool_result();
     let mut earlier = split;
     while earlier > 0 && answers_a_call(earlier) {
         earlier -= 1;
@@ -292,19 +292,6 @@ pub fn split_boundary(history: &[ChatMessage], split: usize) -> Result<usize, Su
         return Err(SuccessionError::TooShort(history_len));
     }
     Ok(later)
-}
-
-/// Whether `message` carries a tool result. The gateway replays results
-/// inside a user message's tool replay; the runtime's own tool messages carry
-/// a call id.
-fn answers_a_call(message: &ChatMessage) -> bool {
-    message.role() == Role::Tool
-        || message.tool_call_id().is_some()
-        || message.tool_replay().is_some_and(|parts| {
-            parts
-                .iter()
-                .any(|part| matches!(part, ToolReplayPart::ToolResult { .. }))
-        })
 }
 
 /// The successor's parts from a summary of `request`'s older history,
@@ -333,7 +320,7 @@ pub fn successor_after(
 ) -> Result<Succession, SuccessionError> {
     if summarised == 0
         || summarised >= request.history.len()
-        || answers_a_call(&request.history[summarised])
+        || request.history[summarised].carries_tool_result()
     {
         return Err(SuccessionError::SplitUnavailable(summarised));
     }
