@@ -465,7 +465,7 @@ describe("ambient channel control path", () => {
     window.history.replaceState({}, "", "/workflow-runs/linked-run");
     const returned = JSON.parse(await runResponse("linked-run", "completed").text());
     returned.run.dispatching_session_id = "parent-session";
-    returned.run.terminal_account.workers.done = [{ journal_entry_id: "entry-worker", seq: 0, label: "Recorded worker", redispatched_after_interruption: false }];
+    returned.run.terminal_account.workers.done = [{ journal_entry_id: "entry-worker", seq: 0, label: "Recorded worker", redispatch_causes: [] }];
     returned.journal = [{ id: "entry-worker", kind: "agent_call", status: "completed", agent_call: {
       session_id: "worker-session", termination: { termination: "settled" },
       usage: { availability: "unavailable", reason: "provider_reported_no_usage" },

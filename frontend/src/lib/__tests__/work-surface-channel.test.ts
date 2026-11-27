@@ -58,6 +58,19 @@ describe("work-surface channel", () => {
     channel.close();
   });
 
+  it("delivers a gateway lag notification so open views can refresh", () => {
+    installFakeSocket();
+    const channel = createWorkSurfaceChannel({ wsBaseUrl: "ws://gateway" });
+    const onSignal = vi.fn();
+    channel.onSignal(onSignal);
+
+    const lagged = { type: "lagged", dropped: 3 };
+    FakeSocket.last?.onmessage?.({ data: JSON.stringify(lagged) });
+
+    expect(onSignal).toHaveBeenCalledWith(lagged);
+    channel.close();
+  });
+
   it("survives a malformed or unrecognised frame", () => {
     installFakeSocket();
     const channel = createWorkSurfaceChannel({ wsBaseUrl: "ws://gateway" });

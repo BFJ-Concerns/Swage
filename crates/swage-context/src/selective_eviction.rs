@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 use swage_core::{
     ChatMessage, CompletionRequest, Role, render_message_for_model_context,
-    role_label_for_model_context,
+    speaker_label_for_model_context,
 };
 use swage_provider::LlmProvider;
 
@@ -226,7 +226,7 @@ fn build_eviction_prompt(messages: &[ChatMessage]) -> String {
     prompt.push_str("\n\n<conversation_to_prune>\n");
 
     for (i, message) in messages.iter().enumerate() {
-        let role_label = role_label_for_model_context(message.role());
+        let role_label = speaker_label_for_model_context(message);
         let text = render_message_for_model_context(message);
         let _ = writeln!(prompt, "[{i}] ({role_label}): {text}");
     }
@@ -431,7 +431,7 @@ mod tests {
         );
         assert!(prompt.contains("tool_use id=call_search name=web_search"));
         assert!(prompt.contains(r#""query":"rust""#));
-        assert!(prompt.contains("tool_result tool_use_id=call_search is_error=true"));
+        assert!(prompt.contains("(tool): [tool_result tool_use_id=call_search is_error=true"));
         assert!(prompt.contains(r#""search failed""#));
     }
 

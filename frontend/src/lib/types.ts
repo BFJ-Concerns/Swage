@@ -223,7 +223,7 @@ export const KNOWN_SERVER_EVENT_TYPES = [
   "output_schema_failed", "delegation_started", "delegation_completed",
   "workflow_run_started", "workflow_entry_started",
   "workflow_entry_completed", "workflow_run_completed", "error", "cancelled",
-  "shutdown", "skill_activated", "skill_already_active", "skill_deactivated",
+  "lagged", "shutdown", "skill_activated", "skill_already_active", "skill_deactivated",
   "approval_required", "approval_confirmed", "approval_expired",
   "approval_decision_error", "message_queued", "queue_drained", "message_appended",
 ] as const satisfies readonly KnownServerEventType[];
