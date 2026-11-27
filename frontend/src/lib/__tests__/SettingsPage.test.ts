@@ -535,6 +535,35 @@ describe("SettingsPage", () => {
     expect(body.tool_permissions?.bundles).toEqual({ inspect: ["file_read"] });
   });
 
+  it("leaves an unsaved edit elsewhere on the page as it was when Security saves", async () => {
+    const reading: SecuritySettingsResponse = {
+      available_tools: ["shell"], scope: { kind: "install" as const },
+      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: [] },
+      overrides: {}, relaxed: [],
+    };
+    vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);
+    vi.mocked(settingsApi.saveInstallSecuritySettings).mockResolvedValue({
+      ...reading, effective: { ...reading.effective, sandbox_enabled: false }, overrides: { sandbox_enabled: false },
+    });
+    const page = createClassComponent({ component: SettingsPage, target: document.body, props: { tab: "automation" as "automation" | "security" } });
+    await flushUi();
+    try {
+      const depth = document.querySelector<HTMLInputElement>('[aria-label="Maximum delegation depth"]')!;
+      depth.value = "0"; depth.dispatchEvent(new Event("input", { bubbles: true }));
+      await flushUi();
+      page.$set({ tab: "security" }); await flushUi();
+      const unsandboxed = emptySettings();
+      unsandboxed.sandbox.enabled = false;
+      vi.mocked(settingsApi.fetchSettings).mockResolvedValue(unsandboxed);
+      const sandbox = document.querySelector<HTMLSelectElement>('[aria-label="Sandbox for the install"]')!;
+      sandbox.value = "off"; sandbox.dispatchEvent(new Event("change", { bubbles: true }));
+      buttonNamed("Save security settings").click(); await flushUi();
+      page.$set({ tab: "automation" }); await flushUi();
+      expect(document.querySelector<HTMLInputElement>('[aria-label="Maximum delegation depth"]')!.value).toBe("0");
+    } finally { page.$destroy(); }
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+  });
+
   it("edits install security through its own reading and saves picker timeouts and removals", async () => {
     expect(parseRoute("/settings/security").settingsTab).toBe("security");
     const reading: SecuritySettingsResponse = {

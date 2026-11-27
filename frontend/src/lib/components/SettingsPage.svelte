@@ -335,6 +335,24 @@
     }
   }
 
+  // A Security save changes the sandbox and the approval list and nothing
+  // else: take those from the server and leave every other edit as it is,
+  // still unsaved where it was unsaved.
+  async function securitySaved(): Promise<void> {
+    const fresh = await fetchSettings();
+    if (settings) {
+      settings.sandbox = fresh.sandbox;
+      settings.tool_permissions.require_approval = fresh.tool_permissions.require_approval;
+      if (lastPersistedSettingsFingerprint) {
+        const persisted = JSON.parse(lastPersistedSettingsFingerprint) as Pick<SettingsResponse, "sandbox" | "tool_permissions">;
+        persisted.sandbox = fresh.sandbox;
+        persisted.tool_permissions.require_approval = fresh.tool_permissions.require_approval;
+        lastPersistedSettingsFingerprint = JSON.stringify(persisted);
+      }
+    }
+    await onSettingsSaved?.();
+  }
+
   async function restart(): Promise<void> {
     try {
       const response = await restartGateway();
@@ -498,11 +516,7 @@
 
     <div class="settings-content">
       {#if tab === "security"}
-        <SecuritySettingsPanel onSaved={async () => {
-          settings = await fetchSettings();
-          lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
-          await onSettingsSaved?.();
-        }} />
+        <SecuritySettingsPanel onSaved={securitySaved} />
       {:else if tab === "agents"}
         <AgentDefinitionsPanel {topicId} />
       {:else if tab === "commands"}
